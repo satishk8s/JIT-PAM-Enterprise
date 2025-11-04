@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nykaa JIT Access Portal</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+    <!-- Login Page -->
+    <div id="loginPage" class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <h2>JIT Access Portal</h2>
+                <p>Secure Just-In-Time Cloud Access</p>
+            </div>
+            <form id="loginForm" class="login-form">
+                <div class="form-group">
+                    <i class="fas fa-user"></i>
+                    <input type="email" id="email" placeholder="Email Address" required>
+                </div>
+                <div class="form-group">
+                    <i class="fas fa-lock"></i>
+                    <input type="password" id="password" placeholder="Password" required>
+                </div>
+                <button type="submit" class="btn-primary">
+                    <i class="fas fa-sign-in-alt"></i> Sign In
+                </button>
+                <div class="login-links">
+                    <a href="#" onclick="showResetPassword()">Forgot Password?</a>
+                    <a href="#" onclick="showMFAReset()">Reset MFA</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Application -->
+    <div id="mainApp" class="app-container" style="display: none;">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <h1>JIT Access Portal</h1>
+            </div>
+            <div class="header-right">
+                <button class="theme-toggle" onclick="toggleTheme()">
+                    <i class="fas fa-moon"></i>
+                </button>
+                <div class="profile-dropdown">
+                    <button class="profile-btn" onclick="toggleProfileMenu()">
+                        <i class="fas fa-user-circle"></i>
+                        <span id="userName">Satish Korra</span>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div id="profileMenu" class="profile-menu">
+                        <a href="#" onclick="showProfile()"><i class="fas fa-user"></i> My Profile</a>
+                        <a href="#" onclick="showPasswordReset()"><i class="fas fa-key"></i> Reset Password</a>
+                        <a href="#" onclick="showMFAReset()"><i class="fas fa-shield-alt"></i> Reset MFA</a>
+                        <a href="#" onclick="showManager()"><i class="fas fa-users"></i> My Manager</a>
+                        <hr>
+                        <a href="#" onclick="logout()"><i class="fas fa-sign-out-alt"></i> Logout</a>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="app-nav">
+            <button class="nav-btn active" onclick="showPage('dashboard')">
+                <i class="fas fa-tachometer-alt"></i> Dashboard
+            </button>
+            <button class="nav-btn" onclick="showPage('requests')">
+                <i class="fas fa-list"></i> My Requests
+            </button>
+            <button class="nav-btn" onclick="showPage('accounts')">
+                <i class="fas fa-cloud"></i> Cloud Accounts
+            </button>
+            <button class="nav-btn" onclick="showPage('applications')">
+                <i class="fas fa-apps"></i> Applications
+            </button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="app-main">
+            <!-- Dashboard Page -->
+            <div id="dashboardPage" class="page active">
+                <div class="page-header">
+                    <h2><i class="fas fa-tachometer-alt"></i> Dashboard</h2>
+                </div>
+                <div class="dashboard-cards">
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-clock"></i></div>
+                        <div class="card-content">
+                            <h3 id="activeAccessCount">0</h3>
+                            <p>Active Access</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-hourglass-half"></i></div>
+                        <div class="card-content">
+                            <h3 id="pendingRequestsCount">0</h3>
+                            <p>Pending Requests</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-check-circle"></i></div>
+                        <div class="card-content">
+                            <h3 id="approvedRequestsCount">0</h3>
+                            <p>Approved This Month</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="recent-activity">
+                    <h3>Recent Activity</h3>
+                    <div id="recentActivity" class="activity-list">
+                        <!-- Activity items will be loaded here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- My Requests Page -->
+            <div id="requestsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-list"></i> My Requests</h2>
+                    <div>
+                        <button class="btn-secondary" onclick="refreshRequests()" style="margin-right: 1rem;">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                        <button class="btn-primary" onclick="showNewRequestModal()" style="margin-right: 1rem;">
+                            <i class="fas fa-plus"></i> New Request
+                        </button>
+                        <button class="btn-secondary" onclick="showRequestForOthersModal()">
+                            <i class="fas fa-user-plus"></i> Request for Others
+                        </button>
+                    </div>
+                </div>
+                <div class="requests-table">
+                    <table id="requestsTable">
+                        <thead>
+                            <tr>
+                                <th>Request ID</th>
+                                <th>Account</th>
+                                <th>Access Type</th>
+                                <th>Status</th>
+                                <th>Requested</th>
+                                <th>Expires</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="requestsTableBody">
+                            <!-- Requests will be loaded here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Cloud Accounts Page -->
+            <div id="accountsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-cloud"></i> Cloud Accounts</h2>
+                </div>
+                <div class="accounts-grid" id="accountsGrid">
+                    <!-- Account cards will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Applications Page -->
+            <div id="applicationsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-apps"></i> Applications & Services</h2>
+                    <button class="btn-primary" onclick="showNewAppRequestModal()">
+                        <i class="fas fa-plus"></i> New Request
+                    </button>
+                </div>
+                
+                <div class="applications-grid">
+                    <div class="app-category">
+                        <h3><i class="fas fa-cloud"></i> Cloud Platforms</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestCloudAccess('aws')">
+                                <div class="app-logo aws-logo">AWS</div>
+                                <h4>Amazon Web Services</h4>
+                                <p>EC2, S3, Lambda, RDS</p>
+                            </div>
+                            <div class="app-card" onclick="requestCloudAccess('azure')">
+                                <div class="app-logo azure-logo">⊞</div>
+                                <h4>Microsoft Azure</h4>
+                                <p>VMs, Storage, Functions</p>
+                            </div>
+                            <div class="app-card" onclick="requestCloudAccess('gcp')">
+                                <div class="app-logo gcp-logo">G</div>
+                                <h4>Google Cloud</h4>
+                                <p>Compute, Storage, BigQuery</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="app-category">
+                        <h3><i class="fas fa-dharmachakra"></i> Kubernetes</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestK8sAccess('eks')">
+                                <div class="app-logo k8s-logo">⎈</div>
+                                <h4>Amazon EKS</h4>
+                                <p>Kubernetes clusters</p>
+                            </div>
+                            <div class="app-card" onclick="requestK8sAccess('aks')">
+                                <div class="app-logo k8s-logo">⎈</div>
+                                <h4>Azure AKS</h4>
+                                <p>Kubernetes clusters</p>
+                            </div>
+                            <div class="app-card" onclick="requestK8sAccess('gke')">
+                                <div class="app-logo k8s-logo">⎈</div>
+                                <h4>Google GKE</h4>
+                                <p>Kubernetes clusters</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="app-category">
+                        <h3><i class="fas fa-database"></i> Databases</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestDbAccess('mysql')">
+                                <div class="app-logo db-logo">🐬</div>
+                                <h4>MySQL</h4>
+                                <p>Relational database</p>
+                            </div>
+                            <div class="app-card" onclick="requestDbAccess('postgres')">
+                                <div class="app-logo db-logo">🐘</div>
+                                <h4>PostgreSQL</h4>
+                                <p>Advanced SQL database</p>
+                            </div>
+                            <div class="app-card" onclick="requestDbAccess('mongodb')">
+                                <div class="app-logo db-logo">🍃</div>
+                                <h4>MongoDB</h4>
+                                <p>NoSQL database</p>
+                            </div>
+                            <div class="app-card" onclick="requestDbAccess('rds')">
+                                <div class="app-logo db-logo">📊</div>
+                                <h4>Amazon RDS</h4>
+                                <p>Managed relational database</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="app-category">
+                        <h3><i class="fas fa-cogs"></i> Applications</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestAppAccess('jenkins')">
+                                <div class="app-logo app-logo-jenkins">J</div>
+                                <h4>Jenkins</h4>
+                                <p>CI/CD Pipeline</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('grafana')">
+                                <div class="app-logo app-logo-grafana">📊</div>
+                                <h4>Grafana</h4>
+                                <p>Monitoring Dashboard</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('sonar')">
+                                <div class="app-logo app-logo-sonar">S</div>
+                                <h4>SonarQube</h4>
+                                <p>Code Quality</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="app-category">
+                        <h3><i class="fas fa-ticket-alt"></i> Ticketing Systems</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestAppAccess('jira')">
+                                <div class="app-logo app-logo-jira">J</div>
+                                <h4>JIRA</h4>
+                                <p>Issue & Project Tracking</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('splunk')">
+                                <div class="app-logo app-logo-splunk">S</div>
+                                <h4>Splunk</h4>
+                                <p>Log Analysis & SIEM</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('servicenow')">
+                                <div class="app-logo app-logo-servicenow">SN</div>
+                                <h4>ServiceNow</h4>
+                                <p>IT Service Management</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Admin Panel Page -->
+            <div id="adminPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
+                    <div class="admin-nav">
+                        <button class="admin-tab-btn active" onclick="showAdminTab('dashboard')">
+                            <i class="fas fa-chart-bar"></i> Dashboard
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('users')">
+                            <i class="fas fa-users"></i> Users
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('integrations')">
+                            <i class="fas fa-plug"></i> Integrations
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('audit')">
+                            <i class="fas fa-clipboard-list"></i> Audit
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Admin Dashboard Tab -->
+                <div id="adminDashboardTab" class="admin-tab active">
+                    <div class="admin-dashboard">
+                        <div class="admin-cards">
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-plus"></i></div>
+                                <div class="card-content">
+                                    <h3 id="newUsersCount">0</h3>
+                                    <p>New Users (30 days)</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-check"></i></div>
+                                <div class="card-content">
+                                    <h3 id="repeatedUsersCount">0</h3>
+                                    <p>Repeated Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-shield"></i></div>
+                                <div class="card-content">
+                                    <h3 id="exceptionalUsersCount">0</h3>
+                                    <p>Exceptional Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-exclamation-triangle"></i></div>
+                                <div class="card-content">
+                                    <h3 id="pendingApprovalsCount">0</h3>
+                                    <p>Pending Approvals</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="charts-container">
+                            <div class="chart-card">
+                                <h3>User Activity Trends</h3>
+                                <canvas id="userActivityChart" width="400" height="200"></canvas>
+                            </div>
+                            <div class="chart-card">
+                                <h3>Request Types Distribution</h3>
+                                <canvas id="requestTypesChart" width="400" height="200"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="admin-actions">
+                            <h3>Quick Actions</h3>
+                            <div class="action-buttons">
+                                <button class="btn-secondary" onclick="exportAuditLog()">
+                                    <i class="fas fa-download"></i> Export Audit Log
+                                </button>
+                                <button class="btn-warning" onclick="cleanupOldRequests()">
+                                    <i class="fas fa-broom"></i> Cleanup Old Requests
+                                </button>
+                                <button class="btn-danger" onclick="revokeAllExpired()">
+                                    <i class="fas fa-times-circle"></i> Revoke All Expired
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Admin Users Tab -->
+                <div id="adminUsersTab" class="admin-tab">
+                    <div class="users-management">
+                        <div class="users-header">
+                            <h3>User Management</h3>
+                            <div class="user-actions">
+                                <button class="btn-primary" onclick="showManualOnboardModal()">
+                                    <i class="fas fa-user-plus"></i> Manual Onboard
+                                </button>
+                                <button class="btn-secondary" onclick="syncUsers()">
+                                    <i class="fas fa-sync"></i> Sync Users
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="users-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>User</th>
+                                        <th>Source</th>
+                                        <th>Status</th>
+                                        <th>MFA</th>
+                                        <th>Last Login</th>
+                                        <th>Requests</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersTableBody">
+                                    <!-- Users will be loaded here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Admin Integrations Tab -->
+                <div id="adminIntegrationsTab" class="admin-tab">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo google-logo">G</div>
+                                <h3>Google Workspace</h3>
+                            </div>
+                            <p>Sync users and groups from Google Workspace</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('google')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo okta-logo">O</div>
+                                <h3>Okta</h3>
+                            </div>
+                            <p>Identity and access management</p>
+                            <div class="integration-status disconnected">
+                                <i class="fas fa-times-circle"></i> Not Connected
+                            </div>
+                            <button class="btn-primary" onclick="configureIntegration('okta')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo ad-logo">AD</div>
+                                <h3>Active Directory</h3>
+                            </div>
+                            <p>On-premises directory service</p>
+                            <div class="integration-status disconnected">
+                                <i class="fas fa-times-circle"></i> Not Connected
+                            </div>
+                            <button class="btn-primary" onclick="configureIntegration('ad')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo azure-ad-logo">AAD</div>
+                                <h3>Azure AD</h3>
+                            </div>
+                            <p>Microsoft cloud directory service</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('azuread')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo siem-logo">🛡️</div>
+                                <h3>SIEM Integration</h3>
+                            </div>
+                            <p>Security Information and Event Management</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('siem')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Admin Audit Tab -->
+                <div id="adminAuditTab" class="admin-tab">
+                    <div class="audit-logs">
+                        <div class="audit-header">
+                            <h3>Audit Logs</h3>
+                            <div class="audit-filters">
+                                <select id="auditFilter">
+                                    <option value="all">All Events</option>
+                                    <option value="login">Login Events</option>
+                                    <option value="request">Access Requests</option>
+                                    <option value="approval">Approvals</option>
+                                    <option value="revoke">Revocations</option>
+                                </select>
+                                <input type="date" id="auditDateFrom" placeholder="From Date">
+                                <input type="date" id="auditDateTo" placeholder="To Date">
+                                <button class="btn-secondary" onclick="filterAuditLogs()">
+                                    <i class="fas fa-filter"></i> Filter
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="audit-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>User</th>
+                                        <th>Event</th>
+                                        <th>Resource</th>
+                                        <th>IP Address</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="auditLogsTableBody">
+                                    <!-- Audit logs will be loaded here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="modalOverlay" class="modal-overlay">
+        <!-- New Request Modal -->
+        <div id="newRequestModal" class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-plus"></i> New Access Request</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="newRequestForm">
+                    <div class="form-group">
+                        <label>Account</label>
+                        <select id="requestAccount" required>
+                            <option value="">Select Account</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Access Type</label>
+                        <div class="access-type-tabs">
+                            <button type="button" class="tab-btn active" onclick="switchAccessType('existing')">Existing Permissions</button>
+                            <button type="button" class="tab-btn" onclick="switchAccessType('ai')">AI Co-pilot</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Existing Permissions Tab -->
+                    <div id="existingPermissionsTab" class="tab-content active">
+                        <div class="form-group">
+                            <label>Permission Set</label>
+                            <select id="requestPermissionSet">
+                                <option value="">Select Permission Set</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- AI Co-pilot Tab -->
+                    <div id="aiCopilotTab" class="tab-content">
+                        <div class="form-group">
+                            <label>Describe your AWS access requirement</label>
+                            <textarea id="aiUseCase" placeholder="e.g., I need to check EC2 instances, access S3 logs, or monitor RDS performance" rows="3"></textarea>
+                            <div class="ai-warning">
+                                <small>⚠️ AI is only for AWS permission generation. Other questions will be denied.</small>
+                            </div>
+                            <button type="button" class="btn-secondary" onclick="generateAIPermissions()">
+                                <i class="fas fa-robot"></i> Generate AWS Permissions
+                            </button>
+                        </div>
+                        <div id="aiPermissionsPreview" class="permissions-preview" style="display: none;">
+                            <h4>Generated Permissions</h4>
+                            <div id="aiPermissionsContent"></div>
+                        </div>
+                        
+                        <!-- AWS Services Selection -->
+                        <div class="aws-services-section">
+                            <div class="form-group">
+                                <label>Select AWS Services (Required)</label>
+                                <div class="services-dropdown">
+                                    <select id="awsServices" multiple size="4">
+                                        <option value="ec2">EC2 - Elastic Compute Cloud</option>
+                                        <option value="s3">S3 - Simple Storage Service</option>
+                                        <option value="secretsmanager">Secrets Manager</option>
+                                        <option value="lambda">Lambda Functions</option>
+                                        <option value="rds">RDS - Relational Database</option>
+                                        <option value="cloudwatch">CloudWatch Logs</option>
+                                    </select>
+                                    <small>Hold Ctrl/Cmd to select multiple services</small>
+                                </div>
+                            </div>
+                            
+                            <!-- Service-specific configurations -->
+                            <div id="serviceConfigs" class="service-configs">
+                                <!-- Configurations will appear here based on selected services -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Duration</label>
+                        <div class="duration-options">
+                            <select id="requestDuration">
+                                <option value="4">4 hours</option>
+                                <option value="8" selected>8 hours</option>
+                                <option value="24">24 hours</option>
+                                <option value="72">3 days</option>
+                                <option value="120">5 days (max)</option>
+                                <option value="custom">Custom dates...</option>
+                            </select>
+
+                        </div>
+                    </div>
+                    
+                    <!-- Custom Date Range Inline -->
+                    <div id="dateRangeModal" style="display: none; margin-top: 1rem; padding: 1rem; background: var(--bg-secondary); border-radius: 6px;">
+                        <h4 style="margin-bottom: 1rem;">Custom Date Range</h4>
+                        <div class="form-group">
+                            <label>Start Date & Time</label>
+                            <input type="datetime-local" id="startDateTime">
+                        </div>
+                        <div class="form-group">
+                            <label>End Date & Time</label>
+                            <input type="datetime-local" id="endDateTime">
+                        </div>
+                        <div style="display: flex; gap: 1rem; margin-top: 1rem;">
+                            <button type="button" class="btn-secondary" onclick="closeDateModal()">Cancel</button>
+                            <button type="button" class="btn-primary" onclick="applyCustomDates()">Apply</button>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Business Justification</label>
+                        <textarea id="requestJustification" placeholder="Explain why you need this access" rows="3" required></textarea>
+                    </div>
+                    
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn-primary">Submit Request</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Profile Modal -->
+        <div id="profileModal" class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-user"></i> My Profile</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="profile-info">
+                    <div class="profile-avatar">
+                        <i class="fas fa-user-circle"></i>
+                    </div>
+                    <div class="profile-details">
+                        <h4>Satish Korra</h4>
+                        <p>Satish.Korra@nykaa.com</p>
+                        <p>Senior DevOps Engineer</p>
+                    </div>
+                </div>
+                <div class="theme-settings">
+                    <h4>Theme Settings</h4>
+                    <div class="theme-options">
+                        <button class="theme-option active" onclick="setTheme('light')">
+                            <i class="fas fa-sun"></i> Light
+                        </button>
+                        <button class="theme-option" onclick="setTheme('dark')">
+                            <i class="fas fa-moon"></i> Dark
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Request for Others Modal -->
+    <div id="requestForOthersModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-user-plus"></i> Request Access for Others</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="requestForOthersForm">
+                <div class="form-group">
+                    <label>Requester Email <span class="required">*</span></label>
+                    <input type="email" id="requesterEmail" required placeholder="user@nykaa.com">
+                </div>
+                <div class="form-group">
+                    <label>Account <span class="required">*</span></label>
+                    <select id="otherRequestAccount" required>
+                        <option value="">Select Account</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Duration <span class="required">*</span></label>
+                    <select id="otherRequestDuration" required>
+                        <option value="1">1 Hour</option>
+                        <option value="4">4 Hours</option>
+                        <option value="8" selected>8 Hours</option>
+                        <option value="24">1 Day</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Business Justification <span class="required">*</span></label>
+                    <textarea id="otherRequestJustification" required rows="3" placeholder="Explain why this access is needed..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Submit Request</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Manual Onboard Modal -->
+    <div id="manualOnboardModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-user-plus"></i> Manual User Onboarding</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="manualOnboardForm">
+                <div class="form-group">
+                    <label>Email Address <span class="required">*</span></label>
+                    <input type="email" id="onboardEmail" required placeholder="user@nykaa.com">
+                </div>
+                <div class="form-group">
+                    <label>Full Name <span class="required">*</span></label>
+                    <input type="text" id="onboardName" required placeholder="John Doe">
+                </div>
+                <div class="form-group">
+                    <label>Department</label>
+                    <select id="onboardDepartment">
+                        <option value="">Select Department</option>
+                        <option value="engineering">Engineering</option>
+                        <option value="devops">DevOps</option>
+                        <option value="security">Security</option>
+                        <option value="qa">Quality Assurance</option>
+                        <option value="product">Product</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Temporary Password <span class="required">*</span></label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="password" id="onboardPassword" required style="flex: 1;">
+                        <button type="button" class="btn-secondary" onclick="generateTempPassword()">Generate</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="enableMFA" checked>
+                        Enable MFA (Recommended)
+                    </label>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Onboard User</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Application Request Modal -->
+    <div id="appRequestModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-apps"></i> Application Access Request</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="appRequestForm">
+                <div class="form-group">
+                    <label>Application Type <span class="required">*</span></label>
+                    <select id="appType" required>
+                        <option value="">Select Application Type</option>
+                        <option value="cloud">Cloud Platform</option>
+                        <option value="kubernetes">Kubernetes</option>
+                        <option value="database">Database</option>
+                        <option value="application">Application</option>
+                        <option value="ticketing">Ticketing System</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Specific Application <span class="required">*</span></label>
+                    <select id="specificApp" required>
+                        <option value="">Select Application</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Access Level <span class="required">*</span></label>
+                    <select id="appAccessLevel" required>
+                        <option value="read">Read Only</option>
+                        <option value="write">Read/Write</option>
+                        <option value="admin">Admin (Requires Approval)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Duration <span class="required">*</span></label>
+                    <select id="appRequestDuration" required>
+                        <option value="1">1 Hour</option>
+                        <option value="4">4 Hours</option>
+                        <option value="8" selected>8 Hours</option>
+                        <option value="24">1 Day</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Business Justification <span class="required">*</span></label>
+                    <textarea id="appRequestJustification" required rows="3" placeholder="Explain why this access is needed..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Submit Request</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="app.js"></script>
+    <script>
+        // Auto logout after 30 minutes of inactivity
+        let inactivityTimer;
+        const INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+        
+        function resetInactivityTimer() {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => {
+                alert('Session expired due to inactivity. You will be logged out.');
+                logout();
+            }, INACTIVITY_TIMEOUT);
+        }
+        
+        // Track user activity
+        document.addEventListener('mousedown', resetInactivityTimer);
+        document.addEventListener('mousemove', resetInactivityTimer);
+        document.addEventListener('keypress', resetInactivityTimer);
+        document.addEventListener('scroll', resetInactivityTimer);
+        document.addEventListener('touchstart', resetInactivityTimer);
+        
+        // Start timer on page load
+        resetInactivityTimer();
+    </script>
+</body>
+</html>

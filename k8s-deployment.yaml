@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jit-access-system
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jit-access-system
+  template:
+    metadata:
+      labels:
+        app: jit-access-system
+    spec:
+      serviceAccountName: jit-access-sa
+      containers:
+      - name: jit-access
+        image: YOUR_ACCOUNT.dkr.ecr.ap-south-1.amazonaws.com/jit-access:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: AWS_DEFAULT_REGION
+          value: "ap-south-1"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jit-access-service
+spec:
+  selector:
+    app: jit-access-system
+  ports:
+  - port: 80
+    targetPort: 5000
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jit-access-sa
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::YOUR_ACCOUNT:role/jit-access-eks-role
