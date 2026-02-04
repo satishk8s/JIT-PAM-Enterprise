@@ -7,11 +7,25 @@ import uuid
 import os
 from dotenv import load_dotenv
 import re
+import threading
+import time
+from strict_policies import StrictPolicies
+from ai_validator import AIValidator
+from user_sync_engine import UserSyncEngine
+from enforcement_engine import EnforcementEngine
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+def load_org_policies():
+    """Load organizational policies from config file"""
+    try:
+        with open('org_policies.json', 'r') as f:
+            return json.load(f)
+    except:
+        return {}  # Fallback to empty policies
 
 # Configuration - will be populated from AWS
 CONFIG = {
@@ -33,6 +47,11 @@ def initialize_aws_config():
         
         account_id = identity['Account']
         print(f"Current account: {account_id}")
+        
+        # Use current account as POC account
+        CONFIG['accounts'] = {
+            account_id: {'id': account_id, 'name': f'POC-Account-{account_id}', 'environment': 'nonprod'}
+        }
         
         # Get permission sets
         try:
@@ -101,21 +120,85 @@ def initialize_aws_config():
                 }
         except Exception as e:
             print(f"Organizations error: {e}")
-            CONFIG['accounts'] = {account_id: {'id': account_id, 'name': f'Account-{account_id}'}}
+            # Already set current account above
         
         print(f"Final config - Accounts: {len(CONFIG['accounts'])}, Permission Sets: {len(CONFIG['permission_sets'])}")
         
     except Exception as e:
         print(f"Critical error: {e}")
-        CONFIG['accounts'] = {'332463837037': {'id': '332463837037', 'name': 'Nykaa-fashion'}}
+        # Fallback: Use current account from credentials
+        try:
+            sts = boto3.client('sts')
+            current_account = sts.get_caller_identity()['Account']
+            CONFIG['accounts'] = {current_account: {'id': current_account, 'name': f'Account-{current_account}', 'environment': 'nonprod'}}
+        except:
+            CONFIG['accounts'] = {}
         CONFIG['permission_sets'] = [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}]
 
 # In-memory storage
 requests_db = {}
 approvals_db = {}
 
-def generate_ai_permissions(use_case_description):
+def build_resource_arns(selected_resources, account_id, services):
+    """Dynamically build resource ARNs from selected resources"""
+    print(f"\n=== build_resource_arns called ===")
+    print(f"selected_resources: {selected_resources}")
+    print(f"account_id: {account_id}")
+    print(f"services: {services}")
+    
+    if not selected_resources or not services:
+        print(f"⚠️ Returning wildcard - selected_resources empty: {not selected_resources}, services empty: {not services}")
+        return ['*']
+    
+    arns = []
+    region = 'ap-south-1'
+    
+    for service in services:
+        resources = selected_resources.get(service, [])
+        if not resources:
+            continue
+        
+        for resource in resources:
+            resource_id = resource.get('id', '')
+            
+            if service == 's3':
+                arns.append(f"arn:aws:s3:::{resource_id}")
+                arns.append(f"arn:aws:s3:::{resource_id}/*")
+            elif service == 'ec2':
+                arns.append(f"arn:aws:ec2:{region}:{account_id}:instance/{resource_id}")
+            elif service == 'lambda':
+                arns.append(f"arn:aws:lambda:{region}:{account_id}:function:{resource_id}")
+            elif service == 'rds':
+                arns.append(f"arn:aws:rds:{region}:{account_id}:db:{resource_id}")
+            elif service == 'dynamodb':
+                arns.append(f"arn:aws:dynamodb:{region}:{account_id}:table/{resource_id}")
+            elif service == 'secretsmanager':
+                arns.append(resource_id)  # Already full ARN
+            elif service == 'logs':
+                arns.append(f"arn:aws:logs:{region}:{account_id}:log-group:{resource_id}:*")
+            elif service == 'sns':
+                arns.append(resource_id)  # Already full ARN
+            elif service == 'sqs':
+                arns.append(resource_id)  # Already full ARN
+            elif service == 'elasticloadbalancing':
+                arns.append(resource_id)  # Already full ARN
+            elif service == 'kms':
+                arns.append(f"arn:aws:kms:{region}:{account_id}:key/{resource_id}")
+            else:
+                print(f"⚠️ Unknown service: {service}, using wildcard")
+                arns.append('*')  # Fallback for unknown services
+    
+    final_arns = arns if arns else ['*']
+    print(f"✅ Final ARNs: {final_arns}")
+    print(f"=== build_resource_arns done ===\n")
+    return final_arns
+
+def generate_ai_permissions(use_case_description, account_env='nonprod'):
     """Generate AWS permissions using Bedrock AI or fallback to rules"""
+    # CRITICAL: Always load fresh config (admin may have changed toggles)
+    policy_config = StrictPolicies.get_config()
+    print(f"🔄 [generate_ai_permissions] Fresh config: delete_nonprod={policy_config.get('allow_delete_nonprod')}, delete_prod={policy_config.get('allow_delete_prod')}")
+    
     # Check for non-AWS requests first
     non_aws_keywords = ['azure', 'gcp', 'google cloud', 'kubernetes', 'k8s', 'database', 'mysql', 'postgres', 'mongodb', 'jenkins', 'grafana', 'sonar', 'jira', 'splunk', 'servicenow']
     use_case_lower = use_case_description.lower()
@@ -126,31 +209,39 @@ def generate_ai_permissions(use_case_description):
             'error': f'❌ AI Access Denied\n\nThis system currently only supports AWS access requests.\n\nDetected: {", ".join(found_non_aws)}\n\nFor non-AWS access, please use the Applications page or contact your system administrator.'
         }
     
-    # Check for restricted keywords
-    restricted_keywords = ['admin', 'administrator', 'full access', 'all permissions', '*', 'delete', 'create', 'terminate', 'launch', 'run instances']
+    print(f"Generating permissions for {account_env} environment")
     
-    found_restricted = [keyword for keyword in restricted_keywords if keyword in use_case_lower]
-    if found_restricted:
-        return {
-            'error': f'❌ Restricted permissions detected: {", ".join(found_restricted)}\n\nYou are not authorized for admin/delete/create permissions.\nPlease ask for read/list and limited write permissions only.\n\nFor resource creation/deletion, connect with DevOps team with proper JIRA ticket and approvals.'
-        }
+    # Check for delete intent first
+    delete_intent_keywords = ['delete', 'remove', 'cleanup', 'clean', 'housekeep', 'terminate', 'destroy', 'purge', 'clear', 'wipe', 'erase', 'drop', 'kill', "don't need", "dont need", "no longer need", "not needed", "no more required", "not required", "get rid of", "dispose", "lets remove", "let's remove", "exclude", "consuming bill", "costing money", "wasting money", "unnecessary cost"]
+    has_delete_intent = any(keyword in use_case_lower for keyword in delete_intent_keywords)
+    
+    # Check for create actions ONLY if NOT a delete request
+    if not has_delete_intent:
+        create_keywords = ['create', 'launch', 'run instances']
+        has_create = any(keyword in use_case_lower for keyword in create_keywords)
+        if has_create:
+            if account_env == 'prod' and not policy_config.get('allow_create_prod', False):
+                return {'error': '❌ Create actions are disabled in production. Contact DevOps team.'}
+            if account_env != 'prod' and not policy_config.get('allow_create_nonprod', False):
+                return {'error': '❌ Create actions are disabled. Contact DevOps team.'}
+    
+    # Check for admin actions
+    admin_keywords = ['admin', 'administrator', 'full access', 'all permissions', '*']
+    has_admin = any(keyword in use_case_lower for keyword in admin_keywords)
+    if has_admin:
+        if account_env == 'prod' and not policy_config.get('allow_admin_prod', False):
+            return {'error': '❌ Admin actions are disabled in production. Contact CISO.'}
+        if account_env == 'sandbox' and not policy_config.get('allow_admin_sandbox', True):
+            return {'error': '❌ Admin actions are disabled in sandbox.'}
+        if account_env not in ['prod', 'sandbox'] and not policy_config.get('allow_admin_nonprod', False):
+            return {'error': '❌ Admin actions are disabled. Contact security team.'}
     
     # Try AI first
     try:
-        # Assume role in Bedrock account
-        sts = boto3.client('sts')
-        assumed_role = sts.assume_role(
-            RoleArn='arn:aws:iam::867625663987:role/BedrockCrossAccountRole',
-            RoleSessionName='JITAccessBedrock',
-            ExternalId='JITAccessBedrock'
-        )
-        
+        # Use direct credentials (no role assumption)
         bedrock = boto3.client(
             'bedrock-runtime',
-            region_name='ap-south-1',
-            aws_access_key_id=assumed_role['Credentials']['AccessKeyId'],
-            aws_secret_access_key=assumed_role['Credentials']['SecretAccessKey'],
-            aws_session_token=assumed_role['Credentials']['SessionToken']
+            region_name='ap-south-1'
         )
         
         prompt = f"""Convert this AWS use case to specific AWS IAM actions and resources:
@@ -189,10 +280,26 @@ Return ONLY a JSON object with this exact format:
         if json_match:
             ai_permissions = json.loads(json_match.group())
             
+            # CRITICAL: Check delete actions against toggle settings FIRST
+            delete_actions = [action for action in ai_permissions.get('actions', []) if any(word in action.lower() for word in ['delete', 'terminate', 'remove'])]
+            if delete_actions:
+                # Check if delete is allowed based on environment
+                if account_env == 'prod':
+                    delete_allowed = policy_config.get('allow_delete_prod', False)
+                else:
+                    delete_allowed = policy_config.get('allow_delete_nonprod', False)
+                
+                print(f"🗑️ AI generated delete actions: {delete_actions}")
+                print(f"🔍 Delete allowed ({account_env}): {delete_allowed}")
+                
+                if not delete_allowed:
+                    env_label = 'production' if account_env == 'prod' else 'non-production'
+                    return {'error': f'❌ Delete/Cleanup actions are disabled in {env_label} environments. Contact security team.'}
+            
             # Double-check AI response for restricted actions
             restricted_actions = []
             for action in ai_permissions.get('actions', []):
-                if any(word in action.lower() for word in ['*', 'admin', 'delete', 'create', 'terminate', 'launch']):
+                if any(word in action.lower() for word in ['*', 'admin', 'create', 'launch']):
                     restricted_actions.append(action)
             
             if restricted_actions:
@@ -212,17 +319,27 @@ Return ONLY a JSON object with this exact format:
             return ai_permissions
         
     except Exception as e:
-        print(f"AI generation failed, using fallback: {e}")
+        print(f"❌ Bedrock AI failed: {e}")
+        print(f"🔄 Falling back to keyword parser")
     
     # Fallback to rule-based generation
-    return generate_fallback_permissions(use_case_description)
+    result = generate_fallback_permissions(use_case_description, account_env)
+    result['fallback'] = True
+    return result
 
-def generate_fallback_permissions(use_case):
+def generate_fallback_permissions(use_case, account_env='nonprod'):
     """Rule-based permission generation with security restrictions"""
     use_case_lower = use_case.lower()
     actions = []
     resources = ['*']
     description = "AWS rule-based permissions for: " + use_case
+    
+    print(f"🔑 KEYWORD PARSER: Processing use case: {use_case_lower}")
+    
+    # Check for explicit cancellation only
+    cancel_keywords = ['cancel this', 'nevermind', 'never mind', 'forget it', 'abort']
+    if any(kw in use_case_lower for kw in cancel_keywords):
+        return {'error': '❌ Request cancelled. No permissions generated.'}
     
     # Check for non-AWS requests first
     non_aws_keywords = ['azure', 'gcp', 'google cloud', 'kubernetes', 'k8s', 'database', 'mysql', 'postgres', 'mongodb', 'jenkins', 'grafana', 'sonar', 'jira', 'splunk', 'servicenow']
@@ -232,79 +349,123 @@ def generate_fallback_permissions(use_case):
             'error': f'❌ AI Access Denied\n\nThis system currently only supports AWS access requests.\n\nDetected: {", ".join(found_non_aws)}\n\nFor non-AWS access, please use the Applications page or contact your system administrator.'
         }
     
-    # Check for restricted actions
-    restricted_keywords = ['delete', 'create', 'admin', 'administrator', 'terminate', 'run instances', 'launch', 'full access', '*']
-    found_restricted = [kw for kw in restricted_keywords if kw in use_case_lower]
-    if found_restricted:
-        return {
-            'error': f'❌ Restricted permissions detected: {", ".join(found_restricted)}\n\nYou are not authorized for admin/delete/create permissions.\nPlease ask for read/list and limited write permissions only.\n\nFor resource creation/deletion, connect with DevOps team with proper JIRA ticket and approvals.'
-        }
+    # Get policy settings
+    policy_config = StrictPolicies.get_config()
     
-    # EC2 permissions
-    if any(word in use_case_lower for word in ['ec2', 'instance', 'server', 'vm', 'connect']):
-        actions.extend([
-            'ec2:DescribeInstances',
-            'ec2:DescribeInstanceStatus',
-            'ssm:StartSession',
-            'ssm:DescribeInstanceInformation',
-            'ssm:SendCommand',
-            'ssm:GetCommandInvocation'
-        ])
-        description += ' | Please specify EC2 instance tags in the service configuration below'
+    # Detect if user wants delete/cleanup actions - check FIRST before service detection
+    delete_intent_keywords = ['delete', 'remove', 'cleanup', 'clean', 'housekeep', 'terminate', 'destroy', 'purge', 'clear', 'wipe', 'erase', 'drop', 'kill', "don't need", "dont need", "doesn't need", "doesnt need", "no longer need", "not needed", "no more required", "not required", "get rid of", "dispose", "lets remove", "let's remove", "exclude", "consuming bill", "costing money", "wasting money", "unnecessary cost"]
+    has_delete_intent = any(kw in use_case_lower for kw in delete_intent_keywords)
+    print(f"🗑️ Delete intent detected: {has_delete_intent}")
     
-    # S3 permissions
-    if any(word in use_case_lower for word in ['s3', 'bucket', 'download', 'upload', 'file']):
-        actions.extend([
-            's3:ListBucket',
-            's3:GetObject',
-            's3:GetObjectVersion'
-        ])
-        if any(word in use_case_lower for word in ['upload', 'write', 'put']):
-            actions.extend(['s3:PutObject'])  # Removed DeleteObject
+    # Check if delete is allowed based on environment
+    if account_env == 'prod':
+        delete_allowed = policy_config.get('allow_delete_prod', False)
+    else:
+        delete_allowed = policy_config.get('allow_delete_nonprod', True)  # Default to True for non-prod
     
-    # RDS permissions (read-only)
-    if any(word in use_case_lower for word in ['rds', 'database', 'db']):
-        actions.extend([
-            'rds:DescribeDBInstances',
-            'rds:DescribeDBClusters'
-        ])
+    print(f"🔍 Use case: {use_case_lower}")
+    print(f"🔍 Account environment: {account_env}")
+    print(f"🔍 Policy config: {policy_config}")
+    print(f"🗑️ Delete intent: {has_delete_intent}, Delete allowed ({account_env}): {delete_allowed}")
     
-    # Lambda permissions (read-only + invoke)
-    if any(word in use_case_lower for word in ['lambda', 'function']):
-        actions.extend([
-            'lambda:ListFunctions',
-            'lambda:GetFunction',
-            'lambda:InvokeFunction'
-        ])
+    # BLOCK REQUEST if delete intent detected but not allowed
+    if has_delete_intent and not delete_allowed:
+        env_label = 'production' if account_env == 'prod' else 'non-production'
+        return {'error': f'❌ Delete/Cleanup actions are disabled in {env_label} environments. Contact security team.'}
     
-    # CloudWatch logs
-    if any(word in use_case_lower for word in ['logs', 'cloudwatch', 'monitoring']):
-        actions.extend([
-            'logs:DescribeLogGroups',
-            'logs:DescribeLogStreams',
-            'logs:GetLogEvents'
-        ])
+    # Check create actions ONLY if NOT a delete request
+    if not has_delete_intent:
+        create_keywords = ['create', 'run instances', 'launch', 'provision', 'spin up']
+        has_create = any(kw in use_case_lower for kw in create_keywords)
+        if has_create:
+            if account_env == 'prod' and not policy_config.get('allow_create_prod', False):
+                return {'error': '❌ Create actions are disabled in production. Contact DevOps team.'}
+            if account_env != 'prod' and not policy_config.get('allow_create_nonprod', False):
+                return {'error': '❌ Create actions are disabled. Contact DevOps team.'}
     
-    # Secrets Manager - requires specific secret names
-    if any(word in use_case_lower for word in ['secret', 'secrets manager', 'password']):
-        # Check if specific secret name is mentioned
-        if not any(word in use_case for word in ['secret:', 'secret-', 'secret_', 'secret/']):
-            return {
-                'error': f'❌ Secrets Manager access requires specific secret names.\n\nYou cannot use wildcard (*) for secrets access.\nPlease specify the exact secret name in your request.\n\nExample: "I need to read secret MyApp-Database-Password"'
-            }
+    # Check admin actions
+    admin_keywords = ['admin', 'administrator', 'full access', 'all permissions']
+    has_admin = any(kw in use_case_lower for kw in admin_keywords)
+    if has_admin:
+        if account_env == 'prod' and not policy_config.get('allow_admin_prod', False):
+            return {'error': '❌ Admin actions are disabled in production. Contact CISO.'}
+        if account_env == 'sandbox' and not policy_config.get('allow_admin_sandbox', True):
+            return {'error': '❌ Admin actions are disabled in sandbox.'}
+        if account_env not in ['prod', 'sandbox'] and not policy_config.get('allow_admin_nonprod', False):
+            return {'error': '❌ Admin actions are disabled. Contact security team.'}
+    
+    # Dynamic AWS service detection with common patterns
+    aws_services = {
+        'ec2': {'keywords': ['ec2', 'instance', 'server', 'vm'], 'read': ['ec2:Describe*', 'ssm:StartSession', 'ssm:DescribeInstanceInformation'], 'write': ['ec2:ModifyInstanceAttribute', 'ec2:AssociateIamInstanceProfile', 'ec2:ReplaceIamInstanceProfileAssociation', 'ec2:StartInstances', 'ec2:StopInstances', 'ec2:RebootInstances', 'iam:PassRole'], 'delete': ['ec2:TerminateInstances']},
+        's3': {'keywords': ['s3', 'bucket'], 'read': ['s3:ListBucket', 's3:GetObject', 's3:GetObjectVersion'], 'write': ['s3:PutObject'], 'delete': ['s3:DeleteObject', 's3:DeleteObjectVersion']},
+        'lambda': {'keywords': ['lambda', 'function'], 'read': ['lambda:List*', 'lambda:Get*', 'lambda:InvokeFunction'], 'delete': ['lambda:DeleteFunction']},
+        'dynamodb': {'keywords': ['dynamodb', 'dynamo', 'table'], 'read': ['dynamodb:List*', 'dynamodb:Describe*', 'dynamodb:Scan', 'dynamodb:Query'], 'delete': ['dynamodb:DeleteItem', 'dynamodb:DeleteTable']},
+        'rds': {'keywords': ['rds', 'database', 'db'], 'read': ['rds:Describe*'], 'delete': ['rds:DeleteDBInstance']},
+        'cloudwatch': {'keywords': ['logs', 'cloudwatch', 'monitoring'], 'read': ['logs:Describe*', 'logs:Get*'], 'delete': ['logs:DeleteLogGroup']},
+        'elb': {'keywords': ['load balancer', 'loadbalancer', 'elb', 'alb', 'nlb', 'elasticloadbalancing'], 'read': ['elasticloadbalancing:Describe*'], 'write': ['elasticloadbalancing:RegisterTargets', 'elasticloadbalancing:DeregisterTargets', 'elasticloadbalancing:ModifyLoadBalancerAttributes', 'elasticloadbalancing:ModifyTargetGroup'], 'delete': ['elasticloadbalancing:DeleteLoadBalancer', 'elasticloadbalancing:DeleteTargetGroup']},
+        'kms': {'keywords': ['kms', 'key', 'encryption'], 'read': ['kms:List*', 'kms:Describe*'], 'delete': []},
+        'sns': {'keywords': ['sns', 'topic', 'notification'], 'read': ['sns:List*', 'sns:Get*'], 'delete': ['sns:DeleteTopic']},
+        'sqs': {'keywords': ['sqs', 'queue'], 'read': ['sqs:List*', 'sqs:Get*'], 'delete': ['sqs:DeleteQueue']},
+        'ecs': {'keywords': ['ecs', 'container', 'task'], 'read': ['ecs:List*', 'ecs:Describe*'], 'delete': ['ecs:DeleteService', 'ecs:DeleteCluster']},
+        'eks': {'keywords': ['eks', 'kubernetes', 'k8s'], 'read': ['eks:List*', 'eks:Describe*'], 'delete': ['eks:DeleteCluster']},
+        'elasticache': {'keywords': ['elasticache', 'redis', 'memcached'], 'read': ['elasticache:Describe*'], 'delete': ['elasticache:DeleteCacheCluster']},
+        'secretsmanager': {'keywords': ['secret', 'secrets', 'secretsmanager', 'secrets manager', 'password'], 'read': ['secretsmanager:List*', 'secretsmanager:Describe*', 'secretsmanager:GetSecretValue'], 'delete': ['secretsmanager:DeleteSecret']},
+    }
+    
+    detected_services = []
+    for service, config in aws_services.items():
+        # Match keywords as whole words using regex word boundaries
+        service_detected = False
+        for kw in config['keywords']:
+            # Use regex to match whole words only
+            pattern = r'\b' + re.escape(kw) + r'\b'
+            if re.search(pattern, use_case_lower):
+                service_detected = True
+                break
         
-        actions.extend([
-            'secretsmanager:DescribeSecret',
-            'secretsmanager:GetSecretValue'
-        ])
+        if service_detected:
+            detected_services.append(service)
+            
+            # Add delete actions if intent detected and allowed
+            if has_delete_intent and delete_allowed:
+                if service == 'kms':
+                    return {'error': '❌ KMS key deletion is strictly forbidden. Contact CISO.'}
+                delete_actions = config.get('delete', [])
+                print(f"➕ Adding delete actions for {service}: {delete_actions}")
+                actions.extend(delete_actions)
+            elif any(w in use_case_lower for w in ['write', 'modify', 'update', 'change', 'attach', 'start', 'stop', 'reboot']):
+                # Add write actions for modify operations
+                write_actions = config.get('write', [])
+                print(f"➕ Adding write actions for {service}: {write_actions}")
+                actions.extend(write_actions)
+                # Also add read actions for context
+                actions.extend(config['read'])
+            else:
+                # Only add read actions if NOT a delete/write request
+                print(f"➕ Adding read actions for {service}")
+                actions.extend(config['read'])
+            
+            # Add write actions for S3
+            if service == 's3' and any(w in use_case_lower for w in ['upload', 'write', 'put']):
+                actions.extend(config.get('write', []))
+            
+            # Add write actions for ELB
+            if service == 'elb' and any(w in use_case_lower for w in ['attach', 'register', 'modify', 'update', 'change']):
+                actions.extend(config.get('write', []))
     
-    # Default read permissions if nothing specific matched
-    if not actions:
-        actions = [
-            'iam:GetUser',
-            'sts:GetCallerIdentity'
-        ]
-        description = "Basic read-only access"
+    if detected_services:
+        description = f"Access to {', '.join(detected_services).upper()}"
+        if has_delete_intent and delete_allowed:
+            description += ' | Delete enabled'
+    
+    # Secrets Manager special validation
+    if 'secretsmanager' in detected_services:
+        if not any(word in use_case for word in ['secret:', 'secret-', 'secret_', 'secret/']):
+            return {'error': '❌ Secrets Manager requires specific secret names. Example: "read secret MyApp-DB-Password"'}
+    
+    # If no service detected, return error
+    if not detected_services:
+        return {'error': '❌ No AWS service detected. Please specify service (e.g., EC2, S3, Lambda, DynamoDB, RDS, ECS, SNS, SQS).'}
     
     return {
         'actions': list(set(actions)),  # Remove duplicates
@@ -456,20 +617,27 @@ def create_custom_permission_set(name, permissions_data):
         
         permission_set_arn = response['PermissionSet']['PermissionSetArn']
         
-        # Create inline policy with conditions if present
-        statement = {
-            'Effect': 'Allow',
-            'Action': permissions_data['actions'],
-            'Resource': permissions_data['resources']
-        }
-        
-        # Add conditions for tag-based access
-        if 'conditions' in permissions_data:
-            statement['Condition'] = permissions_data['conditions']
+        # Create SEPARATE statements per service for security
+        statements = []
+        if 'grouped_actions' in permissions_data:
+            for service, data in permissions_data['grouped_actions'].items():
+                statements.append({
+                    'Sid': service.upper().replace('-', ''),
+                    'Effect': 'Allow',
+                    'Action': data['actions'],
+                    'Resource': data['resources']
+                })
+        else:
+            # Fallback for old format
+            statements.append({
+                'Effect': 'Allow',
+                'Action': permissions_data.get('actions', []),
+                'Resource': permissions_data.get('resources', ['*'])
+            })
         
         policy_doc = {
             'Version': '2012-10-17',
-            'Statement': [statement]
+            'Statement': statements
         }
         
         sso_admin.put_inline_policy_to_permission_set(
@@ -541,24 +709,385 @@ def debug_find_user(email):
     except Exception as e:
         return jsonify({'error': str(e)})
 
+from intent_classifier import IntentClassifier
+from conversation_manager import ConversationManager
+from guardrails_generator import GuardrailsGenerator
+from scp_manager import SCPManager
+from access_rules import AccessRules
+from help_assistant import HelpAssistant
+from scp_troubleshoot import SCPTroubleshoot
+from unified_assistant import UnifiedAssistant
+
 @app.route('/api/generate-permissions', methods=['POST'])
 def generate_permissions():
+    print("\n" + "="*80)
+    print("🚀 /api/generate-permissions CALLED")
+    print("="*80)
     data = request.json
     use_case = data.get('use_case', '')
+    account_id = data.get('account_id', '')
+    conversation_id = data.get('conversation_id')  # For multi-turn conversation
+    user_email = data.get('user_email', 'user@example.com')
+    selected_resources = data.get('selected_resources', {})  # {service: [{id, name}]}
+    
+    print(f"📝 Use case: {use_case}")
+    print(f"🆔 Conversation ID: {conversation_id}")
+    print(f"📦 Selected resources: {list(selected_resources.keys())}")
     
     if not use_case:
         return jsonify({'error': 'Use case description required'}), 400
     
+    # CHECK ACCESS RULES: Enforce group-based restrictions
+    print(f"🔒 Checking access rules for user: {user_email}")
+    rules = AccessRules.get_rules()
+    print(f"📋 Total rules: {len(rules.get('rules', []))}")
+    
+    for rule in rules.get('rules', []):
+        if not rule.get('enabled'):
+            continue
+        
+        # Check if user is in restricted group
+        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+        with open(groups_path, 'r') as f:
+            groups_data = json.load(f)
+        
+        user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
+        print(f"👤 User {user_email} is in groups: {user_groups}")
+        print(f"🚫 Rule restricts groups: {rule.get('groups', [])}")
+        
+        if any(g in rule.get('groups', []) for g in user_groups):
+            print(f"✅ User matched restricted group!")
+            # User is in restricted group - check if requesting denied service
+            use_case_lower = use_case.lower()
+            denied_services = rule.get('denied_services', [])
+            print(f"🚫 Denied services: {denied_services}")
+            print(f"📝 Use case: {use_case_lower}")
+            
+            # Also check selected_resources for denied services
+            selected_service_ids = list(selected_resources.keys()) if selected_resources else []
+            print(f"📦 Selected services: {selected_service_ids}")
+            
+            for denied_service in denied_services:
+                # Check both use case text and selected resources
+                if denied_service.lower() in use_case_lower or denied_service in selected_service_ids:
+                    print(f"❌ BLOCKED: User requested denied service {denied_service}")
+                    return jsonify({
+                        'error': f'❌ Access Denied\n\nYour group is restricted from requesting {denied_service.upper()} access.\n\nAllowed services: {", ".join([s.upper() for s in rule.get("allowed_services", [])])}\n\nContact your administrator for access to other services.'
+                    }), 403
+    
+    print(f"✅ Access rules check passed for {user_email}")
+    print(f"📦 Selected resources: {list(selected_resources.keys()) if selected_resources else 'None'}")
+    
+    # Get account environment
+    account_env = 'nonprod'
+    if account_id and account_id in CONFIG['accounts']:
+        account_env = CONFIG['accounts'][account_id].get('environment', 'nonprod')
+    
+    print(f"Account: {account_id}, Environment: {account_env}")
+    
+    # CHECK FOR EC2 TERMINAL ACCESS - Redirect to Instances page
+    terminal_keywords = ['connect to ec2', 'connect ec2', 'ssh', 'login to ec2', 'terminal', 'shell access', 'access ec2', 'connect to instance']
+    use_case_lower = use_case.lower()
+    if 'ec2' in list(selected_resources.keys()) and any(kw in use_case_lower for kw in terminal_keywords):
+        return jsonify({
+            'redirect_to_terminal': True,
+            'message': 'For terminal/SSH access to EC2 instances, please use the Instances page under Workloads section.'
+        })
+    
+    # CRITICAL: Load fresh policy config on EVERY request (admin may have changed toggles)
+    policy_config = StrictPolicies.get_config()
+    print(f"🔄 Fresh policy config loaded: delete_nonprod={policy_config.get('allow_delete_nonprod')}, delete_prod={policy_config.get('allow_delete_prod')}")
+    
+    # CONVERSATIONAL AI FLOW - Always try conversation first
+    print(f"🤖 Conversation ID: {conversation_id}")
+    print(f"🤖 Use case: {use_case}")
+    print(f"🤖 Selected resources: {list(selected_resources.keys())}")
+    
+    if conversation_id:
+        # Continue existing conversation
+        ConversationManager.add_message(conversation_id, 'user', use_case)
+        clarification = ConversationManager.ask_ai_clarification(conversation_id, selected_resources)
+        
+        if clarification.get('needs_clarification'):
+            return jsonify({
+                'needs_clarification': True,
+                'question': clarification['question'],
+                'conversation_id': conversation_id
+            })
+        elif clarification.get('ready'):
+            # Check for terminal redirect
+            if clarification.get('redirect_to_terminal'):
+                return jsonify({
+                    'redirect_to_terminal': True,
+                    'message': clarification.get('message', 'Please use Instances page for terminal access'),
+                    'conversation_id': conversation_id
+                })
+            
+            if clarification.get('intent') == 'create':
+                ConversationManager.end_conversation(conversation_id)
+                return jsonify({'error': 'Infrastructure provisioning detected. Please contact DevOps team.'}), 400
+            
+            # Generate from AI understanding
+            intent = clarification.get('intent', 'read')
+            services = clarification.get('services', [])
+            actions = clarification.get('actions', [])
+            grouped_actions = clarification.get('grouped_actions', {})
+            
+            # Handle grouped actions (separate statements per service)
+            if grouped_actions:
+                print(f"📦 Grouped actions: {list(grouped_actions.keys())}")
+                for service, data in grouped_actions.items():
+                    svc_actions = data.get('actions', [])
+                    delete_acts = [a for a in svc_actions if any(w in a.lower() for w in ['delete', 'terminate'])]
+                    if delete_acts and not policy_config.get(f'allow_delete_{account_env}' if account_env == 'prod' else 'allow_delete_nonprod', False):
+                        ConversationManager.end_conversation(conversation_id)
+                        return jsonify({'error': f'❌ Delete disabled in {account_env}.'}), 403
+                    create_acts = [a for a in svc_actions if any(w in a.lower() for w in ['create', 'runinstances'])]
+                    if create_acts and not policy_config.get(f'allow_create_{account_env}' if account_env == 'prod' else 'allow_create_nonprod', False):
+                        ConversationManager.end_conversation(conversation_id)
+                        return jsonify({'error': f'❌ Create disabled in {account_env}.'}), 403
+                return jsonify({'grouped_actions': grouped_actions, 'description': clarification.get('description', 'Multi-service'), 'conversation_id': conversation_id})
+            
+            if actions:
+                # Check for KMS deletion
+                if any('kms' in action.lower() and ('delete' in action.lower() or 'disable' in action.lower() or 'schedule' in action.lower()) for action in actions):
+                    ConversationManager.end_conversation(conversation_id)
+                    return jsonify({'error': '❌ KMS key deletion is strictly forbidden. Contact CISO.'}), 403
+                
+                # CRITICAL: Check delete actions against toggles
+                delete_actions = [action for action in actions if any(word in action.lower() for word in ['delete', 'terminate', 'remove'])]
+                if delete_actions:
+                    if account_env == 'prod':
+                        delete_allowed = policy_config.get('allow_delete_prod', False)
+                    else:
+                        delete_allowed = policy_config.get('allow_delete_nonprod', False)
+                    
+                    print(f"🗑️ Delete actions: {delete_actions}, allowed: {delete_allowed}")
+                    if not delete_allowed:
+                        env_label = 'production' if account_env == 'prod' else 'non-production'
+                        ConversationManager.end_conversation(conversation_id)
+                        return jsonify({'error': f'❌ Delete/Cleanup actions are disabled in {env_label} environments. Contact security team.'}), 403
+                
+                # Check create actions against toggles
+                create_actions = [action for action in actions if any(word in action.lower() for word in ['create', 'runinstances', 'launch'])]
+                if create_actions:
+                    if account_env == 'prod':
+                        create_allowed = policy_config.get('allow_create_prod', False)
+                    else:
+                        create_allowed = policy_config.get('allow_create_nonprod', False)
+                    
+                    print(f"🏗️ Create actions: {create_actions}, allowed: {create_allowed}")
+                    if not create_allowed:
+                        env_label = 'production' if account_env == 'prod' else 'non-production'
+                        ConversationManager.end_conversation(conversation_id)
+                        return jsonify({'error': f'❌ Create actions are disabled in {env_label} environments. Contact DevOps team.'}), 403
+                
+                # Check admin actions against toggles
+                admin_actions = [action for action in actions if any(word in action.lower() for word in ['*', 'admin', 'full'])]
+                if admin_actions:
+                    if account_env == 'prod':
+                        admin_allowed = policy_config.get('allow_admin_prod', False)
+                    elif account_env == 'sandbox':
+                        admin_allowed = policy_config.get('allow_admin_sandbox', True)
+                    else:
+                        admin_allowed = policy_config.get('allow_admin_nonprod', False)
+                    
+                    print(f"👑 Admin actions: {admin_actions}, allowed: {admin_allowed}")
+                    if not admin_allowed:
+                        ConversationManager.end_conversation(conversation_id)
+                        return jsonify({'error': f'❌ Admin actions are disabled. Contact CISO.'}), 403
+                
+                # AI provided specific actions - determine intent from actions
+                detected_intent = 'READ'
+                if any('delete' in action.lower() or 'terminate' in action.lower() for action in actions):
+                    detected_intent = 'DELETE'
+                elif any('create' in action.lower() or 'put' in action.lower() or 'write' in action.lower() for action in actions):
+                    detected_intent = 'WRITE'
+                
+                # Use resources from Bedrock AI response (it decides based on context)
+                resource_arns = clarification.get('resources', ['*'])
+                print(f"🤖 Bedrock resources: {resource_arns}")
+                
+                # CHECK WITH SCP AI: Proactive SCP warnings
+                scp_warnings = []
+                if account_id:
+                    scp_warnings = SCPTroubleshoot.check_default_scps(account_id, actions)
+                
+                response_data = {
+                    'actions': actions,
+                    'resources': resource_arns,
+                    'description': f"{detected_intent} access to {', '.join([s.upper() for s in services]) if services else 'AWS services'}",
+                    'conversation_id': conversation_id
+                }
+                
+                # Add SCP warnings if any
+                if scp_warnings:
+                    response_data['scp_warnings'] = scp_warnings
+                
+                # DON'T end conversation - allow user to continue adding services
+                return jsonify(response_data)
+            else:
+                # Build use case from AI understanding with proper formatting
+                service_names = ' '.join([f"{s} buckets" if s == 's3' else f"{s} instances" if s == 'ec2' else s for s in services])
+                use_case = f"{intent} {service_names}"
+                print(f"🔨 Built use case from keyword matcher: '{use_case}'")
+                ConversationManager.end_conversation(conversation_id)
+    else:
+        # New request - start conversation
+        region = data.get('region', 'ap-south-1')
+        conv_id = ConversationManager.start_conversation(user_email, use_case, account_env, selected_resources, account_id, region)
+        clarification = ConversationManager.ask_ai_clarification(conv_id, selected_resources)
+        
+        if clarification.get('needs_clarification'):
+            return jsonify({
+                'needs_clarification': True,
+                'question': clarification['question'],
+                'conversation_id': conv_id
+            })
+        elif clarification.get('ready'):
+            # Check for terminal redirect
+            if clarification.get('redirect_to_terminal'):
+                return jsonify({
+                    'redirect_to_terminal': True,
+                    'message': clarification.get('message', 'Please use Instances page for terminal access'),
+                    'conversation_id': conv_id
+                })
+            
+            if clarification.get('intent') == 'create':
+                ConversationManager.end_conversation(conv_id)
+                return jsonify({'error': 'Infrastructure provisioning detected. Please contact DevOps team.'}), 400
+            
+            # Generate from AI understanding
+            intent = clarification.get('intent', 'read')
+            services = clarification.get('services', [])
+            actions = clarification.get('actions', [])
+            grouped_actions = clarification.get('grouped_actions', {})
+            
+            # Handle grouped actions (separate statements per service)
+            if grouped_actions:
+                print(f"📦 Grouped actions: {list(grouped_actions.keys())}")
+                for service, data in grouped_actions.items():
+                    svc_actions = data.get('actions', [])
+                    delete_acts = [a for a in svc_actions if any(w in a.lower() for w in ['delete', 'terminate'])]
+                    if delete_acts and not policy_config.get(f'allow_delete_{account_env}' if account_env == 'prod' else 'allow_delete_nonprod', False):
+                        ConversationManager.end_conversation(conv_id)
+                        return jsonify({'error': f'❌ Delete disabled in {account_env}.'}), 403
+                    create_acts = [a for a in svc_actions if any(w in a.lower() for w in ['create', 'runinstances'])]
+                    if create_acts and not policy_config.get(f'allow_create_{account_env}' if account_env == 'prod' else 'allow_create_nonprod', False):
+                        ConversationManager.end_conversation(conv_id)
+                        return jsonify({'error': f'❌ Create disabled in {account_env}.'}), 403
+                return jsonify({'grouped_actions': grouped_actions, 'description': clarification.get('description', 'Multi-service'), 'conversation_id': conv_id})
+            
+            if actions:
+                # Check for KMS deletion
+                if any('kms' in action.lower() and ('delete' in action.lower() or 'disable' in action.lower() or 'schedule' in action.lower()) for action in actions):
+                    ConversationManager.end_conversation(conv_id)
+                    return jsonify({'error': '❌ KMS key deletion is strictly forbidden. Contact CISO.'}), 403
+                
+                # CRITICAL: Check delete actions against toggles
+                delete_actions = [action for action in actions if any(word in action.lower() for word in ['delete', 'terminate', 'remove'])]
+                if delete_actions:
+                    if account_env == 'prod':
+                        delete_allowed = policy_config.get('allow_delete_prod', False)
+                    else:
+                        delete_allowed = policy_config.get('allow_delete_nonprod', False)
+                    
+                    print(f"🗑️ Delete actions: {delete_actions}, allowed: {delete_allowed}")
+                    if not delete_allowed:
+                        env_label = 'production' if account_env == 'prod' else 'non-production'
+                        ConversationManager.end_conversation(conv_id)
+                        return jsonify({'error': f'❌ Delete/Cleanup actions are disabled in {env_label} environments. Contact security team.'}), 403
+                
+                # Check create actions against toggles
+                create_actions = [action for action in actions if any(word in action.lower() for word in ['create', 'runinstances', 'launch'])]
+                if create_actions:
+                    if account_env == 'prod':
+                        create_allowed = policy_config.get('allow_create_prod', False)
+                    else:
+                        create_allowed = policy_config.get('allow_create_nonprod', False)
+                    
+                    print(f"🏗️ Create actions: {create_actions}, allowed: {create_allowed}")
+                    if not create_allowed:
+                        env_label = 'production' if account_env == 'prod' else 'non-production'
+                        ConversationManager.end_conversation(conv_id)
+                        return jsonify({'error': f'❌ Create actions are disabled in {env_label} environments. Contact DevOps team.'}), 403
+                
+                # Check admin actions against toggles
+                admin_actions = [action for action in actions if any(word in action.lower() for word in ['*', 'admin', 'full'])]
+                if admin_actions:
+                    if account_env == 'prod':
+                        admin_allowed = policy_config.get('allow_admin_prod', False)
+                    elif account_env == 'sandbox':
+                        admin_allowed = policy_config.get('allow_admin_sandbox', True)
+                    else:
+                        admin_allowed = policy_config.get('allow_admin_nonprod', False)
+                    
+                    print(f"👑 Admin actions: {admin_actions}, allowed: {admin_allowed}")
+                    if not admin_allowed:
+                        ConversationManager.end_conversation(conv_id)
+                        return jsonify({'error': f'❌ Admin actions are disabled. Contact CISO.'}), 403
+                
+                # AI provided specific actions - determine intent from actions
+                detected_intent = 'READ'
+                if any('delete' in action.lower() or 'terminate' in action.lower() for action in actions):
+                    detected_intent = 'DELETE'
+                elif any('create' in action.lower() or 'put' in action.lower() or 'write' in action.lower() for action in actions):
+                    detected_intent = 'WRITE'
+                
+                # Use resources from Bedrock AI response (it decides based on context)
+                resource_arns = clarification.get('resources', ['*'])
+                print(f"🤖 Bedrock resources: {resource_arns}")
+                
+                # DON'T end conversation - allow user to continue
+                return jsonify({
+                    'actions': actions,
+                    'resources': resource_arns,
+                    'description': f"{detected_intent} access to {', '.join([s.upper() for s in services]) if services else 'AWS services'}",
+                    'conversation_id': conv_id
+                })
+            else:
+                # Build use case from AI understanding with proper formatting
+                service_names = ' '.join([f"{s} buckets" if s == 's3' else f"{s} instances" if s == 'ec2' else s for s in services])
+                use_case = f"{intent} {service_names}"
+                ConversationManager.end_conversation(conv_id)
+    
+    # STRICT VALIDATION LAYER 1: Validate user input for prompt injection
+    is_valid, error = StrictPolicies.validate_user_input(use_case)
+    if not is_valid:
+        return jsonify({'error': error}), 403
+    
+    # STRICT VALIDATION LAYER 2: Detect non-AWS requests
+    is_non_aws, detected_services = AIValidator.detect_non_aws_request(use_case)
+    if is_non_aws:
+        return jsonify({
+            'error': f'❌ AI only generates AWS permissions. Detected: {", ".join(detected_services)}. Use Applications page for non-AWS access.'
+        }), 400
+    
+    # LAYER 3: Intent Detection
+    intent_result = IntentClassifier.detect_intent(use_case)
+    
+    # Route infrastructure requests to DevOps (skip if handled by conversation)
+    if not conversation_id:
+        if intent_result['requires_infrastructure']:
+            return jsonify({
+                'error': intent_result['message'],
+                'intent_analysis': intent_result,
+                'suggestion': 'create_jira_ticket'
+            }), 400
+        
+        # Delete operations are validated by StrictPolicies based on toggle settings
+        # Don't block here - let the policy validation handle it
+    
     # Simple validation - AI only responds to AWS access requests
     use_case_lower = use_case.lower()
     
-    # Check if request contains AWS services or access keywords
-    aws_keywords = ['aws', 'ec2', 's3', 'lambda', 'rds', 'dynamodb', 'cloudwatch', 'iam', 'vpc', 'elb', 'cloudfront', 'route53', 'sns', 'sqs', 'api gateway', 'access', 'permission']
-    has_aws_context = any(keyword in use_case_lower for keyword in aws_keywords)
+    # Check for explicitly non-AWS requests only
+    non_aws_keywords = ['azure', 'gcp', 'google cloud', 'mysql', 'postgres', 'mongodb', 'jenkins', 'grafana', 'sonar', 'jira', 'splunk', 'servicenow', 'okta', 'onelogin', 'auth0', 'ping', 'duo']
+    found_non_aws = [kw for kw in non_aws_keywords if kw in use_case_lower]
     
-    if not has_aws_context:
+    if found_non_aws:
         return jsonify({
-            'error': 'AI only generates AWS access permissions. Please specify your AWS access requirements.'
+            'error': f'AI only generates AWS permissions. Detected non-AWS: {", ".join(found_non_aws)}. Use Applications page for non-AWS access.'
         }), 400
     
     # Check for read-only access requests
@@ -575,12 +1104,102 @@ def generate_permissions():
             'suggestion': 'use_existing_permission_sets'
         })
     
-    permissions = generate_ai_permissions(use_case)
-    return jsonify(permissions)
+    # Generate AI permissions with account environment
+    print(f"🎯 Calling generate_ai_permissions with use_case: '{use_case}'")
+    ai_output = generate_ai_permissions(use_case, account_env)
+    
+    # Log which method was used
+    print(f"🤖 Generation method: {'Bedrock AI' if not ai_output.get('fallback') else 'Keyword Parser'}")
+    
+    # Check if AI generation failed
+    if 'error' in ai_output:
+        return jsonify(ai_output), 400
+    
+    # STRICT VALIDATION LAYER 4: Validate AI output
+    is_valid, sanitized_output, error = AIValidator.validate_ai_response(
+        ai_output, use_case, account_env
+    )
+    
+    if not is_valid:
+        return jsonify({'error': error}), 403
+    
+    # STRICT VALIDATION LAYER 4.5: Filter actions to only selected services
+    if selected_resources:
+        selected_service_ids = list(selected_resources.keys())
+        filtered_actions = []
+        for action in sanitized_output.get('actions', []):
+            service_prefix = action.split(':')[0].lower()
+            if service_prefix in selected_service_ids:
+                filtered_actions.append(action)
+        
+        if filtered_actions:
+            sanitized_output['actions'] = filtered_actions
+            print(f"✅ Filtered actions to selected services: {selected_service_ids}")
+        else:
+            print(f"⚠️ No actions matched selected services, keeping original")
+    
+    # STRICT VALIDATION LAYER 5: Check duration limits
+    duration = data.get('duration_hours', 8)
+    is_valid, error = StrictPolicies.validate_duration(duration, account_env)
+    if not is_valid:
+        return jsonify({'error': error}), 403
+    
+    # STRICT VALIDATION LAYER 6: Determine approval requirements
+    requires_approval, approval_type = StrictPolicies.requires_approval(
+        sanitized_output['actions'], account_env
+    )
+    
+    sanitized_output['requires_approval'] = requires_approval
+    sanitized_output['approval_type'] = approval_type
+    sanitized_output['account_environment'] = account_env
+    
+    return jsonify(sanitized_output)
 
 @app.route('/api/request-access', methods=['POST'])
 def request_access():
     data = request.json
+    user_email = data.get('user_email')
+    
+    # CHECK ACCESS RULES: Enforce group-based restrictions
+    rules = AccessRules.get_rules()
+    for rule in rules.get('rules', []):
+        if not rule.get('enabled'):
+            continue
+        
+        # Check if user is in restricted group
+        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+        with open(groups_path, 'r') as f:
+            groups_data = json.load(f)
+        
+        user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
+        
+        if any(g in rule.get('groups', []) for g in user_groups):
+            # User is in restricted group - check if requesting denied service
+            use_case = data.get('use_case', '').lower()
+            denied_services = rule.get('denied_services', [])
+            
+            for denied_service in denied_services:
+                if denied_service in use_case:
+                    return jsonify({
+                        'error': f'❌ Access Denied\n\nYour group is restricted from requesting {denied_service.upper()} access.\n\nAllowed services: {", ".join([s.upper() for s in rule.get("allowed_services", [])])}\n\nContact your administrator for access to other services.'
+                    }), 403
+    
+    # ENFORCEMENT: Apply strict organizational policies
+    org_policies = load_org_policies()  # Load from config/database
+    allowed, violations, action = EnforcementEngine.enforce_policy(data, org_policies)
+    
+    print(f"🔒 Enforcement check: allowed={allowed}, violations={violations}")
+    
+    if not allowed:
+        # STRICT ENFORCEMENT: Block request
+        recommendations = EnforcementEngine.get_recommendation(data, org_policies)
+        print(f"❌ Request blocked: {violations}")
+        return jsonify({
+            'error': 'Request blocked by organizational policy',
+            'violations': violations,
+            'recommendations': recommendations,
+            'enforcement': 'STRICT'
+        }), 403
     
     request_id = str(uuid.uuid4())
     # Handle custom date range
@@ -625,34 +1244,31 @@ def request_access():
         access_request['end_date'] = data['custom_end_date']
     
     # Handle AI-generated or existing permission set
-    if 'use_case' in data:
-        # AI-generated permission set
+    if data.get('ai_permissions'):
+        permissions = data['ai_permissions']
+        
+        access_request['ai_generated'] = True
+        access_request['use_case'] = data.get('use_case', 'AI-generated access')
+        access_request['ai_permissions'] = permissions
+        access_request['permission_set'] = 'AI_GENERATED'
+    elif 'use_case' in data:
+        # Fallback: generate if not provided
         permissions = generate_ai_permissions(data['use_case'])
         if 'error' in permissions:
             return jsonify({'error': f"AI generation failed: {permissions['error']}"}), 400
-        
-        # Enhance with service-specific constraints
-        aws_services = data.get('aws_services', [])
-        service_configs = data.get('service_configs', {})
-        
-        if aws_services:
-            # Override AI permissions with service-specific ones
-            permissions = enhance_permissions_with_services({
-                'actions': [],
-                'resources': ['*'],
-                'description': 'Service-specific permissions'
-            }, aws_services, service_configs)
         
         access_request['ai_generated'] = True
         access_request['use_case'] = data['use_case']
         access_request['ai_permissions'] = permissions
         access_request['permission_set'] = 'AI_GENERATED'
-        access_request['aws_services'] = aws_services
-        access_request['service_configs'] = service_configs
     else:
         # Existing permission set
         access_request['permission_set'] = data['permission_set']
         access_request['ai_generated'] = False
+    
+    # Store enforcement metadata
+    access_request['enforcement_action'] = action
+    access_request['policy_violations'] = violations
     
     # Determine approval requirements based on account type and access type
     account_name = CONFIG['accounts'].get(access_request['account_id'], {}).get('name', '').lower()
@@ -689,6 +1305,78 @@ def get_request_details(request_id):
         return jsonify({'error': 'Request not found'}), 404
     return jsonify(requests_db[request_id])
 
+@app.route('/api/databases/requests', methods=['GET'])
+def get_database_requests():
+    """Get database access requests for current user, filterable by status"""
+    user_email = request.args.get('user_email')
+    status_filter = request.args.get('status')  # pending, approved, denied, all
+    if not user_email:
+        return jsonify({'error': 'user_email required'}), 400
+    db_requests = []
+    for req_id, req in requests_db.items():
+        if req.get('type') != 'database_access' or req.get('user_email') != user_email:
+            continue
+        s = req.get('status', '')
+        expires_at = req.get('expires_at', '')
+        is_expired = False
+        if expires_at:
+            try:
+                exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00').replace('+00:00', ''))
+                is_expired = datetime.now() >= exp
+            except Exception:
+                pass
+        # Map to UI status
+        if s == 'pending':
+            ui_status = 'pending'
+        elif s == 'denied':
+            ui_status = 'rejected'
+        elif s == 'approved' and not is_expired:
+            ui_status = 'in_progress'
+        elif s == 'approved' and is_expired:
+            ui_status = 'completed'
+        else:
+            ui_status = s
+        if status_filter and status_filter != 'all' and ui_status != status_filter:
+            continue
+        db_requests.append({
+            'request_id': req_id,
+            'status': ui_status,
+            'databases': req.get('databases', []),
+            'role': req.get('role', 'read_only'),
+            'duration_hours': req.get('duration_hours', 2),
+            'justification': req.get('justification', ''),
+            'created_at': req.get('created_at', ''),
+            'expires_at': expires_at,
+        })
+    return jsonify({'requests': db_requests})
+
+
+@app.route('/api/databases/request/<request_id>/update-duration', methods=['POST'])
+def update_database_request_duration(request_id):
+    """Update duration only for pending database requests (no DB name, env, endpoint changes)"""
+    if request_id not in requests_db:
+        return jsonify({'error': 'Request not found'}), 404
+    req = requests_db[request_id]
+    if req.get('type') != 'database_access':
+        return jsonify({'error': 'Not a database request'}), 400
+    if req.get('status') != 'pending':
+        return jsonify({'error': 'Can only edit pending requests'}), 400
+    data = request.get_json() or {}
+    duration = data.get('duration_hours')
+    if duration is None:
+        return jsonify({'error': 'duration_hours required'}), 400
+    try:
+        duration = int(duration)
+        if duration < 1 or duration > 24:
+            return jsonify({'error': 'Duration must be 1-24 hours'}), 400
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid duration'}), 400
+    req['duration_hours'] = duration
+    req['expires_at'] = (datetime.now() + timedelta(hours=duration)).isoformat()
+    req['modified_at'] = datetime.now().isoformat()
+    return jsonify({'status': 'updated', 'request_id': request_id, 'duration_hours': duration})
+
+
 @app.route('/api/request/<request_id>/modify', methods=['POST'])
 def modify_request(request_id):
     if request_id not in requests_db:
@@ -698,7 +1386,22 @@ def modify_request(request_id):
     if access_request['status'] != 'pending':
         return jsonify({'error': 'Can only modify pending requests'}), 400
     
-    data = request.json
+    data = request.get_json() or {}
+    
+    # Database access: only duration and justification (no DB name, env, endpoint)
+    if access_request.get('type') == 'database_access':
+        if 'duration_hours' in data:
+            try:
+                d = int(data['duration_hours'])
+                if 1 <= d <= 24:
+                    access_request['duration_hours'] = d
+                    access_request['expires_at'] = (datetime.now() + timedelta(hours=d)).isoformat()
+            except (TypeError, ValueError):
+                pass
+        if 'justification' in data:
+            access_request['justification'] = data['justification']
+        access_request['modified_at'] = datetime.now().isoformat()
+        return jsonify({'status': 'modified', 'request': access_request})
     
     # Update justification
     if 'justification' in data:
@@ -846,6 +1549,29 @@ def approve_request(request_id):
     
     access_request = requests_db[request_id]
     
+    # Handle instance access requests differently
+    if access_request.get('type') == 'instance_access':
+        access_request['status'] = 'approved'
+        access_request['approved_at'] = datetime.now().isoformat()
+        
+        print(f"✅ Approved instance access request {request_id}")
+        print(f"Request details: {access_request}")
+        
+        # Create users on instances
+        username = access_request['username']
+        sudo_access = access_request.get('sudo_access', False)
+        
+        for instance in access_request['instances']:
+            result = create_user_on_instance(instance['id'], username, sudo_access)
+            if result.get('success'):
+                print(f"✅ User {username} created on {instance['id']}")
+        
+        return jsonify({
+            'status': 'approved',
+            'message': f"✅ Instance access approved! Go to Terminal tab to connect."
+        })
+    
+    # Handle AWS account access requests
     # Track approvals
     if request_id not in approvals_db:
         approvals_db[request_id] = []
@@ -967,22 +1693,68 @@ def grant_access(access_request):
 def get_users():
     """Get all users for admin management"""
     try:
-        users = {}
-        for request in requests_db.values():
-            email = request['user_email']
-            if email not in users:
-                users[email] = {
-                    'email': email,
-                    'source': 'Google Workspace',
-                    'status': 'Active',
-                    'mfa_enabled': True,
-                    'last_login': '2024-01-15 10:30',
-                    'request_count': 0,
-                    'first_request': request['created_at']
-                }
-            users[email]['request_count'] += 1
+        # Return mock users for now - integrate with your user database
+        users = [
+            {
+                'first_name': 'Satish',
+                'last_name': 'Korra',
+                'email': 'satish.korra@nykaa.com',
+                'phone': '+91-9876543210',
+                'department': 'DevOps',
+                'group': 'DevOps Team',
+                'role': 'admin'
+            }
+        ]
+        return jsonify(users)
         
-        return jsonify(list(users.values()))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/create-user', methods=['POST'])
+def create_user():
+    """Create new user in JIT console"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required = ['first_name', 'last_name', 'email', 'phone', 'department', 'group', 'role']
+        for field in required:
+            if not data.get(field):
+                return jsonify({'error': f'{field} is required'}), 400
+        
+        # Store user (integrate with your user database)
+        print(f"Creating user: {data['first_name']} {data['last_name']} ({data['email']})")
+        print(f"Role: {data['role']}, Group: {data['group']}, Department: {data['department']}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f"User {data['first_name']} {data['last_name']} created successfully",
+            'user': data
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/create-group', methods=['POST'])
+def create_group():
+    """Create new group with permissions"""
+    try:
+        data = request.get_json()
+        
+        group_name = data.get('name')
+        permissions = data.get('permissions', [])
+        
+        if not group_name:
+            return jsonify({'error': 'Group name is required'}), 400
+        
+        print(f"Creating group: {group_name}")
+        print(f"Permissions: {', '.join(permissions)}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': f"Group {group_name} created successfully",
+            'group': {'name': group_name, 'permissions': permissions}
+        })
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1179,8 +1951,2033 @@ def send_to_siem():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# Initialize on startup
-initialize_aws_config()
+@app.route('/api/admin/account/<account_id>/tag', methods=['PUT'])
+def update_account_tag(account_id):
+    """Update account environment tag"""
+    try:
+        data = request.get_json()
+        environment = data.get('environment')
+        
+        if account_id in CONFIG['accounts']:
+            CONFIG['accounts'][account_id]['environment'] = environment
+            print(f"Account {account_id} tagged as {environment}")
+            return jsonify({'status': 'success', 'account_id': account_id, 'environment': environment})
+        else:
+            return jsonify({'error': 'Account not found'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
+@app.route('/api/admin/account/<account_id>/jit', methods=['PUT'])
+def update_account_jit(account_id):
+    """Update account JIT requirement"""
+    try:
+        data = request.get_json()
+        jit_required = data.get('jit_required')
+        
+        if account_id in CONFIG['accounts']:
+            CONFIG['accounts'][account_id]['jit_required'] = jit_required
+            print(f"Account {account_id} JIT requirement set to {jit_required}")
+            return jsonify({'status': 'success', 'account_id': account_id, 'jit_required': jit_required})
+        else:
+            return jsonify({'error': 'Account not found'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/account/<account_id>/duration', methods=['PUT'])
+def update_account_duration(account_id):
+    """Update account max duration"""
+    try:
+        data = request.get_json()
+        max_duration = data.get('max_duration')
+        
+        if account_id in CONFIG['accounts']:
+            CONFIG['accounts'][account_id]['max_duration'] = max_duration
+            print(f"Account {account_id} max duration set to {max_duration}hrs")
+            return jsonify({'status': 'success', 'account_id': account_id, 'max_duration': max_duration})
+        else:
+            return jsonify({'error': 'Account not found'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/sync-accounts-from-ou', methods=['POST'])
+def sync_accounts_from_ou():
+    """Auto-tag accounts based on AWS OU structure"""
+    try:
+        org_client = boto3.client('organizations')
+        
+        # Get all OUs
+        roots = org_client.list_roots()['Roots']
+        root_id = roots[0]['Id']
+        
+        synced_count = 0
+        
+        # List all OUs
+        paginator = org_client.get_paginator('list_organizational_units_for_parent')
+        for page in paginator.paginate(ParentId=root_id):
+            for ou in page['OrganizationalUnits']:
+                ou_name = ou['Name'].lower()
+                ou_id = ou['Id']
+                
+                # Determine environment from OU name
+                if 'prod' in ou_name or 'production' in ou_name:
+                    environment = 'prod'
+                elif 'dev' in ou_name or 'development' in ou_name:
+                    environment = 'dev'
+                elif 'sandbox' in ou_name or 'test' in ou_name:
+                    environment = 'sandbox'
+                else:
+                    environment = 'nonprod'
+                
+                # Get accounts in this OU
+                acc_paginator = org_client.get_paginator('list_accounts_for_parent')
+                for acc_page in acc_paginator.paginate(ParentId=ou_id):
+                    for account in acc_page['Accounts']:
+                        account_id = account['Id']
+                        if account_id in CONFIG['accounts']:
+                            CONFIG['accounts'][account_id]['environment'] = environment
+                            CONFIG['accounts'][account_id]['ou_name'] = ou_name
+                            synced_count += 1
+                            print(f"Auto-tagged {account_id} as {environment} (OU: {ou_name})")
+        
+        return jsonify({
+            'status': 'success',
+            'synced_count': synced_count,
+            'message': f'Successfully synced {synced_count} accounts from OU structure'
+        })
+        
+    except Exception as e:
+        print(f"Error syncing from OU: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/instances', methods=['GET'])
+def get_instances():
+    """Get all EC2 instances across accounts"""
+    try:
+        ec2 = boto3.client('ec2', region_name='ap-south-1')
+        sts = boto3.client('sts')
+        current_account = sts.get_caller_identity()['Account']
+        
+        instances = []
+        response = ec2.describe_instances()
+        
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                name = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), None)
+                instances.append({
+                    'id': instance['InstanceId'],
+                    'name': name,
+                    'type': instance.get('InstanceType'),
+                    'state': instance['State']['Name'],
+                    'account_id': current_account,
+                    'private_ip': instance.get('PrivateIpAddress'),
+                    'public_ip': instance.get('PublicIpAddress')
+                })
+        
+        return jsonify({'instances': instances})
+        
+    except Exception as e:
+        print(f"Error fetching instances: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/instances/start-session', methods=['POST'])
+def start_ssm_session():
+    """Start AWS Systems Manager session"""
+    try:
+        data = request.get_json()
+        instance_id = data.get('instance_id')
+        instance_name = data.get('instance_name')
+        
+        if not instance_id:
+            return jsonify({'error': 'instance_id required'}), 400
+        
+        ssm = boto3.client('ssm', region_name='ap-south-1')
+        
+        # Start session
+        response = ssm.start_session(
+            Target=instance_id
+        )
+        
+        session_id = response['SessionId']
+        
+        # Generate Session Manager URL
+        region = 'ap-south-1'
+        session_url = f"https://ap-south-1.console.aws.amazon.com/systems-manager/session-manager/{session_id}?region={region}"
+        
+        print(f"✅ Session started: {session_id} for {instance_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'session_id': session_id,
+            'session_url': session_url,
+            'instance_id': instance_id,
+            'instance_name': instance_name
+        })
+        
+    except Exception as e:
+        print(f"Error starting session: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/instances/request-access', methods=['POST'])
+def request_instance_access():
+    """Request JIT access to EC2 instances"""
+    try:
+        data = request.get_json()
+        instances = data.get('instances', [])
+        account_id = data.get('account_id')
+        user_email = data.get('user_email', 'satish.korra@nykaa.com') or 'satish.korra@nykaa.com'
+        request_for = data.get('request_for', 'myself')
+        justification = data.get('justification')
+        duration_hours = data.get('duration_hours', 2)
+        sudo_access = data.get('sudo_access', False)
+        
+        username = user_email.split('@')[0].replace('.', '_')
+        
+        # Determine approval requirement
+        if sudo_access:
+            status = 'pending'
+            approval_message = 'Requires Manager + Security Lead approval'
+        else:
+            status = 'pending'
+            approval_message = 'Requires Manager approval'
+        
+        request_id = str(uuid.uuid4())
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        access_request = {
+            'id': request_id,
+            'type': 'instance_access',
+            'instances': instances,
+            'account_id': account_id,
+            'user_email': user_email,
+            'username': username,
+            'request_for': request_for,
+            'justification': justification,
+            'duration_hours': duration_hours,
+            'sudo_access': sudo_access,
+            'status': status,
+            'approval_required': ['self'],
+            'created_at': datetime.now().isoformat(),
+            'expires_at': expires_at.isoformat()
+        }
+        
+        requests_db[request_id] = access_request
+        
+        print(f"📝 Instance access request: {request_id} - {len(instances)} instances - {status}")
+        
+        return jsonify({
+            'status': status,
+            'request_id': request_id,
+            'expires_at': access_request['expires_at'],
+            'message': approval_message
+        })
+        
+    except Exception as e:
+        print(f"Error requesting access: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/instances/approved', methods=['GET'])
+def get_approved_instances():
+    """Get approved instances for current user"""
+    try:
+        user_email = request.args.get('user_email', 'satish.korra@nykaa.com')
+        approved_instances = []
+        
+        print(f"Looking for approved instances for {user_email}")
+        print(f"Total requests in DB: {len(requests_db)}")
+        
+        for req_id, req in requests_db.items():
+            print(f"Request {req_id}: type={req.get('type')}, email={req.get('user_email')}, status={req.get('status')}")
+            
+            if (req.get('type') == 'instance_access' and 
+                req.get('user_email') == user_email and 
+                req.get('status') == 'approved'):
+                
+                print(f"✅ Found approved instance request: {req_id}")
+                for instance in req.get('instances', []):
+                    approved_instances.append({
+                        'request_id': req_id,
+                        'instance_id': instance['id'],
+                        'instance_name': instance['name'],
+                        'private_ip': instance.get('private_ip'),
+                        'public_ip': instance.get('public_ip'),
+                        'expires_at': req['expires_at'],
+                        'sudo_access': req.get('sudo_access', False)
+                    })
+        
+        print(f"Returning {len(approved_instances)} approved instances")
+        return jsonify({'instances': approved_instances})
+        
+    except Exception as e:
+        print(f"Error getting approved instances: {e}")
+        return jsonify({'error': str(e)}), 500
+
+def create_user_on_instance(instance_id, username, sudo_access=False):
+    """Create user on EC2 instance via SSM Run Command"""
+    try:
+        ssm = boto3.client('ssm', region_name='ap-south-1')
+        
+        # Generate temporary password
+        temp_password = str(uuid.uuid4())[:12]
+        
+        # Build commands
+        commands = [
+            f'useradd -m -s /bin/bash {username}',
+            f'echo "{username}:{temp_password}" | chpasswd',
+            f'mkdir -p /home/{username}/.ssh',
+            f'chown -R {username}:{username} /home/{username}/.ssh',
+            f'chmod 700 /home/{username}/.ssh'
+        ]
+        
+        # Add to sudoers if sudo access approved
+        if sudo_access:
+            commands.append(f'echo "{username} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/jit-{username}')
+            commands.append(f'chmod 440 /etc/sudoers.d/jit-{username}')
+        
+        # Execute via SSM
+        response = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': commands},
+            Comment=f'JIT Access: Create user {username}'
+        )
+        
+        command_id = response['Command']['CommandId']
+        print(f"✅ SSM Command sent: {command_id} - Creating user {username} on {instance_id}")
+        
+        return {'success': True, 'command_id': command_id, 'username': username}
+        
+    except Exception as e:
+        print(f"❌ Error creating user on instance: {e}")
+        return {'error': str(e)}
+
+def remove_user_from_instance(instance_id, username):
+    """Remove user from EC2 instance via SSM Run Command"""
+    try:
+        ssm = boto3.client('ssm', region_name='ap-south-1')
+        
+        commands = [
+            f'pkill -u {username}',  # Kill all user processes
+            f'userdel -r {username}',  # Delete user and home directory
+            f'rm -f /etc/sudoers.d/jit-{username}'  # Remove sudoers entry
+        ]
+        
+        response = ssm.send_command(
+            InstanceIds=[instance_id],
+            DocumentName='AWS-RunShellScript',
+            Parameters={'commands': commands},
+            Comment=f'JIT Access: Remove user {username}'
+        )
+        
+        command_id = response['Command']['CommandId']
+        print(f"✅ SSM Command sent: {command_id} - Removing user {username} from {instance_id}")
+        
+        return {'success': True, 'command_id': command_id}
+        
+    except Exception as e:
+        print(f"❌ Error removing user from instance: {e}")
+        return {'error': str(e)}
+
+@app.route('/api/instances/cleanup-expired', methods=['POST'])
+def cleanup_expired_instance_access():
+    """Cleanup expired instance access - remove users from instances"""
+    try:
+        now = datetime.now()
+        cleaned_count = 0
+        
+        for request_id, access_request in list(requests_db.items()):
+            if 'instance_id' not in access_request:
+                continue
+            
+            expires_at = datetime.fromisoformat(access_request['expires_at'].replace('Z', '+00:00'))
+            
+            if expires_at <= now and access_request.get('status') == 'auto_approved' and access_request.get('user_created'):
+                # Remove user from instance
+                instance_id = access_request['instance_id']
+                username = access_request['username']
+                
+                result = remove_user_from_instance(instance_id, username)
+                
+                if result.get('success'):
+                    access_request['status'] = 'expired'
+                    access_request['user_removed'] = True
+                    access_request['removed_at'] = now.isoformat()
+                    cleaned_count += 1
+                    print(f"🧹 Cleaned up expired access: {username} from {instance_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'cleaned_count': cleaned_count,
+            'message': f'Cleaned up {cleaned_count} expired access requests'
+        })
+        
+    except Exception as e:
+        print(f"Error cleaning up expired access: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/instances/log-session', methods=['POST'])
+def log_instance_session():
+    """Log instance session for audit"""
+    try:
+        data = request.get_json()
+        print(f"📝 Session Log: {data}")
+        
+        # In production, store in database or send to CloudWatch
+        return jsonify({'status': 'logged'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/discover-services', methods=['GET'])
+def discover_services():
+    """Discover all AWS services with resources in the account using Resource Explorer"""
+    try:
+        account_id = request.args.get('account_id')
+        region = 'ap-south-1'
+        
+        # Use AWS Resource Groups Tagging API to discover all resources
+        tagging = boto3.client('resourcegroupstaggingapi', region_name=region)
+        
+        discovered_services = set()
+        paginator = tagging.get_paginator('get_resources')
+        
+        for page in paginator.paginate():
+            for resource in page['ResourceTagMappingList']:
+                arn = resource['ResourceARN']
+                # Extract service from ARN (format: arn:aws:service:region:account:resource)
+                parts = arn.split(':')
+                if len(parts) >= 3:
+                    service = parts[2]
+                    discovered_services.add(service)
+        
+        # Map AWS service names to friendly names
+        service_map = {
+            'ec2': {'name': 'EC2 Instances', 'icon': '🖥️'},
+            's3': {'name': 'S3 Buckets', 'icon': '🪣'},
+            'rds': {'name': 'RDS Databases', 'icon': '🗄️'},
+            'lambda': {'name': 'Lambda Functions', 'icon': '⚡'},
+            'dynamodb': {'name': 'DynamoDB Tables', 'icon': '📊'},
+            'secretsmanager': {'name': 'Secrets Manager', 'icon': '🔐'},
+            'logs': {'name': 'CloudWatch Logs', 'icon': '📝'},
+            'eks': {'name': 'EKS Clusters', 'icon': '☸️'},
+            'ecs': {'name': 'ECS Services', 'icon': '🐳'},
+            'elasticloadbalancing': {'name': 'Load Balancers', 'icon': '⚖️'},
+            'elasticache': {'name': 'ElastiCache', 'icon': '⚡'},
+            'sns': {'name': 'SNS Topics', 'icon': '📢'},
+            'sqs': {'name': 'SQS Queues', 'icon': '📬'},
+            'kinesis': {'name': 'Kinesis Streams', 'icon': '🌊'},
+            'cloudfront': {'name': 'CloudFront', 'icon': '🌐'},
+            'apigateway': {'name': 'API Gateway', 'icon': '🚪'},
+            'elasticbeanstalk': {'name': 'Elastic Beanstalk', 'icon': '🌱'},
+            'cloudformation': {'name': 'CloudFormation', 'icon': '📚'},
+            'iam': {'name': 'IAM Resources', 'icon': '👤'},
+            'kms': {'name': 'KMS Keys', 'icon': '🔑'}
+        }
+        
+        services = []
+        for service in sorted(discovered_services):
+            if service in service_map:
+                services.append({
+                    'id': service,
+                    'name': service_map[service]['name'],
+                    'icon': service_map[service]['icon']
+                })
+        
+        print(f"✅ Discovered {len(services)} services with resources")
+        return jsonify({'services': services})
+        
+    except Exception as e:
+        print(f"Error discovering services: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/resources/<service>', methods=['GET'])
+def get_resources(service):
+    """Get AWS resources for selected service from current account"""
+    try:
+        account_id = request.args.get('account_id')
+        resources = []
+        region = 'ap-south-1'
+        
+        if service == 'ec2':
+            ec2 = boto3.client('ec2', region_name=region)
+            response = ec2.describe_instances()
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    name = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), instance['InstanceId'])
+                    resources.append({
+                        'id': instance['InstanceId'], 
+                        'name': name,
+                        'type': instance.get('InstanceType'),
+                        'state': instance['State']['Name']
+                    })
+        elif service == 's3':
+            s3 = boto3.client('s3')
+            response = s3.list_buckets()
+            for bucket in response['Buckets']:
+                resources.append({'id': bucket['Name'], 'name': bucket['Name']})
+        elif service == 'rds':
+            rds = boto3.client('rds', region_name=region)
+            response = rds.describe_db_instances()
+            for db in response['DBInstances']:
+                resources.append({
+                    'id': db['DBInstanceIdentifier'], 
+                    'name': db['DBInstanceIdentifier'], 
+                    'engine': db['Engine'],
+                    'status': db['DBInstanceStatus']
+                })
+        elif service == 'lambda':
+            lambda_client = boto3.client('lambda', region_name=region)
+            response = lambda_client.list_functions()
+            for func in response['Functions']:
+                resources.append({
+                    'id': func['FunctionName'], 
+                    'name': func['FunctionName'], 
+                    'runtime': func['Runtime']
+                })
+        elif service == 'dynamodb':
+            dynamodb = boto3.client('dynamodb', region_name=region)
+            response = dynamodb.list_tables()
+            for table_name in response['TableNames']:
+                resources.append({'id': table_name, 'name': table_name})
+        elif service == 'secretsmanager':
+            secrets = boto3.client('secretsmanager', region_name=region)
+            response = secrets.list_secrets()
+            for secret in response['SecretList']:
+                resources.append({'id': secret['ARN'], 'name': secret['Name']})
+        elif service == 'logs':
+            logs = boto3.client('logs', region_name=region)
+            response = logs.describe_log_groups()
+            for log_group in response['logGroups']:
+                resources.append({'id': log_group['logGroupName'], 'name': log_group['logGroupName']})
+        elif service == 'eks':
+            eks = boto3.client('eks', region_name=region)
+            response = eks.list_clusters()
+            for cluster_name in response['clusters']:
+                cluster = eks.describe_cluster(name=cluster_name)['cluster']
+                resources.append({
+                    'id': cluster_name, 
+                    'name': cluster_name,
+                    'status': cluster['status']
+                })
+        elif service == 'ecs':
+            ecs = boto3.client('ecs', region_name=region)
+            response = ecs.list_clusters()
+            for cluster_arn in response['clusterArns']:
+                cluster_name = cluster_arn.split('/')[-1]
+                resources.append({'id': cluster_arn, 'name': cluster_name})
+        elif service == 'elasticloadbalancing':
+            elb = boto3.client('elbv2', region_name=region)
+            response = elb.describe_load_balancers()
+            for lb in response['LoadBalancers']:
+                resources.append({
+                    'id': lb['LoadBalancerArn'], 
+                    'name': lb['LoadBalancerName'],
+                    'type': lb['Type']
+                })
+        elif service == 'sns':
+            sns = boto3.client('sns', region_name=region)
+            response = sns.list_topics()
+            for topic in response['Topics']:
+                topic_name = topic['TopicArn'].split(':')[-1]
+                resources.append({'id': topic['TopicArn'], 'name': topic_name})
+        elif service == 'sqs':
+            sqs = boto3.client('sqs', region_name=region)
+            response = sqs.list_queues()
+            for queue_url in response.get('QueueUrls', []):
+                queue_name = queue_url.split('/')[-1]
+                resources.append({'id': queue_url, 'name': queue_name})
+        elif service == 'kms':
+            kms = boto3.client('kms', region_name=region)
+            response = kms.list_keys()
+            for key in response['Keys']:
+                key_metadata = kms.describe_key(KeyId=key['KeyId'])['KeyMetadata']
+                resources.append({
+                    'id': key['KeyId'], 
+                    'name': key_metadata.get('Description', key['KeyId'])
+                })
+        
+        print(f"✅ Found {len(resources)} resources for {service}")
+        return jsonify({'resources': resources})
+        
+    except Exception as e:
+        print(f"Error fetching resources for {service}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# Background cleanup job
+def background_cleanup():
+    """Background thread to cleanup expired instance access"""
+    while True:
+        try:
+            time.sleep(300)  # Run every 5 minutes
+            print("🧹 Running background cleanup...")
+            
+            now = datetime.now()
+            for request_id, access_request in list(requests_db.items()):
+                if 'instance_id' not in access_request:
+                    continue
+                
+                expires_at_str = access_request.get('expires_at', '')
+                if not expires_at_str:
+                    continue
+                    
+                expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
+                
+                if expires_at <= now and access_request.get('status') == 'auto_approved' and access_request.get('user_created'):
+                    instance_id = access_request['instance_id']
+                    username = access_request['username']
+                    
+                    result = remove_user_from_instance(instance_id, username)
+                    
+                    if result.get('success'):
+                        access_request['status'] = 'expired'
+                        access_request['user_removed'] = True
+                        access_request['removed_at'] = now.isoformat()
+                        print(f"✅ Cleaned up: {username} from {instance_id}")
+            
+            # Cleanup expired database access - revoke DB users
+            for request_id, access_request in list(requests_db.items()):
+                if access_request.get('type') != 'database_access' or access_request.get('status') != 'approved':
+                    continue
+                expires_at_str = access_request.get('expires_at', '')
+                if not expires_at_str:
+                    continue
+                expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
+                if expires_at <= now:
+                    try:
+                        admin_user = os.getenv('DB_ADMIN_USER', 'admin')
+                        admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
+                        for db in access_request.get('databases', []):
+                            revoke_result = revoke_database_access(
+                                host=db['host'],
+                                port=int(db.get('port', 3306)),
+                                admin_user=admin_user,
+                                admin_password=admin_password,
+                                username=access_request.get('db_username', '')
+                            )
+                            if not revoke_result.get('error'):
+                                print(f"✅ Revoked DB access: {access_request.get('db_username')} from {db.get('name')}")
+                        access_request['status'] = 'expired'
+                        access_request['revoked_at'] = now.isoformat()
+                    except Exception as db_err:
+                        print(f"❌ DB revoke error: {db_err}")
+        except Exception as e:
+            print(f"❌ Background cleanup error: {e}")
+
+@app.route('/api/admin/sync-from-identity-center', methods=['POST'])
+def sync_from_identity_center():
+    """Sync users and groups from AWS Identity Center"""
+    try:
+        identity_store_id = CONFIG.get('identity_store_id')
+        if not identity_store_id:
+            return jsonify({'error': 'Identity Store ID not configured'}), 400
+        
+        users, groups, status = UserSyncEngine.sync_from_identity_center(identity_store_id)
+        
+        return jsonify({
+            'status': status['status'],
+            'users': users,
+            'groups': groups,
+            'summary': status
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/sync-from-ad', methods=['POST'])
+def sync_from_ad():
+    """Sync users and groups from Active Directory"""
+    try:
+        ad_config = request.get_json()
+        
+        required = ['domain', 'ldap_url', 'bind_dn', 'bind_password', 'user_base_dn', 'group_base_dn']
+        for field in required:
+            if field not in ad_config:
+                return jsonify({'error': f'{field} is required'}), 400
+        
+        users, groups, status = UserSyncEngine.sync_from_active_directory(ad_config)
+        
+        return jsonify({
+            'status': status['status'],
+            'users': users,
+            'groups': groups,
+            'summary': status
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/request-feature', methods=['POST'])
+def request_feature():
+    """Log feature request from admin"""
+    try:
+        data = request.get_json()
+        feature = data.get('feature')
+        
+        print(f"📋 Feature request: {feature} at {data.get('requested_at')}")
+        
+        return jsonify({
+            'status': 'received',
+            'message': 'Feature request logged. Contact sales if not in license.'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/toggle-feature', methods=['POST'])
+def toggle_feature():
+    """Enable or disable feature for organization"""
+    try:
+        data = request.get_json()
+        feature = data.get('feature')
+        enabled = data.get('enabled')
+        
+        print(f"✅ Feature {feature} {'enabled' if enabled else 'disabled'}")
+        
+        # Store in database (for now just log)
+        return jsonify({
+            'status': 'success',
+            'feature': feature,
+            'enabled': enabled
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/push-to-identity-center', methods=['POST'])
+def push_to_identity_center():
+    """Push manually created users/groups to Identity Center"""
+    try:
+        data = request.get_json()
+        users = data.get('users', [])
+        groups = data.get('groups', [])
+        
+        identity_store_id = CONFIG.get('identity_store_id')
+        result = UserSyncEngine.push_to_identity_center(identity_store_id, users, groups)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/delete-permissions-config', methods=['GET'])
+def get_delete_permissions_config():
+    """Get current delete permissions configuration"""
+    try:
+        config = StrictPolicies.get_config()
+        return jsonify({
+            'allowDeleteNonProd': config.get('allow_delete_nonprod', True),
+            'allowDeleteProd': config.get('allow_delete_prod', False),
+            'contactEmails': config.get('contact_emails', {})
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/delete-permissions-policy', methods=['POST'])
+def update_delete_permissions_policy():
+    """Update delete permissions policy"""
+    try:
+        data = request.get_json()
+        
+        config_update = {
+            'allow_delete_nonprod': data.get('allowDeleteNonProd', True),
+            'allow_delete_prod': data.get('allowDeleteProd', False)
+        }
+        
+        StrictPolicies.update_config(config_update)
+        
+        print(f"✅ Delete policy updated: NonProd={config_update['allow_delete_nonprod']}, Prod={config_update['allow_delete_prod']}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Delete permissions policy updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/create-permissions-policy', methods=['POST'])
+def update_create_permissions_policy():
+    """Update create permissions policy"""
+    try:
+        data = request.get_json()
+        
+        config_update = {
+            'allow_create_nonprod': data.get('allowCreateNonProd', False),
+            'allow_create_prod': data.get('allowCreateProd', False)
+        }
+        
+        StrictPolicies.update_config(config_update)
+        
+        print(f"✅ Create policy updated: NonProd={config_update['allow_create_nonprod']}, Prod={config_update['allow_create_prod']}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Create permissions policy updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/admin-permissions-policy', methods=['POST'])
+def update_admin_permissions_policy():
+    """Update admin permissions policy"""
+    try:
+        data = request.get_json()
+        
+        config_update = {
+            'allow_admin_nonprod': data.get('allowAdminNonProd', False),
+            'allow_admin_prod': data.get('allowAdminProd', False),
+            'allow_admin_sandbox': data.get('allowAdminSandbox', True)
+        }
+        
+        StrictPolicies.update_config(config_update)
+        
+        print(f"✅ Admin policy updated: NonProd={config_update['allow_admin_nonprod']}, Prod={config_update['allow_admin_prod']}, Sandbox={config_update['allow_admin_sandbox']}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Admin permissions policy updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/policy-settings', methods=['GET'])
+def get_policy_settings():
+    """Get current policy settings"""
+    try:
+        config = StrictPolicies.get_config()
+        return jsonify({
+            'allowDeleteNonProd': config.get('allow_delete_nonprod', True),
+            'allowDeleteProd': config.get('allow_delete_prod', False),
+            'allowCreateNonProd': config.get('allow_create_nonprod', False),
+            'allowCreateProd': config.get('allow_create_prod', False),
+            'allowAdminNonProd': config.get('allow_admin_nonprod', False),
+            'allowAdminProd': config.get('allow_admin_prod', False),
+            'allowAdminSandbox': config.get('allow_admin_sandbox', True)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/contact-emails', methods=['POST'])
+def update_contact_emails():
+    """Update contact emails for different scenarios"""
+    try:
+        data = request.get_json()
+        contact_emails = data.get('contactEmails', {})
+        
+        # Validate email format
+        for key, email in contact_emails.items():
+            if not email or '@' not in email:
+                return jsonify({'error': f'Invalid email for {key}'}), 400
+        
+        config_update = {'contact_emails': contact_emails}
+        StrictPolicies.update_config(config_update)
+        
+        print(f"✅ Contact emails updated: {contact_emails}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Contact emails updated successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ai/mode', methods=['GET'])
+def get_ai_mode():
+    """Get current AI conversation mode (bedrock or keyword)"""
+    try:
+        mode = ConversationManager.get_mode()
+        return jsonify({
+            'mode': mode,
+            'description': 'AWS Bedrock AI' if mode == 'bedrock' else 'Keyword-based matching'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/help-assistant', methods=['POST'])
+def help_assistant():
+    """Global help assistant for users"""
+    try:
+        data = request.get_json()
+        conversation_id = data.get('conversation_id')
+        user_message = data.get('user_message')
+        
+        if not user_message:
+            return jsonify({'error': 'Message is required'}), 400
+        
+        result = HelpAssistant.get_help_response(user_message, conversation_id)
+        
+        if 'error' in result:
+            return jsonify(result), 400
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/scp/troubleshoot', methods=['POST'])
+def scp_troubleshoot():
+    """SCP troubleshooting assistant - READ ONLY investigation"""
+    try:
+        data = request.get_json()
+        user_message = data.get('user_message')
+        conversation_id = data.get('conversation_id')
+        
+        if not user_message:
+            return jsonify({'error': 'Message is required'}), 400
+        
+        result = SCPTroubleshoot.investigate(user_message, conversation_id)
+        
+        if 'error' in result:
+            return jsonify(result), 400
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/unified-assistant', methods=['POST'])
+def unified_assistant():
+    """Unified AI Assistant - Handles both help and policy building"""
+    try:
+        data = request.get_json()
+        conversation_id = data.get('conversation_id')
+        user_message = data.get('user_message')
+        user_email = data.get('user_email', 'user@example.com')
+        selected_option = data.get('selected_option')  # For interactive selections
+        
+        # Validate input - either user_message or selected_option must be provided
+        if not user_message and not selected_option:
+            return jsonify({'error': 'Message or selection is required'}), 400
+        
+        # Ensure user_message is a string (can be empty if selected_option is provided)
+        if user_message is None:
+            user_message = ''
+        user_message = str(user_message).strip()
+        
+        # Get available accounts and regions
+        available_accounts = []
+        for acc_id, acc_data in CONFIG.get('accounts', {}).items():
+            available_accounts.append({
+                'id': acc_id,
+                'name': acc_data.get('name', acc_id),
+                'environment': acc_data.get('environment', 'nonprod')
+            })
+        
+        available_regions = [
+            {'id': 'us-east-1', 'name': 'US East (N. Virginia)'},
+            {'id': 'us-west-2', 'name': 'US West (Oregon)'},
+            {'id': 'eu-west-1', 'name': 'Europe (Ireland)'},
+            {'id': 'ap-south-1', 'name': 'Asia Pacific (Mumbai)'},
+            {'id': 'ap-southeast-1', 'name': 'Asia Pacific (Singapore)'},
+            {'id': 'ap-northeast-1', 'name': 'Asia Pacific (Tokyo)'}
+        ]
+        
+        # Get available services (will be filtered by Resource Manager API later)
+        available_services = [
+            {'id': 'ec2', 'name': 'EC2', 'description': 'Virtual servers'},
+            {'id': 's3', 'name': 'S3', 'description': 'Object storage'},
+            {'id': 'lambda', 'name': 'Lambda', 'description': 'Serverless functions'},
+            {'id': 'rds', 'name': 'RDS', 'description': 'Managed databases'},
+            {'id': 'dynamodb', 'name': 'DynamoDB', 'description': 'NoSQL database'},
+            {'id': 'kms', 'name': 'KMS', 'description': 'Key management'},
+            {'id': 'secretsmanager', 'name': 'Secrets Manager', 'description': 'Secrets storage'},
+            {'id': 'iam', 'name': 'IAM', 'description': 'Identity & access'},
+            {'id': 'cloudwatch', 'name': 'CloudWatch', 'description': 'Monitoring'},
+            {'id': 'logs', 'name': 'CloudWatch Logs', 'description': 'Log management'},
+            {'id': 'sns', 'name': 'SNS', 'description': 'Notifications'},
+            {'id': 'sqs', 'name': 'SQS', 'description': 'Message queue'},
+            {'id': 'vpc', 'name': 'VPC', 'description': 'Virtual network'},
+            {'id': 'elasticloadbalancing', 'name': 'ELB', 'description': 'Load balancer'}
+        ]
+        
+        # Handle selected option (user clicked a button)
+        if selected_option:
+            option_type = selected_option.get('type')
+            option_value = selected_option.get('value')
+            
+            # Update conversation state
+            if conversation_id:
+                conv = ConversationManager.get_conversation(conversation_id)
+                if conv:
+                    if option_type == 'account':
+                        conv['account_id'] = option_value
+                        UnifiedAssistant.update_conversation_state(conversation_id, {'account_id': option_value})
+                        user_message = user_message or f"I need access to account {option_value}"
+                    elif option_type == 'region':
+                        conv['region'] = option_value
+                        UnifiedAssistant.update_conversation_state(conversation_id, {'region': option_value})
+                        user_message = user_message or f"Region: {option_value}"
+                    elif option_type == 'permission_set':
+                        conv['permission_set'] = option_value
+                        UnifiedAssistant.update_conversation_state(conversation_id, {'permission_set': option_value, 'use_custom_permissions': False})
+                        user_message = user_message or f"Use permission set: {option_value}"
+                    elif option_type == 'use_custom_permissions':
+                        conv['use_custom_permissions'] = True
+                        conv['permission_set'] = None
+                        UnifiedAssistant.update_conversation_state(conversation_id, {'use_custom_permissions': True, 'permission_set': None})
+                        user_message = user_message or "I want to create custom permissions"
+                    elif option_type == 'service':
+                        current_services = conv.get('services', [])
+                        if option_value not in current_services:
+                            current_services.append(option_value)
+                        conv['services'] = current_services
+                        UnifiedAssistant.update_conversation_state(conversation_id, {'services': current_services})
+                        user_message = user_message or f"I need {option_value} access"
+                    elif option_type == 'resource':
+                        service = selected_option.get('service')
+                        if service:
+                            current_resources = conv.get('selected_resources', {})
+                            if service not in current_resources:
+                                current_resources[service] = []
+                            if option_value not in current_resources[service]:
+                                current_resources[service].append({
+                                    'id': option_value,
+                                    'name': selected_option.get('label', option_value)
+                                })
+                            conv['selected_resources'] = current_resources
+                            UnifiedAssistant.update_conversation_state(conversation_id, {'selected_resources': current_resources})
+                        user_message = user_message or f"Selected resource: {option_value}"
+            
+            # Ensure user_message is set if not provided
+            if not user_message or not user_message.strip():
+                user_message = f"Selected {option_type}: {option_value}"
+        
+        # Get regions for selected account if account is selected
+        if conversation_id:
+            conv = ConversationManager.get_conversation(conversation_id)
+            if conv and conv.get('account_id'):
+                # Get regions for this account (could be from account config)
+                account_id = conv.get('account_id')
+                # For now, use default regions, but could be account-specific
+                pass
+        
+        # Get permission sets if account and region are selected
+        permission_sets = []
+        if conversation_id:
+            conv = ConversationManager.get_conversation(conversation_id)
+            if conv and conv.get('account_id') and conv.get('region'):
+                # Get permission sets from CONFIG
+                permission_sets = CONFIG.get('permission_sets', [])
+        
+        # Get resources for selected service if service is selected
+        resources = []
+        if conversation_id:
+            conv = ConversationManager.get_conversation(conversation_id)
+            if conv and conv.get('account_id') and conv.get('region') and selected_option and selected_option.get('type') == 'service':
+                service = selected_option.get('value')
+                # Get resources from AWS Resource Manager API
+                resources = get_resources_for_service(conv.get('account_id'), conv.get('region'), service)
+        
+        # Ensure user_message is not empty before calling get_response
+        if not user_message or not user_message.strip():
+            # If no message but selected_option was provided, create a default message
+            if selected_option:
+                user_message = f"Selected {selected_option.get('type', 'option')}: {selected_option.get('value', '')}"
+            else:
+                return jsonify({'error': 'Message cannot be empty'}), 400
+        
+        result = UnifiedAssistant.get_response(
+            user_message,
+            conversation_id,
+            available_accounts,
+            available_regions,
+            available_services,
+            CONFIG.get('permission_sets', [])
+        )
+        
+        if 'error' in result:
+            return jsonify(result), 400
+        
+        # Add available options to response based on current step
+        state = result.get('state', {})
+        step = result.get('step', 'welcome')
+        
+        if step == 'account':
+            result['options'] = {
+                'type': 'accounts',
+                'items': available_accounts
+            }
+        elif step == 'region':
+            # Get regions for selected account
+            if state.get('account_id'):
+                result['options'] = {
+                    'type': 'regions',
+                    'items': available_regions
+                }
+        elif step == 'permission_set':
+            # Show permission sets
+            result['options'] = {
+                'type': 'permission_sets',
+                'items': [{'id': ps.get('arn', ''), 'name': ps.get('name', '')} for ps in permission_sets] if permission_sets else []
+            }
+        elif step == 'services':
+            # Filter services based on Resource Manager API (for now show all)
+            result['options'] = {
+                'type': 'services',
+                'items': available_services
+            }
+        elif step == 'resources':
+            # Show resources for selected service
+            if resources:
+                result['options'] = {
+                    'type': 'resources',
+                    'items': resources,
+                    'service': state.get('current_service')
+                }
+            else:
+                # If no resources found, ask user to specify
+                result['ai_response'] = result.get('ai_response', '') + '\n\nPlease specify the resource name or ID you need access to.'
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        print(f"❌ Unified Assistant error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/resources/<provider>/<region>/<service>', methods=['GET'])
+def get_resources_by_provider(provider, region, service):
+    """Get resources for a service using AWS Resource Manager API"""
+    try:
+        account_id = request.args.get('account_id', '')
+        if not account_id:
+            return jsonify({'error': 'Account ID required'}), 400
+        
+        resources = get_resources_for_service(account_id, region, service)
+        
+        return jsonify({
+            'resources': resources,
+            'service': service,
+            'region': region,
+            'provider': provider
+        })
+    except Exception as e:
+        print(f"⚠️ Error getting resources: {e}")
+        return jsonify({'error': str(e), 'resources': []}), 500
+
+def get_resources_for_service(account_id, region, service):
+    """Get resources for a service using AWS Resource Manager API"""
+    resources = []
+    
+    try:
+        # Try to use Resource Groups Tagging API or direct service APIs
+        # For now, use direct service APIs as fallback
+        
+        if service == 's3':
+            # List S3 buckets
+            try:
+                s3 = boto3.client('s3', region_name=region)
+                response = s3.list_buckets()
+                for bucket in response.get('Buckets', []):
+                    resources.append({
+                        'id': bucket['Name'],
+                        'arn': f'arn:aws:s3:::{bucket["Name"]}',
+                        'name': bucket['Name']
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list S3 buckets: {e}")
+        
+        elif service == 'ec2':
+            # List EC2 instances
+            try:
+                ec2 = boto3.client('ec2', region_name=region)
+                response = ec2.describe_instances()
+                for reservation in response.get('Reservations', []):
+                    for instance in reservation.get('Instances', []):
+                        instance_id = instance['InstanceId']
+                        name = ''
+                        for tag in instance.get('Tags', []):
+                            if tag['Key'] == 'Name':
+                                name = tag['Value']
+                                break
+                        resources.append({
+                            'id': instance_id,
+                            'arn': f'arn:aws:ec2:{region}:{account_id}:instance/{instance_id}',
+                            'name': name or instance_id
+                        })
+            except Exception as e:
+                print(f"⚠️ Could not list EC2 instances: {e}")
+        
+        elif service == 'lambda':
+            # List Lambda functions
+            try:
+                lambda_client = boto3.client('lambda', region_name=region)
+                response = lambda_client.list_functions()
+                for func in response.get('Functions', []):
+                    resources.append({
+                        'id': func['FunctionName'],
+                        'arn': func['FunctionArn'],
+                        'name': func['FunctionName']
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list Lambda functions: {e}")
+        
+        elif service == 'rds':
+            # List RDS instances
+            try:
+                rds = boto3.client('rds', region_name=region)
+                response = rds.describe_db_instances()
+                for db in response.get('DBInstances', []):
+                    resources.append({
+                        'id': db['DBInstanceIdentifier'],
+                        'arn': db['DBInstanceArn'],
+                        'name': db['DBInstanceIdentifier']
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list RDS instances: {e}")
+        
+        elif service == 'dynamodb':
+            # List DynamoDB tables
+            try:
+                dynamodb = boto3.client('dynamodb', region_name=region)
+                response = dynamodb.list_tables()
+                for table_name in response.get('TableNames', []):
+                    table_info = dynamodb.describe_table(TableName=table_name)
+                    resources.append({
+                        'id': table_name,
+                        'arn': table_info['Table']['TableArn'],
+                        'name': table_name
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list DynamoDB tables: {e}")
+        
+        elif service == 'kms':
+            # List KMS keys
+            try:
+                kms = boto3.client('kms', region_name=region)
+                response = kms.list_keys()
+                for key in response.get('Keys', []):
+                    key_info = kms.describe_key(KeyId=key['KeyId'])
+                    resources.append({
+                        'id': key['KeyId'],
+                        'arn': key_info['KeyMetadata']['Arn'],
+                        'name': key_info['KeyMetadata'].get('Description', key['KeyId'])
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list KMS keys: {e}")
+        
+        elif service == 'secretsmanager':
+            # List Secrets Manager secrets
+            try:
+                secrets = boto3.client('secretsmanager', region_name=region)
+                response = secrets.list_secrets()
+                for secret in response.get('SecretList', []):
+                    resources.append({
+                        'id': secret['Name'],
+                        'arn': secret['ARN'],
+                        'name': secret['Name']
+                    })
+            except Exception as e:
+                print(f"⚠️ Could not list secrets: {e}")
+        
+    except Exception as e:
+        print(f"⚠️ Error getting resources: {e}")
+    
+    return resources
+
+@app.route('/api/unified-assistant/generate', methods=['POST'])
+def unified_assistant_generate():
+    """Generate permissions from collected conversation data"""
+    try:
+        data = request.get_json()
+        conversation_id = data.get('conversation_id')
+        
+        if not conversation_id:
+            return jsonify({'error': 'Conversation ID required'}), 400
+        
+        # Get state from conversation
+        state = UnifiedAssistant.get_conversation_state(conversation_id)
+        
+        if not state.get('use_case'):
+            return jsonify({'error': 'Use case not collected yet'}), 400
+        
+        # Use existing generate_permissions logic
+        # But with data from conversation state
+        use_case = state.get('use_case')
+        account_id = state.get('account_id')
+        region = state.get('region', 'ap-south-1')
+        selected_resources = state.get('resources', {})
+        
+        # Call the existing permission generation
+        # We'll need to adapt this to work with conversation state
+        # For now, return the state so frontend can submit it
+        return jsonify({
+            'ready': True,
+            'conversation_id': conversation_id,
+            'data': {
+                'use_case': use_case,
+                'account_id': account_id,
+                'region': region,
+                'selected_resources': selected_resources,
+                'services': state.get('services', []),
+                'justification': state.get('justification')
+            }
+        })
+        
+    except Exception as e:
+        print(f"❌ Generate error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/generate-guardrails', methods=['POST'])
+def generate_guardrails():
+    """AI-powered conversational guardrails generator"""
+    try:
+        data = request.get_json()
+        conversation_id = data.get('conversation_id')
+        user_message = data.get('user_message')
+        mfa_token = data.get('mfa_token')
+        
+        if not user_message:
+            return jsonify({'error': 'Message is required'}), 400
+        
+        result = GuardrailsGenerator.generate_guardrails(
+            user_message, 
+            mfa_token, 
+            conversation_id, 
+            user_message
+        )
+        
+        if 'error' in result:
+            return jsonify(result), 400
+        
+        # Return full response from guardrails generator
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/access-rules', methods=['GET'])
+def get_access_rules():
+    """Get all access rules"""
+    try:
+        return jsonify(AccessRules.get_rules())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/access-rules/<rule_id>', methods=['GET'])
+def get_access_rule(rule_id):
+    """Get specific access rule"""
+    try:
+        rule = AccessRules.get_rule(rule_id)
+        if rule:
+            return jsonify(rule)
+        return jsonify({'error': 'Rule not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/access-rules/<rule_id>', methods=['DELETE'])
+def delete_access_rule(rule_id):
+    """Delete access rule"""
+    try:
+        result = AccessRules.delete_rule(rule_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/groups', methods=['GET', 'POST'])
+def manage_user_groups():
+    """Get all user groups or create new group"""
+    try:
+        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+        
+        if request.method == 'GET':
+            with open(groups_path, 'r') as f:
+                return jsonify(json.load(f))
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            group_name = data.get('name')
+            
+            if not group_name:
+                return jsonify({'error': 'Group name is required'}), 400
+            
+            # Load existing groups
+            with open(groups_path, 'r') as f:
+                groups_data = json.load(f)
+            
+            # Create group ID from name
+            group_id = group_name.lower().replace(' ', '_')
+            
+            # Check if group already exists
+            if any(g['id'] == group_id for g in groups_data['groups']):
+                return jsonify({'error': 'Group already exists'}), 400
+            
+            # Add new group
+            new_group = {
+                'id': group_id,
+                'name': group_name,
+                'description': data.get('description', ''),
+                'members': []
+            }
+            
+            groups_data['groups'].append(new_group)
+            
+            # Save
+            with open(groups_path, 'w') as f:
+                json.dump(groups_data, f, indent=2)
+            
+            print(f"✅ Group created: {group_name} ({group_id})")
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'Group {group_name} created successfully',
+                'group': new_group
+            })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/org-users', methods=['GET', 'POST'])
+def manage_org_users():
+    """Get all organization users or create new user"""
+    try:
+        users_path = os.path.join(os.path.dirname(__file__), 'org_users.json')
+        
+        # Create file if doesn't exist
+        if not os.path.exists(users_path):
+            with open(users_path, 'w') as f:
+                json.dump({'users': []}, f)
+        
+        if request.method == 'GET':
+            with open(users_path, 'r') as f:
+                return jsonify(json.load(f))
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            
+            required = ['email', 'name', 'group_id']
+            for field in required:
+                if not data.get(field):
+                    return jsonify({'error': f'{field} is required'}), 400
+            
+            # Load existing users
+            with open(users_path, 'r') as f:
+                users_data = json.load(f)
+            
+            # Check if user already exists
+            if any(u['email'] == data['email'] for u in users_data['users']):
+                return jsonify({'error': 'User already exists'}), 400
+            
+            # Add new user
+            new_user = {
+                'email': data['email'],
+                'name': data['name'],
+                'group_id': data['group_id'],
+                'created_at': datetime.now().isoformat()
+            }
+            
+            users_data['users'].append(new_user)
+            
+            # Save
+            with open(users_path, 'w') as f:
+                json.dump(users_data, f, indent=2)
+            
+            # Add user to group members
+            groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+            with open(groups_path, 'r') as f:
+                groups_data = json.load(f)
+            
+            for group in groups_data['groups']:
+                if group['id'] == data['group_id']:
+                    if data['email'] not in group['members']:
+                        group['members'].append(data['email'])
+            
+            with open(groups_path, 'w') as f:
+                json.dump(groups_data, f, indent=2)
+            
+            print(f"✅ User created: {data['name']} ({data['email']}) in group {data['group_id']}")
+            
+            return jsonify({
+                'status': 'success',
+                'message': f'User {data['name']} created successfully',
+                'user': new_user
+            })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/save-guardrails', methods=['POST'])
+def save_guardrails():
+    """Save guardrails configuration"""
+    try:
+        data = request.get_json()
+        
+        # Store in file (in production, use database)
+        guardrails_path = os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
+        with open(guardrails_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        
+        print(f"✅ Guardrails saved: {len(data.get('serviceRestrictions', []))} service, {len(data.get('deleteRestrictions', []))} delete, {len(data.get('createRestrictions', []))} create rules")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Guardrails saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/guardrails', methods=['GET'])
+def get_guardrails():
+    """Get current guardrails configuration"""
+    try:
+        guardrails_path = os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
+        if os.path.exists(guardrails_path):
+            with open(guardrails_path, 'r') as f:
+                return jsonify(json.load(f))
+        return jsonify({
+            'serviceRestrictions': [],
+            'deleteRestrictions': [],
+            'createRestrictions': [],
+            'customGuardrails': []
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps', methods=['GET'])
+def list_scps():
+    """List all Service Control Policies"""
+    try:
+        result = SCPManager.list_policies()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps/<policy_id>', methods=['GET'])
+def get_scp(policy_id):
+    """Get SCP details"""
+    try:
+        result = SCPManager.get_policy_content(policy_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps', methods=['POST'])
+def create_scp():
+    """Create new SCP"""
+    try:
+        data = request.get_json()
+        result = SCPManager.create_policy(
+            name=data['name'],
+            description=data.get('description', ''),
+            content=data['content']
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps/<policy_id>', methods=['PUT'])
+def update_scp(policy_id):
+    """Update SCP"""
+    try:
+        data = request.get_json()
+        result = SCPManager.update_policy(
+            policy_id=policy_id,
+            name=data.get('name'),
+            description=data.get('description'),
+            content=data.get('content')
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps/<policy_id>', methods=['DELETE'])
+def delete_scp(policy_id):
+    """Delete SCP"""
+    try:
+        result = SCPManager.delete_policy(policy_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps/<policy_id>/attach', methods=['POST'])
+def attach_scp(policy_id):
+    """Attach SCP to account/OU"""
+    try:
+        data = request.get_json()
+        result = SCPManager.attach_policy(policy_id, data['target_id'])
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/scps/<policy_id>/detach', methods=['POST'])
+def detach_scp(policy_id):
+    """Detach SCP from account/OU"""
+    try:
+        data = request.get_json()
+        result = SCPManager.detach_policy(policy_id, data['target_id'])
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/admin/accounts/<account_id>/scps', methods=['GET'])
+def get_account_scps(account_id):
+    """Get SCPs attached to account"""
+    try:
+        result = SCPManager.get_account_policies(account_id)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ai/config', methods=['GET', 'POST'])
+def manage_ai_config():
+    """Get or update Bedrock AI configuration"""
+    try:
+        config_path = os.path.join(os.path.dirname(__file__), 'bedrock_config.json')
+        
+        if request.method == 'GET':
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            # Hide credentials in response
+            safe_config = config.copy()
+            if safe_config.get('aws_access_key_id'):
+                safe_config['aws_access_key_id'] = '***' + safe_config['aws_access_key_id'][-4:]
+            if safe_config.get('aws_secret_access_key'):
+                safe_config['aws_secret_access_key'] = '***'
+            return jsonify(safe_config)
+        
+        elif request.method == 'POST':
+            data = request.get_json()
+            
+            # Update config file
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            # Update fields
+            if 'enabled' in data:
+                config['enabled'] = data['enabled']
+            if 'aws_region' in data:
+                config['aws_region'] = data['aws_region']
+            if 'model_id' in data:
+                config['model_id'] = data['model_id']
+            if 'aws_access_key_id' in data and not data['aws_access_key_id'].startswith('***'):
+                config['aws_access_key_id'] = data['aws_access_key_id']
+            if 'aws_secret_access_key' in data and data['aws_secret_access_key'] != '***':
+                config['aws_secret_access_key'] = data['aws_secret_access_key']
+            if 'aws_session_token' in data:
+                config['aws_session_token'] = data['aws_session_token']
+            if 'max_tokens' in data:
+                config['max_tokens'] = data['max_tokens']
+            if 'temperature' in data:
+                config['temperature'] = data['temperature']
+            
+            # Save config
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            # Reload config in ConversationManager
+            ConversationManager.bedrock_config = None
+            ConversationManager.bedrock_client = None
+            ConversationManager.load_bedrock_config()
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'AI configuration updated. Restart Flask to apply changes.',
+                'mode': ConversationManager.get_mode()
+            })
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Database endpoints
+from database_manager import create_database_user, execute_query, revoke_database_access, generate_password
+from vault_manager import VaultManager
+
+# Database AI conversation storage
+db_conversations = {}
+
+@app.route('/api/databases/ai-chat', methods=['POST'])
+def database_ai_chat():
+    """AI chat for database access requests"""
+    try:
+        from prompt_injection_guard import validate_ai_input
+        
+        data = request.get_json()
+        message = data.get('message', '')
+        conversation_id = data.get('conversation_id')
+        
+        if not message:
+            return jsonify({'error': 'Message required'}), 400
+        
+        # Prompt injection guard - validate before sending to AI
+        is_valid, error = validate_ai_input(message, check_sql=True)
+        if not is_valid:
+            return jsonify({'error': error}), 400
+        
+        # Create or get conversation
+        if not conversation_id:
+            conversation_id = str(uuid.uuid4())
+            db_conversations[conversation_id] = []
+        
+        # Add user message
+        db_conversations[conversation_id].append({'role': 'user', 'content': message})
+        
+        # Build conversation history - include JIT roles so AI can explain them
+        messages = [{
+            'role': 'user',
+            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. Help users choose the right access role and understand what they can do.
+
+AVAILABLE JIT ROLES (choose one when requesting access):
+1. **Read-only**: SELECT, EXPLAIN, SHOW, DESCRIBE — for viewing data, reports, debugging. Safest option.
+2. **Read + Limited Write**: Above + INSERT, UPDATE, DELETE — for modifying data (no DDL).
+3. **Read + Full Write**: Above + TRUNCATE, CREATE, ALTER, DROP — for schema changes, migrations.
+4. **Admin**: All operations including GRANT, CREATE USER — for DBA tasks. Highest approval needed.
+
+When users ask "what roles are available", "what can I do", "which role do I need", explain these roles clearly and suggest the minimal role for their use case.
+
+User request: {message}
+
+Provide a helpful response. Be conversational and friendly. If they ask about roles, explain the 4 roles above."""
+        }]
+        
+        # Call Bedrock AI
+        bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1')
+        response = bedrock.invoke_model(
+            modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+            body=json.dumps({
+                'anthropic_version': 'bedrock-2023-05-31',
+                'max_tokens': 500,
+                'messages': messages
+            })
+        )
+        
+        result = json.loads(response['body'].read())
+        ai_response = result['content'][0]['text']
+        
+        # Store AI response
+        db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+        
+        # Try to extract suggested permissions
+        suggested_perms = []
+        perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'GRANT', 'REVOKE']
+        for perm in perms:
+            if perm in ai_response.upper():
+                suggested_perms.append(perm)
+        
+        return jsonify({
+            'response': ai_response,
+            'conversation_id': conversation_id,
+            'permissions': suggested_perms if suggested_perms else None
+        })
+        
+    except Exception as e:
+        print(f"AI chat error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/gcp/projects', methods=['GET'])
+def get_gcp_projects():
+    """Mock GCP projects - integrate with GCP API when ready"""
+    return jsonify({
+        'projects': [
+            {'id': 'proj-dev', 'name': 'Development'},
+            {'id': 'proj-staging', 'name': 'Staging'},
+            {'id': 'proj-prod', 'name': 'Production'}
+        ]
+    })
+
+@app.route('/api/azure/subscriptions', methods=['GET'])
+def get_azure_subscriptions():
+    """Mock Azure subscriptions - integrate with Azure API when ready"""
+    return jsonify({
+        'subscriptions': [
+            {'id': 'sub-dev', 'name': 'Dev Subscription'},
+            {'id': 'sub-prod', 'name': 'Production Subscription'}
+        ]
+    })
+
+@app.route('/api/oracle/compartments', methods=['GET'])
+def get_oracle_compartments():
+    """Mock Oracle compartments - integrate with OCI API when ready"""
+    return jsonify({
+        'compartments': [
+            {'id': 'comp-root', 'name': 'Root'},
+            {'id': 'comp-dev', 'name': 'Development'},
+            {'id': 'comp-prod', 'name': 'Production'}
+        ]
+    })
+
+@app.route('/api/mongodb-atlas/projects', methods=['GET'])
+def get_mongodb_atlas_projects():
+    """Mock MongoDB Atlas projects/clusters - integrate with Atlas API when ready"""
+    return jsonify({
+        'projects': [
+            {'id': 'atlas-cluster-1', 'name': 'Cluster-Production'},
+            {'id': 'atlas-cluster-2', 'name': 'Cluster-Staging'}
+        ]
+    })
+
+@app.route('/api/databases', methods=['GET'])
+def get_databases():
+    """Get databases - from AWS RDS when account_id provided, else mock fallback"""
+    try:
+        account_id = request.args.get('account_id')
+        region = request.args.get('region', 'ap-south-1')
+        
+        if account_id and account_id in CONFIG.get('accounts', {}):
+            # Fetch RDS instances from AWS
+            try:
+                rds = boto3.client('rds', region_name=region)
+                response = rds.describe_db_instances()
+                databases = []
+                for db in response.get('DBInstances', []):
+                    engine = db.get('Engine', 'mysql')
+                    port = db.get('Endpoint', {}).get('Port', 3306)
+                    host = db.get('Endpoint', {}).get('Address', '')
+                    if host:
+                        databases.append({
+                            'id': db['DBInstanceIdentifier'],
+                            'name': db.get('DBName', db['DBInstanceIdentifier']),
+                            'engine': 'MySQL' if 'mysql' in engine else 'PostgreSQL' if 'postgres' in engine else engine,
+                            'host': host,
+                            'port': port,
+                            'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
+                        })
+                return jsonify({'databases': databases})
+            except Exception as e:
+                print(f"RDS fetch failed, using fallback: {e}")
+        
+        # Fallback: mock data for when AWS not configured
+        databases = [{
+            'id': 'mysql-test',
+            'name': 'testdb',
+            'engine': 'MySQL',
+            'host': os.getenv('DB_HOST', 'localhost'),
+            'port': int(os.getenv('DB_PORT', '3306')),
+            'status': 'available'
+        }]
+        return jsonify({'databases': databases})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/request-access', methods=['POST'])
+def request_database_access():
+    try:
+        data = request.get_json()
+        databases = data.get('databases', [])
+        user_email = data.get('user_email')
+        user_full_name = data.get('user_full_name')
+        db_username = data.get('db_username')
+        permissions = data.get('permissions')
+        query_types = data.get('query_types', [])
+        duration_hours = data.get('duration_hours', 2)
+        justification = data.get('justification')
+        use_vault = data.get('use_vault', False)
+        ai_generated = data.get('ai_generated', False)
+        role = data.get('role', 'read_only')  # MVP 2: read_only, read_limited_write, read_full_write, admin
+        
+        has_delete = 'ALL' in permissions or 'DELETE' in permissions or 'DROP' in permissions or 'TRUNCATE' in permissions or 'DDL' in query_types
+        
+        request_id = str(uuid.uuid4())
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        if has_delete:
+            status = 'pending'
+            approval_required = ['ciso']
+            approval_message = 'DDL/DELETE/Destructive queries require CISO approval'
+        else:
+            status = 'approved'
+            approval_required = ['self']
+            approval_message = 'Auto-approved for read/write queries'
+        
+        # Try Vault first, fallback to direct creation
+        vault_lease_id = None
+        if status == 'approved':
+            try:
+                vault_creds = VaultManager.create_database_credentials(
+                    db_host=databases[0]['host'],
+                    db_name=databases[0]['name'],
+                    username=db_username,
+                    permissions=permissions,
+                    duration_hours=duration_hours
+                )
+                if vault_creds:
+                    db_username = vault_creds['username']
+                    password = vault_creds['password']
+                    vault_lease_id = vault_creds['lease_id']
+                    print(f"✅ Vault credentials created: {db_username}")
+                else:
+                    password = generate_password()
+                    print("⚠️ Vault returned None, using direct creation")
+            except Exception as e:
+                print(f"⚠️ Vault unavailable, using direct creation: {e}")
+                password = generate_password()
+        else:
+            password = None
+        
+        db_request = {
+            'id': request_id,
+            'type': 'database_access',
+            'databases': databases,
+            'user_email': user_email,
+            'user_full_name': user_full_name,
+            'db_username': db_username,
+            'db_password': password,
+            'permissions': permissions,
+            'query_types': query_types,
+            'role': role,
+            'duration_hours': duration_hours,
+            'justification': justification,
+            'use_vault': use_vault,
+            'vault_lease_id': vault_lease_id,
+            'ai_generated': ai_generated,
+            'status': status,
+            'approval_required': approval_required,
+            'created_at': datetime.now().isoformat(),
+            'expires_at': expires_at.isoformat()
+        }
+        
+        if status == 'approved' and not vault_lease_id:
+            admin_user = os.getenv('DB_ADMIN_USER', 'admin')
+            admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
+            
+            for db in databases:
+                create_database_user(
+                    host=db['host'],
+                    port=int(db['port']),
+                    admin_user=admin_user,
+                    admin_password=admin_password,
+                    new_user=db_username,
+                    new_password=password,
+                    database=db['name'],
+                    permissions=permissions
+                )
+        
+        requests_db[request_id] = db_request
+        
+        # MVP 2: Never return password to client
+        return jsonify({
+            'status': status,
+            'request_id': request_id,
+            'message': approval_message
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/approved', methods=['GET'])
+def get_approved_databases():
+    try:
+        user_email = request.args.get('user_email')
+        approved_databases = []
+        
+        for req_id, req in requests_db.items():
+            if (req.get('type') == 'database_access' and 
+                req.get('user_email') == user_email and 
+                req.get('status') == 'approved'):
+                
+                for db in req.get('databases', []):
+                    approved_databases.append({
+                        'request_id': req_id,
+                        'db_name': db['name'],
+                        'engine': db['engine'],
+                        'host': db['host'],
+                        'port': db['port'],
+                        'db_username': req['db_username'],
+                        'role': req.get('role', 'read_only'),
+                        'expires_at': req['expires_at']
+                    })
+        
+        return jsonify({'databases': approved_databases})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/execute-query', methods=['POST'])
+def execute_database_query():
+    """Execute SQL query with time-based access enforcement. MVP 2: Backend fetches credentials."""
+    try:
+        from prompt_injection_guard import validate_sql_query
+        
+        data = request.get_json()
+        request_id = data.get('request_id')
+        user_email = data.get('user_email')
+        query = data.get('query', '').strip()
+        db_name = data.get('dbName')
+        
+        if not request_id or not user_email:
+            return jsonify({'error': 'Request ID and user email required for audit'}), 400
+        
+        # Time-based enforcement: validate access is still valid
+        if request_id not in requests_db:
+            return jsonify({'error': 'Access request not found'}), 404
+        
+        db_request = requests_db[request_id]
+        if db_request.get('type') != 'database_access':
+            return jsonify({'error': 'Invalid request type'}), 400
+        if db_request.get('user_email') != user_email:
+            return jsonify({'error': 'Access denied: user mismatch'}), 403
+        if db_request.get('status') != 'approved':
+            return jsonify({'error': 'Access not approved'}), 403
+        
+        expires_at_str = db_request.get('expires_at', '')
+        if expires_at_str:
+            expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
+            if datetime.now() >= expires_at:
+                return jsonify({'error': 'Access expired. Please request new database access.'}), 403
+        
+        # MVP 2: Resolve credentials from backend - never trust client
+        databases = db_request.get('databases', [])
+        if not databases:
+            return jsonify({'error': 'No database in request'}), 400
+        db_info = databases[0]
+        host = db_info.get('host')
+        port = int(db_info.get('port', 3306))
+        database = db_name or db_info.get('name', '')
+        username = db_request.get('db_username')
+        password = db_request.get('db_password')
+        
+        if not all([host, username, password, database]):
+            return jsonify({'error': 'Database credentials not available. Request may have expired.'}), 400
+        
+        # SQL validation (role-based)
+        role = db_request.get('role', 'read_only')
+        is_valid, sql_error = validate_sql_query(query, role=role)
+        if not is_valid:
+            try:
+                from audit_log import log_db_query
+                log_db_query(user_email, request_id, role, query, allowed=False, error=sql_error)
+            except Exception:
+                pass
+            return jsonify({'error': sql_error}), 400
+        
+        result = execute_query(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            database=database,
+            query=query
+        )
+        
+        # MVP 2: Audit log
+        try:
+            from audit_log import log_db_query
+            rows = len(result.get('results', [])) if isinstance(result.get('results'), list) else result.get('affected_rows')
+            err = result.get('error')
+            log_db_query(user_email, request_id, role, query, allowed=(err is None), rows_returned=rows, error=err)
+        except Exception:
+            pass
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Initialize on startup
 if __name__ == '__main__':
+    initialize_aws_config()
+    
+    # Load Bedrock config on startup
+    ConversationManager.load_bedrock_config()
+    
+    # Start background cleanup thread
+    cleanup_thread = threading.Thread(target=background_cleanup, daemon=True)
+    cleanup_thread.start()
+    print("✅ Background cleanup thread started")
+    
     app.run(debug=True, port=5000)

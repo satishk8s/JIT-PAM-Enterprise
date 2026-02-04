@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CloudVault</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="style-v2.css">
+</head>
+<body>
+  <!-- Top Navigation -->
+  <nav class="top-nav">
+    <div class="nav-left">
+      <h1><i class="fas fa-shield-alt"></i> CloudVault</h1>
+    </div>
+    <div class="nav-right">
+      <div class="profile-dropdown">
+        <button class="profile-btn" onclick="toggleProfileDropdown()">
+          <i class="fas fa-user-circle"></i>
+          <span id="username-display">Loading...</span>
+          <i class="fas fa-chevron-down"></i>
+        </button>
+        <div class="dropdown-menu" id="profileDropdown">
+          <div class="dropdown-header">
+            <div class="user-info">
+              <strong id="profile-name">User Name</strong>
+              <small id="profile-role">Role</small>
+            </div>
+          </div>
+          <div class="dropdown-divider"></div>
+          <a href="#" onclick="openChangePassword()"><i class="fas fa-key"></i> Change Password</a>
+          <a href="#" onclick="openResetMFA()"><i class="fas fa-mobile-alt"></i> Reset MFA</a>
+          <a href="#" onclick="toggleTheme()"><i class="fas fa-palette"></i> <span id="theme-text">Dark Theme</span></a>
+          <div class="dropdown-divider"></div>
+          <a href="#" onclick="logout()" class="logout"><i class="fas fa-sign-out-alt"></i> Logout</a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <div class="main-container">
+    <!-- Left Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-item active" onclick="showMyBuckets()">
+          <i class="fas fa-bucket"></i>
+          <span>My Buckets</span>
+          <i class="fas fa-chevron-right expand-icon"></i>
+        </div>
+        <div class="bucket-list" id="sidebarBuckets">
+          <div class="bucket-search">
+            <input type="text" placeholder="Search buckets..." id="bucketSearch" oninput="filterBuckets()">
+          </div>
+          <div id="bucketItems"></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Welcome Screen -->
+      <div class="welcome-screen" id="welcomeScreen">
+        <div class="welcome-content">
+          <i class="fas fa-cloud-upload-alt welcome-icon"></i>
+          <h2>Welcome to CloudVault</h2>
+          <p>Select a bucket from the sidebar to start exploring your files</p>
+        </div>
+      </div>
+
+      <!-- Bucket Content -->
+      <div class="bucket-content" id="bucketContent" style="display: none;">
+        <!-- Breadcrumb -->
+        <div class="breadcrumb" id="breadcrumb"></div>
+
+        <!-- Action Bar -->
+        <div class="action-bar">
+          <div class="action-left">
+            <button class="btn btn-primary" id="uploadBtn" onclick="openUploadModal()" style="display: none;">
+              <i class="fas fa-upload"></i> Upload
+            </button>
+            <button class="btn btn-secondary" id="downloadBtn" onclick="downloadSelected()" disabled style="display: none;">
+              <i class="fas fa-download"></i> Download
+            </button>
+            <button class="btn btn-danger" id="deleteBtn" onclick="deleteSelected()" disabled style="display: none;">
+              <i class="fas fa-trash"></i> Delete
+            </button>
+          </div>
+          <div class="action-right">
+            <button class="btn btn-outline" onclick="refreshBucket()">
+              <i class="fas fa-sync-alt"></i> Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- File Table -->
+        <div class="file-table-container">
+          <table class="file-table">
+            <thead>
+              <tr>
+                <th width="40">
+                  <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                </th>
+                <th>Name</th>
+                <th width="120">Size</th>
+                <th width="180">Last Modified</th>
+                <th width="100">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="fileTableBody">
+              <!-- Files will be loaded here -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Upload Modal -->
+  <div class="modal" id="uploadModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Upload Files</h3>
+        <button class="close-btn" onclick="closeUploadModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="upload-area" id="uploadArea">
+          <i class="fas fa-cloud-upload-alt"></i>
+          <p>Drag and drop files here or click to select</p>
+          <input type="file" id="fileInput" multiple style="display: none;">
+          <button class="btn btn-outline" onclick="document.getElementById('fileInput').click()">
+            Select Files
+          </button>
+        </div>
+        <div class="upload-progress" id="uploadProgress" style="display: none;">
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <div class="progress-text" id="progressText">Uploading...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Password Modal -->
+  <div class="modal" id="changePasswordModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Change Password</h3>
+        <button class="close-btn" onclick="closeChangePassword()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Current Password</label>
+          <input type="password" id="currentPassword" class="form-input">
+        </div>
+        <div class="form-group">
+          <label>New Password</label>
+          <input type="password" id="newPassword" class="form-input">
+        </div>
+        <div class="form-group">
+          <label>Confirm New Password</label>
+          <input type="password" id="confirmPassword" class="form-input">
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeChangePassword()">Cancel</button>
+          <button class="btn btn-primary" onclick="changePassword()">Change Password</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset MFA Modal -->
+  <div class="modal" id="resetMFAModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Reset MFA</h3>
+        <button class="close-btn" onclick="closeResetMFA()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>This will reset your MFA settings. You'll need to set up MFA again on your next login.</p>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" onclick="closeResetMFA()">Cancel</button>
+          <button class="btn btn-danger" onclick="resetMFA()">Reset MFA</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script src="interface-v2.js"></script>
+  <script src="upload.js"></script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+from database_manager import create_database_user, execute_query, revoke_database_access, generate_password
+
+@app.route('/api/databases', methods=['GET'])
+def get_databases():
+    """Get databases from EC2 instance"""
+    try:
+        # Return mock database for testing
+        databases = [{
+            'id': 'mysql-test',
+            'name': 'testdb',
+            'engine': 'MySQL',
+            'host': '43.205.124.142',
+            'port': 3306,
+            'status': 'available'
+        }]
+        return jsonify({'databases': databases})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/request-access', methods=['POST'])
+def request_database_access():
+    """Request database access"""
+    try:
+        data = request.get_json()
+        databases = data.get('databases', [])
+        user_email = data.get('user_email')
+        db_username = data.get('db_username')
+        permissions = data.get('permissions')
+        duration_hours = data.get('duration_hours', 2)
+        justification = data.get('justification')
+        
+        # Generate password
+        password = generate_password()
+        
+        request_id = str(uuid.uuid4())
+        expires_at = datetime.now() + timedelta(hours=duration_hours)
+        
+        db_request = {
+            'id': request_id,
+            'type': 'database_access',
+            'databases': databases,
+            'user_email': user_email,
+            'db_username': db_username,
+            'db_password': password,
+            'permissions': permissions,
+            'duration_hours': duration_hours,
+            'justification': justification,
+            'status': 'approved',
+            'approved_at': datetime.now().isoformat(),
+            'created_at': datetime.now().isoformat(),
+            'expires_at': expires_at.isoformat()
+        }
+        
+        requests_db[request_id] = db_request
+        
+        # Create database user (using admin credentials from env)
+        admin_user = os.getenv('DB_ADMIN_USER', 'admin')
+        admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
+        
+        for db in databases:
+            result = create_database_user(
+                host=db['host'],
+                port=int(db['port']),
+                admin_user=admin_user,
+                admin_password=admin_password,
+                new_user=db_username,
+                new_password=password,
+                database=db['name'],
+                permissions=permissions
+            )
+            
+            if 'error' in result:
+                print(f"Error creating user: {result['error']}")
+        
+        return jsonify({
+            'status': 'approved',
+            'request_id': request_id,
+            'password': password
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/approved', methods=['GET'])
+def get_approved_databases():
+    """Get approved database access"""
+    try:
+        user_email = request.args.get('user_email')
+        approved_databases = []
+        
+        for req_id, req in requests_db.items():
+            if (req.get('type') == 'database_access' and 
+                req.get('user_email') == user_email and 
+                req.get('status') == 'approved'):
+                
+                for db in req.get('databases', []):
+                    approved_databases.append({
+                        'request_id': req_id,
+                        'db_name': db['name'],
+                        'engine': db['engine'],
+                        'host': db['host'],
+                        'port': db['port'],
+                        'db_username': req['db_username'],
+                        'expires_at': req['expires_at']
+                    })
+        
+        return jsonify({'databases': approved_databases})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/execute-query', methods=['POST'])
+def execute_database_query():
+    """Execute SQL query"""
+    try:
+        data = request.get_json()
+        
+        result = execute_query(
+            host=data['host'],
+            port=int(data['port']),
+            username=data['username'],
+            password=data['password'],
+            database=data['dbName'],
+            query=data['query']
+        )
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500

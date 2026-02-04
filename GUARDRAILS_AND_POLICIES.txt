@@ -1,0 +1,227 @@
+================================================================================
+JIT ACCESS PORTAL - SECURITY GUARDRAILS & POLICIES
+================================================================================
+
+================================================================================
+1. POLICY 
+================================================================================
+
+DELETE ACTIONS:
+✓ Non-Production: Configurable (Default: DISABLED)
+✓ Production: Configurable (Default: DISABLED)
+✓ Admin must explicitly enable via Admin Panel → Management → Restricted Actions Control
+
+CREATE ACTIONS:
+✓ Non-Production: Configurable (Default: DISABLED)
+✓ Production: Configurable (Default: DISABLED)
+✓ Requires DevOps team approval when enabled
+
+ADMIN ACTIONS:
+✓ Non-Production: Configurable (Default: DISABLED)
+✓ Production: Configurable (Default: DISABLED)
+✓ Sandbox: Configurable (Default: ENABLED for testing)
+✓ Requires CISO approval for production
+
+ALWAYS FORBIDDEN (Cannot be toggled):
+✗ iam:CreateUser
+✗ iam:DeleteUser
+✗ iam:AttachUserPolicy
+✗ iam:PutUserPolicy
+✗ organizations:*
+✗ account:*
+✗ kms:ScheduleKeyDeletion (KMS key deletion strictly forbidden)
+
+================================================================================
+2. ACCOUNT ENVIRONMENT TAGGING
+================================================================================
+
+✓ Accounts tagged as: prod / nonprod / sandbox
+✓ Policies enforced based on environment tag
+✓ Auto-sync from AWS OU structure available
+✓ Manual tagging via Admin Panel → Management → Account Tagging
+
+================================================================================
+3. AI CONVERSATION GUARDRAILS
+================================================================================
+
+DUAL-MODE SYSTEM:
+✓ AWS Bedrock AI (Claude 3 Sonnet) - Intelligent NLU
+✓ Keyword-based fallback - Zero cost, always available
+✓ Automatic fallback if Bedrock fails
+
+CONVERSATION TIMEOUT:
+✓ 59-second limit per conversation
+✓ Prevents stale sessions
+✓ Unique conversation ID per user: {email}_{timestamp}
+
+INTENT DETECTION:
+✓ Delete intent: "consuming bill", "no more required", "wipe out", "don't want"
+✓ Create intent: Blocked - routes to DevOps team
+✓ Read intent: Default safe action
+
+SERVICE DETECTION:
+✓ Word boundary matching (regex \b) to prevent false positives
+✓ Example: "kms" in "10kms away" → NOT detected as KMS service
+✓ Supported: EC2, S3, Lambda, RDS, DynamoDB, ELB, SNS, SQS, ECS, EKS, etc.
+
+================================================================================
+
+================================================================================
+4. SECRETS MANAGER SPECIAL VALIDATION
+================================================================================
+
+✓ Wildcard (*) resources NOT allowed for secrets
+✓ Requires specific secret names/ARNs
+✓ Example: "arn:aws:secretsmanager:region:account:secret:MySecret-AbCdEf"
+✓ Blocks: "secretsmanager:GetSecretValue" with Resource: "*"
+
+================================================================================
+
+
+
+================================================================================
+5. PERMISSION SET NAMING CONVENTION
+================================================================================
+
+Format: JIT_{account_last6}_{username_first8}_{request_id_first6}
+Example: JIT_837037_satishko_a3f2b1
+
+✓ Unique per request
+✓ Traceable to user and account
+✓ Auto-cleanup on expiry
+
+================================================================================
+6. DURATION & EXPIRY MANAGEMENT
+================================================================================
+
+✓ Default: 8 hours
+✓ Options: 4h, 8h, 24h, 72h (3 days), 120h (5 days max)
+✓ Custom date ranges supported (future start date)
+✓ Auto-revoke on expiry
+✓ Expiry reminders (1 hour before)
+✓ Background cleanup job (every 5 minutes)
+
+
+
+
+
+================================================================================
+7. NATURAL LANGUAGE INTENT KEYWORDS (Training Data)
+================================================================================
+
+DELETE INTENT KEYWORDS:
+✓ delete, remove, cleanup, clean, housekeep
+✓ terminate, destroy, purge, clear, wipe, erase, drop, kill
+✓ "don't need", "dont need", "doesn't need", "doesnt need"
+✓ "no longer need", "not needed", "no more required", "not required"
+✓ "get rid of", "dispose", "lets remove", "let's remove"
+✓ "exclude", "consuming bill", "costing money", "wasting money"
+✓ "unnecessary cost", "wipe out"
+
+CREATE INTENT KEYWORDS:
+✓ create, launch, run instances
+✓ provision, spin up, setup, build, new
+
+READ INTENT KEYWORDS:
+✓ read, view, list, describe, get
+✓ see, check, show, display
+✓ "read only", "readonly", "read access"
+✓ "view only", "list only", "describe only"
+
+CANCELLATION KEYWORDS:
+✓ "cancel this", "nevermind", "never mind"
+✓ "forget it", "abort"
+
+ADMIN INTENT KEYWORDS:
+✓ admin, administrator
+✓ "full access", "all permissions"
+✓ wildcard (*)
+
+================================================================================
+8. AWS SERVICE DETECTION KEYWORDS
+================================================================================
+
+EC2:
+✓ ec2, instance, server, vm
+
+S3:
+✓ s3, bucket
+
+LAMBDA:
+✓ lambda, function
+
+DYNAMODB:
+✓ dynamodb, dynamo, table
+
+RDS:
+✓ rds, database, db
+
+CLOUDWATCH:
+✓ logs, cloudwatch, monitoring
+
+ELB:
+✓ load balancer, loadbalancer, elb, alb, nlb, elasticloadbalancing
+
+KMS:
+✓ kms, key, encryption
+
+SNS:
+✓ sns, topic, notification
+
+SQS:
+✓ sqs, queue
+
+ECS:
+✓ ecs, container, task
+
+EKS:
+✓ eks, kubernetes, k8s
+
+ELASTICACHE:
+✓ elasticache, redis, memcached
+
+SECRETS MANAGER:
+✓ secret, secrets, secretsmanager, secrets manager, password
+
+
+
+================================================================================
+9. CONVERSATION EXAMPLES (Training Data)
+================================================================================
+
+EXAMPLE 1 - Delete Intent:
+User: "I'm getting too much bill for some S3 buckets, need to remove them"
+AI Detects: intent=delete, services=[s3]
+Result: Generates S3 delete permissions (if toggle enabled)
+
+EXAMPLE 2 - Natural Language:
+User: "These buckets are consuming my bill, don't want them anymore"
+AI Detects: intent=delete ("consuming bill", "don't want"), services=[s3]
+Result: Generates S3 delete permissions
+
+EXAMPLE 3 - Create Intent (Blocked):
+User: "I want to create new EC2 instances for testing"
+AI Detects: intent=create, services=[ec2]
+Result: Blocked - "Infrastructure provisioning detected. Contact DevOps team."
+
+EXAMPLE 4 - Read Intent:
+User: "I need to check CloudWatch logs for debugging"
+AI Detects: intent=read, services=[cloudwatch]
+Result: Generates CloudWatch read permissions
+
+EXAMPLE 5 - Multi-Service:
+User: "Need to view EC2 instances and S3 buckets"
+AI Detects: intent=read, services=[ec2, s3]
+Result: Generates EC2 + S3 read permissions
+
+EXAMPLE 6 - Ambiguous (Clarification):
+User: "hi"
+AI Response: "What would you like to do? (read/view, delete/remove, or modify)"
+
+EXAMPLE 7 - Non-AWS (Blocked):
+User: "I need access to Jenkins server"
+AI Detects: non_aws=jenkins
+Result: Blocked - "Use Applications page for non-AWS access"
+
+
+

@@ -9,7 +9,6 @@ let isAdmin = false;
 // Admin users list (in production, get from backend/LDAP)
 const ADMIN_USERS = [
     'satish.korra@nykaa.com',
-    'satish@nykaa.com',
     'admin@nykaa.com',
     'security@nykaa.com'
 ];
@@ -19,14 +18,27 @@ const API_BASE = 'http://localhost:5000/api';
 
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
+    // IMMEDIATELY remove AI assistant button if not on requests page
+    setTimeout(function() {
+        const currentPage = document.querySelector('.page.active');
+        if (!currentPage || currentPage.id !== 'requestsPage') {
+            const button = document.getElementById('unifiedAssistantButton');
+            const popup = document.getElementById('unifiedAssistantPopup');
+            if (button) {
+                console.log('🗑️ Removing AI button on initial load (not on requests page)');
+                button.remove();
+            }
+            if (popup) {
+                console.log('🗑️ Removing AI popup on initial load');
+                popup.remove();
+            }
+        }
+    }, 100);
+    
     // Check if user is logged in (in production, check JWT token)
     const isLoggedIn = localStorage.getItem('isLoggedIn');
     if (isLoggedIn === 'true') {
         showMainApp();
-        // If URL has #admin, navigate to admin panel (admin users only)
-        if (window.location.hash === '#admin' && localStorage.getItem('isAdmin') === 'true') {
-            setTimeout(function() { showPage('admin'); }, 100);
-        }
     }
     
     // Load theme
@@ -55,16 +67,24 @@ function setupEventListeners() {
     
     // Email/OTP form
     const emailOTPForm = document.getElementById('emailOTPForm');
+    console.log('emailOTPForm found:', emailOTPForm);
     if (emailOTPForm) {
         emailOTPForm.addEventListener('submit', function(e) {
+            console.log('Form submitted!');
             e.preventDefault();
             const email = document.getElementById('emailOTP').value;
+            console.log('Email value:', email);
             
             if (email) {
-                alert('✅ OTP sent to ' + email);
+                console.log('Calling showOTPVerification');
                 showOTPVerification();
+                alert('✅ OTP sent to ' + email);
+            } else {
+                console.log('No email entered');
             }
         });
+    } else {
+        console.log('emailOTPForm NOT found');
     }
     
     // OTP Verify form
@@ -177,22 +197,6 @@ function setupEventListeners() {
     }, 100);
 }
 
-// Quick login for testing (bypasses OTP/MFA)
-function quickLoginAsUser(email) {
-    const normalizedEmail = (email || 'user@nykaa.com').toLowerCase().trim();
-    isAdmin = ADMIN_USERS.includes(normalizedEmail);
-    currentUser = {
-        email: normalizedEmail,
-        name: normalizedEmail.split('@')[0],
-        isAdmin: isAdmin
-    };
-    localStorage.setItem('isLoggedIn', 'true');
-    localStorage.setItem('userEmail', normalizedEmail);
-    localStorage.setItem('isAdmin', isAdmin.toString());
-    localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
-    showMainApp();
-}
-
 // Login Flow Functions
 function showDefaultLogin() {
     document.getElementById('emailOTPView').style.display = 'block';
@@ -260,16 +264,28 @@ function logout() {
     localStorage.removeItem('isAdmin');
     currentUser = null;
     isAdmin = false;
-    document.body.classList.remove('user-is-admin');
-    document.getElementById('loginPage').style.display = 'block';
-    document.getElementById('mainApp').style.display = 'none';
+    const loginPage = document.getElementById('loginPage');
+    const mainApp = document.getElementById('mainApp');
+    if (loginPage) {
+        loginPage.style.display = 'block';
+        loginPage.style.visibility = 'visible';
+        loginPage.classList.remove('hidden');
+    }
+    if (mainApp) {
+        mainApp.style.display = 'none';
+    }
 }
 
 function showMainApp() {
     const loginPage = document.getElementById('loginPage');
     const mainApp = document.getElementById('mainApp');
-    if (loginPage) loginPage.style.display = 'none';
-    if (mainApp) mainApp.style.display = 'block';
+    if (loginPage) {
+        loginPage.style.display = 'none';
+        loginPage.classList.add('hidden');
+    }
+    if (mainApp) {
+        mainApp.style.display = 'block';
+    }
     
     // Load admin status from storage
     isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -284,24 +300,14 @@ function showMainApp() {
         };
     }
     
-    // User portal: skip admin-specific setup
-    if (window.USER_PORTAL) {
-        if (typeof loadAccounts === 'function') loadAccounts();
-        if (typeof loadPermissionSets === 'function') loadPermissionSets();
-        if (typeof loadRequests === 'function') loadRequests();
-        if (typeof loadRequestsPage === 'function') loadRequestsPage();
-        return;
-    }
-    
-    // Update UI based on admin status (run twice to ensure it applies after DOM ready)
+    // Update UI based on admin status
     updateUIForRole();
-    setTimeout(updateUIForRole, 150);
     
     // Load initial data
     loadAccounts();
     loadPermissionSets();
     loadRequests();
-    if (document.getElementById('activeSessionsCount')) updateDashboard();
+    updateDashboard();
     
     // Load policy settings for admin toggles
     if (isAdmin && typeof loadPolicySettings === 'function') {
@@ -315,47 +321,32 @@ function updateUIForRole() {
         userName.textContent = isAdmin ? `👑 ${currentUser.name} (Admin)` : currentUser.name;
     }
     
-    // Directly show/hide admin-only elements via inline styles (reliable, bypasses CSS cache)
-    document.querySelectorAll('.admin-only-nav').forEach(function(el) {
-        if (isAdmin) {
-            var disp = el.classList.contains('nav-item') ? 'flex' : el.classList.contains('nav-category') ? 'block' : 'inline-flex';
-            el.style.setProperty('display', disp, 'important');
-        } else {
-            el.style.setProperty('display', 'none', 'important');
-        }
-    });
+    // CRITICAL: FORCE ADMIN PANEL TO ALWAYS BE VISIBLE
+    const adminNavItem = document.getElementById('adminNavItem');
+    if (adminNavItem) {
+        adminNavItem.style.setProperty('display', 'flex', 'important');
+        adminNavItem.style.visibility = 'visible';
+        adminNavItem.style.opacity = '1';
+        console.log('✅ Admin Panel forced visible in updateUIForRole');
+    }
     
+    // Also force on page load
+    setTimeout(() => {
+        const adminNav = document.getElementById('adminNavItem');
+        if (adminNav) {
+            adminNav.style.setProperty('display', 'flex', 'important');
+            adminNav.style.visibility = 'visible';
+            adminNav.style.opacity = '1';
+        }
+    }, 100);
+    
+    // Add admin navigation if admin (legacy support)
     if (isAdmin) {
-        document.body.classList.add('user-is-admin');
         addAdminNavigation();
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        const dashPage = document.getElementById('dashboardPage');
-        if (dashPage) dashPage.classList.add('active');
-        document.querySelectorAll('.sidebar-nav .nav-item').forEach(n => n.classList.remove('active'));
-        const dashNav = document.querySelector('.sidebar-nav .nav-item[onclick*="dashboard"]');
-        if (dashNav) dashNav.classList.add('active');
-    } else {
-        document.body.classList.remove('user-is-admin');
-        // Normal user: show My Requests as default (no Dashboard)
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        const reqPage = document.getElementById('requestsPage');
-        if (reqPage) reqPage.classList.add('active');
-        document.querySelectorAll('.sidebar-nav .nav-item').forEach(n => n.classList.remove('active'));
-        const requestsNav = document.querySelector('.sidebar-nav .nav-item[onclick*="requests"]');
-        if (requestsNav) requestsNav.classList.add('active');
-        currentRequestsCategory = 'cloud';
-        currentRequestsStatus = 'pending';
-        currentFilter = 'pending';
-        document.querySelectorAll('.requests-status-btn').forEach(b => {
-            b.classList.remove('requests-status-glow');
-            if (b.dataset.category === 'cloud' && b.dataset.status === 'pending') b.classList.add('requests-status-glow');
-        });
-        if (typeof loadRequestsPage === 'function') loadRequestsPage();
     }
 }
 
 function addAdminNavigation() {
-    if (window.USER_PORTAL) return;
     const nav = document.querySelector('.app-nav');
     if (nav && !document.getElementById('adminNav')) {
         const adminBtn = document.createElement('button');
@@ -386,31 +377,93 @@ function setTheme(theme) {
         }
     });
     
-    // Update theme toggle icon
-    const themeIcon = document.querySelector('.theme-toggle i');
+    // Update theme toggle icon in profile menu
+    const themeIcon = document.getElementById('themeIcon');
+    const themeText = document.getElementById('themeText');
     if (themeIcon) {
         themeIcon.className = theme === 'light' ? 'fas fa-moon' : 'fas fa-sun';
+    }
+    if (themeText) {
+        themeText.textContent = theme === 'light' ? 'Switch to Dark' : 'Switch to Light';
+    }
+    
+    // Update theme toggle icon in top bar if exists
+    const topBarThemeIcon = document.querySelector('.theme-toggle i');
+    if (topBarThemeIcon) {
+        topBarThemeIcon.className = theme === 'light' ? 'fas fa-moon' : 'fas fa-sun';
     }
 }
 
 // Navigation
 function showPage(pageId) {
+    // Reset wizard state when navigating away from requests page
+    const currentPage = document.querySelector('.page.active');
+    if (currentPage && currentPage.id === 'requestsPage' && pageId !== 'requests') {
+        if (typeof resetWizardOnNavigation === 'function') {
+            resetWizardOnNavigation();
+        }
+    }
+    
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
     });
     
     // Show selected page
-    document.getElementById(pageId + 'Page').classList.add('active');
+    const targetPage = document.getElementById(pageId + 'Page');
+    if (!targetPage) {
+        console.error('❌ Page not found:', pageId + 'Page');
+        alert('Page not found: ' + pageId + '. Please check the page ID.');
+        return;
+    }
+    targetPage.classList.add('active');
+    console.log('✅ Showing page:', pageId, targetPage.id);
     
     // Update sidebar nav items
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
         item.classList.remove('active');
     });
-    if (event && event.target) {
+    
+    // Find and activate the clicked nav item by pageId
+    const clickedNavItem = document.querySelector(`.nav-item[onclick*="showPage('${pageId}')"]`);
+    if (clickedNavItem) {
+        clickedNavItem.classList.add('active');
+    } else if (typeof event !== 'undefined' && event && event.target) {
         const navItem = event.target.closest('.nav-item');
         if (navItem) {
             navItem.classList.add('active');
+        }
+    }
+    
+    // Hide/show unified assistant button based on page
+    // ONLY show on requests page, hide everywhere else
+    const unifiedButton = document.getElementById('unifiedAssistantButton');
+    const unifiedPopup = document.getElementById('unifiedAssistantPopup');
+    
+    console.log('🔍 showPage - pageId:', pageId, 'button exists:', !!unifiedButton);
+    
+    if (pageId === 'requests') {
+        // Show ONLY on requests page with !important
+        console.log('✅ On requests page, showing button');
+        if (unifiedButton) {
+            unifiedButton.style.setProperty('display', 'flex', 'important');
+        }
+        // Re-initialize unified assistant when switching to requests page
+        if (typeof initUnifiedAssistant === 'function') {
+            setTimeout(() => {
+                initUnifiedAssistant();
+            }, 100);
+        }
+    } else {
+        // REMOVE button completely from DOM if not on requests page
+        console.log('❌ Not on requests page, removing button');
+        if (unifiedButton) {
+            unifiedButton.remove();
+            console.log('✅ Button removed');
+        }
+        if (unifiedPopup) {
+            unifiedPopup.remove();
+            console.log('✅ Popup removed');
         }
     }
     
@@ -418,16 +471,11 @@ function showPage(pageId) {
     if (pageId === 'accounts') {
         loadAccountsPage();
     } else if (pageId === 'requests') {
-        currentRequestsCategory = 'cloud';
-        currentRequestsStatus = 'pending';
-        currentFilter = 'pending';
-        filterRequestsByCategory('cloud', 'pending');
-        // Initialize unified assistant for requests page
-        setTimeout(() => {
-            if (typeof initUnifiedAssistant === 'function') {
-                initUnifiedAssistant();
-            }
-        }, 100);
+        // Always start fresh on requests page
+        if (typeof clearWizardState === 'function') {
+            clearWizardState();
+        }
+        loadRequestsPage();
     } else if (pageId === 'applications') {
         loadApplicationsPage();
     } else if (pageId === 'admin') {
@@ -443,61 +491,83 @@ function showPage(pageId) {
         }
     } else if (pageId === 's3') {
         loadS3Buckets();
-    } else if (pageId === 'databases') {
-        if (typeof loadDatabases === 'function') {
-            loadDatabases();
-        }
     } else if (pageId === 'dashboard') {
         updateDashboard();
-    } else if (pageId === 'workflow') {
-        // Initialize workflow designer
-        setTimeout(() => {
-            if (typeof initWorkflowDesigner === 'function') {
-                initWorkflowDesigner();
-            }
-        }, 100);
     }
-    
-    // Remove unified assistant if not on requests page
-    if (pageId !== 'requests') {
-        const button = document.getElementById('unifiedAssistantButton');
-        const popup = document.getElementById('unifiedAssistantPopup');
-        if (button) button.remove();
-        if (popup) popup.remove();
-    }
-
-    // Hide Security Copilot on databases page (per user requirement)
-    const copilotBtn = document.getElementById('securityCopilotButton');
-    const copilotPopup = document.getElementById('securityCopilotPopup');
-    if (copilotBtn) copilotBtn.style.display = pageId === 'databases' ? 'none' : '';
-    if (copilotPopup) copilotPopup.classList.remove('show');
 }
 
 // Admin Tab Navigation
-function showAdminTab(tabId, event) {
-    // Hide all admin tabs
+function showAdminTab(tabId) {
+    // Hide ALL admin tabs first
     document.querySelectorAll('.admin-tab').forEach(tab => {
-        tab.style.display = 'none';
         tab.classList.remove('active');
+        tab.style.display = 'none';
     });
     
-    // Map tab IDs (Dashboard moved to main page)
+    // Remove active class from all tab buttons
+    document.querySelectorAll('.admin-tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+    });
+    
+    // Map tab IDs
     const tabMap = {
+        'dashboard': 'adminDashboardTab',
         'users': 'adminUsersTab',
         'policies': 'adminPoliciesTab',
-        'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
+        'workflows': 'adminWorkflowsTab',
         'integrations': 'adminIntegrationsTab'
     };
     
-    // Show selected tab
+    // Show ONLY selected tab
     const targetTab = document.getElementById(tabMap[tabId]);
     if (targetTab) {
-        targetTab.style.display = 'block';
         targetTab.classList.add('active');
-        console.log('✅ Showing admin tab:', tabId, targetTab);
-    } else {
-        console.error('❌ Admin tab not found:', tabId, tabMap[tabId]);
+        targetTab.style.display = 'block';
+        targetTab.style.visibility = 'visible';
+        
+        // Activate corresponding button
+        const buttons = document.querySelectorAll('.admin-tab-btn');
+        buttons.forEach(btn => {
+            if (btn.onclick && btn.onclick.toString().includes(tabId)) {
+                btn.classList.add('active');
+            }
+        });
+        
+        // Initialize flow builder if workflows tab
+        if (tabId === 'workflows') {
+            setTimeout(() => {
+                if (typeof initFlowBuilder === 'function') {
+                    initFlowBuilder();
+                }
+            }, 100);
+        }
+        
+        // Load guardrails if security tab
+        if (tabId === 'security') {
+            setTimeout(() => {
+                if (typeof loadGuardrails === 'function') {
+                    loadGuardrails();
+                }
+            }, 100);
+        }
+    }
+}
+            setTimeout(() => {
+                if (typeof initFlowBuilder === 'function') {
+                    initFlowBuilder();
+                }
+            }, 100);
+        }
+        
+        // Force show security sub-tab if security tab
+        if (tabId === 'security') {
+            setTimeout(() => {
+                if (typeof showSecuritySubTab === 'function') {
+                    showSecuritySubTab('security');
+                }
+            }, 100);
+        }
     }
     
     // Update tab buttons
@@ -505,17 +575,16 @@ function showAdminTab(tabId, event) {
         btn.classList.remove('active');
     });
     if (event && event.target) {
-        const btn = event.target.closest('.admin-tab-btn');
-        if (btn) btn.classList.add('active');
-    } else {
-        // Fallback: find button by tabId
-        const btn = document.querySelector(`.admin-tab-btn[onclick*="'${tabId}'"]`);
-        if (btn) btn.classList.add('active');
+        event.target.classList.add('active');
     }
     
     // Load tab-specific data
-    if (tabId === 'users') {
-        if (typeof loadUsersManagement === 'function') loadUsersManagement();
+    if (tabId === 'dashboard') {
+        loadAdminDashboard();
+    // } else if (tabId === 'scps') {  // Commented out - not required
+    //     loadSCPs();
+    } else if (tabId === 'users') {
+        loadUsersManagement();
     } else if (tabId === 'policies') {
         if (typeof initPolicyConfig === 'function') initPolicyConfig();
         // Always reload policy settings when showing policies tab
@@ -523,6 +592,9 @@ function showAdminTab(tabId, event) {
             if (typeof loadPolicySettings === 'function') loadPolicySettings();
         }, 100);
         if (typeof loadAccountsForTagging === 'function') loadAccountsForTagging();
+        // Load organization groups and users
+        if (typeof loadOrgGroups === 'function') loadOrgGroups();
+        if (typeof loadOrgUsers === 'function') loadOrgUsers();
     } else if (tabId === 'features') {
         // Features tab - already rendered
     } else if (tabId === 'security') {
@@ -535,9 +607,7 @@ function showAdminTab(tabId, event) {
             const auditSection = document.getElementById('auditSection');
             if (auditSection) auditSection.style.display = 'none';
         }, 10);
-        if (typeof loadAuditLogs === 'function') loadAuditLogs();
-    } else if (tabId === 'integrations') {
-        // Integrations tab - already rendered
+        loadAuditLogs();
     }
 }
 
@@ -568,61 +638,10 @@ function closeModal() {
     });
 }
 
-function startNewRequestForCloud(cloud, type) {
-    window.currentCloudAccessPage = cloud; // For Back button to return to cloud page
-    if (type === 'myself') {
-        showNewRequestPage(cloud);
-    } else {
-        showRequestForOthersWithCloud(cloud);
-    }
-}
-
-function showNewRequestPage(cloudProvider) {
+function showNewRequestPage() {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('newRequestPage').classList.add('active');
-    if (cloudProvider && cloudProvider === 'aws') {
-        // Skip cloud selection - go directly to AWS step
-        if (typeof selectCloudProvider === 'function') {
-            selectCloudProvider('aws');
-        } else {
-            document.getElementById('requestStep1').style.display = 'none';
-            document.getElementById('requestStep2AWS').style.display = 'block';
-            if (typeof loadAccountsDropdown === 'function') loadAccountsDropdown();
-        }
-    } else if (cloudProvider) {
-        document.getElementById('requestStep1').style.display = 'block';
-        document.getElementById('requestStep2AWS').style.display = 'none';
-        alert(`${cloudProvider.toUpperCase()} integration coming soon!`);
-    } else {
-        window.currentCloudAccessPage = null;
-        document.getElementById('requestStep1').style.display = 'block';
-        document.getElementById('requestStep2AWS').style.display = 'none';
-    }
     loadRequestModalData();
-}
-
-function showRequestForOthersWithCloud(cloudProvider) {
-    const page = document.getElementById('requestForOthersPage');
-    if (!page) {
-        alert('ERROR: requestForOthersPage not found!');
-        return;
-    }
-    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-    page.classList.add('active');
-    if (cloudProvider === 'aws') {
-        if (typeof selectCloudProviderForOthers === 'function') {
-            selectCloudProviderForOthers('aws');
-        } else {
-            document.getElementById('othersStep1').style.display = 'none';
-            document.getElementById('othersStep2AWS').style.display = 'block';
-            if (typeof loadAccountsForOthers === 'function') loadAccountsForOthers();
-        }
-    } else {
-        window.currentCloudAccessPage = null;
-        document.getElementById('othersStep1').style.display = 'block';
-        document.getElementById('othersStep2AWS').style.display = 'none';
-        if (cloudProvider) alert(`${cloudProvider.toUpperCase()} integration coming soon!`);
-    }
 }
 
 function cancelNewRequest() {
@@ -634,6 +653,9 @@ function cancelNewRequest() {
     window.currentAIPermissions = null;
     selectedResources = [];
     selectedService = '';
+    // Hide AWS Permissions Chat
+    if (typeof hideAWSPermChatButton === 'function') hideAWSPermChatButton();
+    if (typeof resetAWSPermChat === 'function') resetAWSPermChat();
 }
 
 function showRequestForOthersModal() {
@@ -763,60 +785,36 @@ async function loadRequests() {
 
 // Dashboard Functions
 function updateDashboard() {
-    // Update new KPI cards
-    const activeSessions = requests.filter(r => r.status === 'approved' && new Date(r.expires_at) > new Date()).length;
-    const pendingApprovals = requests.filter(r => r.status === 'pending').length;
-    const highRiskRequests = requests.filter(r => {
-        if (typeof calculateAIRiskScore === 'function') {
-            return calculateAIRiskScore(r) >= 70;
-        }
-        return false;
+    // Update KPI counts using new helper function
+    if (typeof updateDashboardKPIs === 'function') {
+        updateDashboardKPIs();
+    }
+    
+    // Update recent JIT requests
+    if (typeof loadRecentJITRequests === 'function') {
+        loadRecentJITRequests();
+    }
+    
+    // Legacy support for old dashboard elements
+    const activeAccess = requests.filter(r => r.status === 'approved' && new Date(r.expires_at) > new Date()).length;
+    const pendingRequests = requests.filter(r => r.status === 'pending').length;
+    const approvedThisMonth = requests.filter(r => {
+        const requestDate = new Date(r.created_at);
+        const now = new Date();
+        return r.status === 'approved' && 
+               requestDate.getMonth() === now.getMonth() && 
+               requestDate.getFullYear() === now.getFullYear();
     }).length;
-    const policyViolations = 0; // TODO: Calculate from audit logs
     
-    const activeSessionsEl = document.getElementById('activeSessionsCount');
-    const pendingApprovalsEl = document.getElementById('pendingApprovalsCount');
-    const highRiskRequestsEl = document.getElementById('highRiskRequestsCount');
-    const policyViolationsEl = document.getElementById('policyViolationsCount');
-    
-    if (activeSessionsEl) activeSessionsEl.textContent = activeSessions;
-    if (pendingApprovalsEl) pendingApprovalsEl.textContent = pendingApprovals;
-    if (highRiskRequestsEl) highRiskRequestsEl.textContent = highRiskRequests;
-    if (policyViolationsEl) policyViolationsEl.textContent = policyViolations;
-    
-    // Update old IDs for backward compatibility
     const activeAccessEl = document.getElementById('activeAccessCount');
     const pendingRequestsEl = document.getElementById('pendingRequestsCount');
     const approvedRequestsEl = document.getElementById('approvedRequestsCount');
     
-    if (activeAccessEl) activeAccessEl.textContent = activeSessions;
-    if (pendingRequestsEl) pendingRequestsEl.textContent = pendingApprovals;
-    if (approvedRequestsEl) {
-        const approvedThisMonth = requests.filter(r => {
-            const requestDate = new Date(r.created_at);
-            const now = new Date();
-            return r.status === 'approved' && 
-                   requestDate.getMonth() === now.getMonth() && 
-                   requestDate.getFullYear() === now.getFullYear();
-        }).length;
-        approvedRequestsEl.textContent = approvedThisMonth;
-    }
+    if (activeAccessEl) activeAccessEl.textContent = activeAccess;
+    if (pendingRequestsEl) pendingRequestsEl.textContent = pendingRequests;
+    if (approvedRequestsEl) approvedRequestsEl.textContent = approvedThisMonth;
     
-    // Update recent activity (old function)
     updateRecentActivity();
-    
-    // Update admin metrics (merged from admin dashboard)
-    if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
-    
-    // Load charts (destroy existing first to avoid duplicates)
-    if (document.getElementById('userActivityChart')) {
-        setTimeout(loadCharts, 300);
-    }
-    
-    // Update dashboard panels
-    if (typeof updateRecentJITRequests === 'function') updateRecentJITRequests();
-    if (typeof updateLiveSessions === 'function') updateLiveSessions();
-    if (typeof updateAIDecisionsFeed === 'function') updateAIDecisionsFeed();
 }
 
 function updateRecentActivity() {
@@ -852,131 +850,121 @@ function updateRecentActivity() {
 
 // Requests Page Functions
 let currentFilter = 'all';
-let currentRequestsCategory = 'cloud';
-let currentRequestsStatus = 'pending';
-
-function filterRequestsByCategory(category, status) {
-    currentRequestsCategory = category;
-    currentRequestsStatus = status;
-
-    // Update button glow - remove from all, add to active
-    document.querySelectorAll('.requests-status-btn').forEach(btn => {
-        btn.classList.remove('requests-status-glow');
-        if (btn.dataset.category === category && btn.dataset.status === status) {
-            btn.classList.add('requests-status-glow');
-        }
-    });
-
-    if (category === 'cloud') {
-        // Map to legacy filter: pending, in_progress->approved, completed->approved, denied
-        currentFilter = status === 'pending' ? 'pending' : status === 'denied' ? 'denied' : 'approved';
-        loadRequestsPage();
-    } else if (category === 'databases' && typeof filterDbRequests === 'function') {
-        filterDbRequests(status);
-    } else if (category === 'storage') {
-        loadStorageRequests();
-    } else if (category === 'workloads') {
-        loadWorkloadsRequests();
-    }
-}
-
-function loadStorageRequests() {
-    const list = document.getElementById('storageRequestsList');
-    if (!list) return;
-    list.innerHTML = '<div class="requests-empty">No storage requests</div>';
-}
-
-function loadWorkloadsRequests() {
-    const list = document.getElementById('workloadsRequestsList');
-    if (!list) return;
-    list.innerHTML = '<div class="requests-empty">No workload requests</div>';
-}
 
 function filterRequests(filter) {
     currentFilter = filter;
-    if (event && event.target) {
-        event.target.classList.add('active');
-    }
+    
+    // Update status tabs
+    document.querySelectorAll('.status-tab').forEach(tab => {
+        tab.classList.remove('active');
+        if (tab.getAttribute('data-filter') === filter) {
+            tab.classList.add('active');
+        }
+    });
+    
     loadRequestsPage();
+    // Update counts after a short delay to ensure requests are loaded
+    setTimeout(() => {
+        if (typeof updateRequestCounts === 'function') {
+            updateRequestCounts();
+        }
+    }, 100);
 }
 
 function loadRequestsPage() {
     const grid = document.getElementById('requestsGrid');
+    if (!grid) {
+        // Grid might not exist if chat is showing - show list container
+        const listContainer = document.getElementById('requestsListContainer');
+        const chatContainer = document.querySelector('.requests-chat-container');
+        if (listContainer && chatContainer) {
+            listContainer.style.display = 'block';
+            chatContainer.style.display = 'none';
+            // Try again after showing container
+            setTimeout(() => {
+                const grid2 = document.getElementById('requestsGrid');
+                if (grid2) loadRequestsPage();
+            }, 100);
+        }
+        return;
+    }
     
     let filteredRequests = requests;
-    if (currentFilter !== 'all') {
+    
+    // Filter by status
+    if (currentFilter === 'ongoing') {
+        filteredRequests = requests.filter(r => r.status === 'approved' && new Date(r.expires_at) > new Date());
+    } else if (currentFilter !== 'all') {
         filteredRequests = requests.filter(r => r.status === currentFilter);
     }
     
     if (filteredRequests.length === 0) {
-        grid.innerHTML = '<div class="empty-state"><p class="text-muted">No requests found</p></div>';
+        grid.innerHTML = '<div style="text-align: center; padding: 3rem; color: var(--text-secondary);">No requests found</div>';
         return;
     }
     
-    // Use security-grade JIT request card helper if available
+    // Use new JIT request card if helper function is available
     if (typeof createJITRequestCard === 'function') {
         grid.innerHTML = filteredRequests.map(request => {
             const account = accounts[request.account_id];
             return createJITRequestCard(request, account);
         }).join('');
     } else {
-        // Fallback to basic cards if helper not available
+        // Fallback to old card format
         grid.innerHTML = filteredRequests.map(request => {
             const account = accounts[request.account_id];
             const statusClass = `status-${request.status}`;
             
             return `
-                <div class="jit-request-card">
-                    <div class="jit-request-header">
-                        <div class="jit-user-info">
-                            <div class="jit-user-email">${request.user_email || 'Unknown User'}</div>
-                            <span class="status-badge ${statusClass}">${request.status}</span>
+                <div class="request-card">
+                    <div class="request-header">
+                        <div class="request-title">
+                            <div class="request-id">#${request.id.substring(0, 8)}</div>
+                            <div class="request-account">${account ? account.name : 'Unknown Account'}</div>
+                        </div>
+                        <span class="status-badge ${statusClass}">${request.status}</span>
+                    </div>
+                    
+                    <div class="request-details">
+                        <div class="detail-item">
+                            <div class="detail-label">Access Type</div>
+                            <div class="detail-value">${request.ai_generated ? 'AI Generated' : request.permission_set}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Requested</div>
+                            <div class="detail-value">${formatDate(request.created_at)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Expires</div>
+                            <div class="detail-value">${formatDate(request.expires_at)}</div>
                         </div>
                     </div>
                     
-                    <div class="jit-request-details">
-                        <div class="jit-detail-item">
-                            <div class="jit-detail-label">Requested Role</div>
-                            <div class="jit-detail-value">${request.ai_generated ? 'AI Generated' : request.permission_set || 'Custom'}</div>
-                        </div>
-                        <div class="jit-detail-item">
-                            <div class="jit-detail-label">Target</div>
-                            <div class="jit-detail-value">${account ? account.name : request.account_id}</div>
-                        </div>
-                        <div class="jit-detail-item">
-                            <div class="jit-detail-label">Duration</div>
-                            <div class="jit-detail-value">${request.duration_hours || 8}h</div>
-                        </div>
-                    </div>
-                    
-                    ${request.status === 'pending' ? `
-                    <div class="jit-request-actions">
-                        <button class="btn-primary" onclick="approveRequest('${request.id}')">
+                    <div class="request-actions">
+                        <button class="action-btn action-btn-secondary" onclick="viewRequest('${request.id}')">
+                            <i class="fas fa-eye"></i> View
+                        </button>
+                        ${request.status === 'pending' ? `
+                        <button class="action-btn action-btn-secondary" onclick="modifyRequest('${request.id}')">
+                            <i class="fas fa-edit"></i> Modify
+                        </button>
+                        <button class="action-btn action-btn-primary" onclick="approveRequest('${request.id}')">
                             <i class="fas fa-check"></i> Approve
                         </button>
-                        <button class="btn-danger" onclick="denyRequest('${request.id}')">
-                            <i class="fas fa-times"></i> Deny
+                        ` : ''}
+                        ${request.status === 'approved' ? `
+                        <button class="action-btn action-btn-danger" onclick="revokeAccess('${request.id}')">
+                            <i class="fas fa-ban"></i> Revoke
                         </button>
-                    </div>
-                    ` : ''}
-                    
-                    <div class="jit-request-actions" style="margin-top: 10px; border-top: 1px solid var(--border-subtle); padding-top: 10px;">
-                        <button class="btn-secondary" onclick="viewRequest('${request.id}')" style="width: 100%;">
-                            <i class="fas fa-eye"></i> View Details
+                        ` : ''}
+                        <button class="action-btn action-btn-danger" onclick="deleteRequest('${request.id}')">
+                            <i class="fas fa-trash"></i> Delete
                         </button>
                     </div>
                 </div>
             `;
         }).join('');
     }
-
-    // Load database requests into My Requests page
-    if (typeof loadDbRequests === 'function') {
-        loadDbRequests();
-    }
-    // Load storage and workloads (placeholders for now)
-    loadStorageRequests();
-    loadWorkloadsRequests();
 }
 
 async function viewRequest(requestId) {
@@ -987,20 +975,29 @@ async function viewRequest(requestId) {
         let details = `Request Details:\n\nID: ${request.id}\nStatus: ${request.status.toUpperCase()}\nAccount: ${accounts[request.account_id]?.name || 'Unknown'}\nDuration: ${request.duration_hours} hours\nJustification: ${request.justification}\n\n`;
         
         if (request.ai_generated && request.ai_permissions) {
-            // Show the actual policy that will be created
+            // Show SEPARATE statements per service
+            const statements = [];
+            if (request.ai_permissions.grouped_actions) {
+                for (const [service, data] of Object.entries(request.ai_permissions.grouped_actions)) {
+                    statements.push({
+                        "Sid": service.toUpperCase().replace('-', ''),
+                        "Effect": "Allow",
+                        "Action": data.actions,
+                        "Resource": data.resources
+                    });
+                }
+            } else {
+                statements.push({
+                    "Effect": "Allow",
+                    "Action": request.ai_permissions.actions || [],
+                    "Resource": request.ai_permissions.resources || ['*']
+                });
+            }
+            
             const policy = {
                 "Version": "2012-10-17",
-                "Statement": [{
-                    "Effect": "Allow",
-                    "Action": request.ai_permissions.actions,
-                    "Resource": request.ai_permissions.resources
-                }]
+                "Statement": statements
             };
-            
-            // Add conditions if present (for tag-based access)
-            if (request.ai_permissions.conditions) {
-                policy.Statement[0].Condition = request.ai_permissions.conditions;
-            }
             
             details += `AWS IAM Policy (This gets created in AWS):\n${JSON.stringify(policy, null, 2)}\n\n`;
             
@@ -1035,15 +1032,30 @@ async function viewRequest(requestId) {
         }
         console.log('=== END DETAILS ===');
         
-        const policy = request.ai_permissions ? JSON.stringify({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": request.ai_permissions.actions,
-                "Resource": request.ai_permissions.resources,
-                ...(request.ai_permissions.conditions && {"Condition": request.ai_permissions.conditions})
-            }]
-        }, null, 2) : 'No policy data';
+        let policy = 'No policy data';
+        if (request.ai_permissions) {
+            const statements = [];
+            if (request.ai_permissions.grouped_actions) {
+                for (const [service, data] of Object.entries(request.ai_permissions.grouped_actions)) {
+                    statements.push({
+                        "Sid": service.toUpperCase().replace('-', ''),
+                        "Effect": "Allow",
+                        "Action": data.actions,
+                        "Resource": data.resources
+                    });
+                }
+            } else {
+                statements.push({
+                    "Effect": "Allow",
+                    "Action": request.ai_permissions.actions || [],
+                    "Resource": request.ai_permissions.resources || ['*']
+                });
+            }
+            policy = JSON.stringify({
+                "Version": "2012-10-17",
+                "Statement": statements
+            }, null, 2);
+        }
         
         const modalHtml = `<div class="policy-modal-overlay" onclick="this.remove()" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; align-items: center; justify-content: center;"><div class="policy-modal-content" onclick="event.stopPropagation()" style="background: var(--bg-primary); color: var(--text-primary); padding: 2rem; border-radius: 8px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: var(--shadow);"><div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;"><h3 style="color: var(--text-primary); margin: 0;">AWS IAM Policy</h3><button onclick="this.closest('.policy-modal-overlay').remove()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--text-secondary); padding: 4px;">&times;</button></div><pre style="background: var(--bg-secondary); color: var(--text-primary); padding: 1rem; overflow-x: auto; font-size: 12px; border-radius: 4px; border: 1px solid var(--border-color);">${policy}</pre><div style="margin-top: 1rem; text-align: right;"><button onclick="this.closest('.policy-modal-overlay').remove()" style="padding: 8px 16px; background: var(--primary-color); color: white; border: none; border-radius: 4px; cursor: pointer;">Close</button></div></div></div>`;
         document.body.insertAdjacentHTML('beforeend', modalHtml);
@@ -1094,9 +1106,22 @@ function approveRequest(requestId) {
         if (result.error) {
             alert('Error: ' + result.error);
         } else {
-            alert(`✅ ${result.message}`);
+            const request = requests.find(r => r.id === requestId);
+            const isInstanceAccess = request && request.type === 'instance_access';
+            
+            if (isInstanceAccess) {
+                alert(`✅ ${result.message}\n\nGo to Instances page to connect.`);
+            } else {
+                alert(`✅ ${result.message}`);
+            }
+            
             loadRequests();
             updateDashboard();
+            
+            // Refresh approved instances if function exists
+            if (typeof refreshApprovedInstances === 'function') {
+                refreshApprovedInstances();
+            }
         }
     })
     .catch(error => {
@@ -1164,28 +1189,100 @@ function deleteRequest(requestId) {
 }
 
 function toggleCloudProvider(provider) {
-    const providerMap = {
-        'aws': 'awsAccounts',
-        'gcp': 'gcpProjects',
-        'azure': 'azureSubscriptions',
-        'oracle': 'oracleCompartments'
+    // Navigate to dedicated cloud provider detail page instead of inline expansion
+    showCloudProviderDetail(provider);
+}
+
+function showCloudProviderDetail(provider) {
+    // Hide accounts page
+    const accountsPage = document.getElementById('accountsPage');
+    if (accountsPage) accountsPage.classList.remove('active');
+    
+    // Create or show detail page
+    let detailPage = document.getElementById('cloudProviderDetailPage');
+    if (!detailPage) {
+        detailPage = document.createElement('div');
+        detailPage.id = 'cloudProviderDetailPage';
+        detailPage.className = 'page';
+        document.querySelector('.app-main').appendChild(detailPage);
+    }
+    
+    detailPage.classList.add('active');
+    
+    const providerNames = {
+        'aws': 'AWS Accounts',
+        'gcp': 'GCP Projects',
+        'azure': 'Azure Subscriptions',
+        'oracle': 'Oracle Compartments'
     };
     
-    const elementId = providerMap[provider];
-    const element = document.getElementById(elementId);
-    const button = element.previousElementSibling;
+    const providerIcons = {
+        'aws': 'fab fa-aws',
+        'gcp': 'fab fa-google',
+        'azure': 'fab fa-microsoft',
+        'oracle': 'fas fa-cloud'
+    };
     
-    if (element.style.display === 'none') {
-        element.style.display = 'block';
-        button.classList.add('active');
-        
-        if (provider === 'aws') {
-            loadAwsAccounts();
-        }
+    detailPage.innerHTML = `
+        <div class="page-header">
+            <button class="btn-secondary" onclick="backToAccounts()" style="margin-right: 15px;">
+                <i class="fas fa-arrow-left"></i> Back
+            </button>
+            <h2><i class="${providerIcons[provider]}"></i> ${providerNames[provider]}</h2>
+        </div>
+        <div id="providerAccountsGrid" class="accounts-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; padding: 20px;">
+            <p style="color: var(--text-secondary); text-align: center; padding: 40px;">Loading...</p>
+        </div>
+    `;
+    
+    // Load accounts
+    if (provider === 'aws') {
+        loadAwsAccountsInDetail();
     } else {
-        element.style.display = 'none';
-        button.classList.remove('active');
+        document.getElementById('providerAccountsGrid').innerHTML = `
+            <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                <i class="${providerIcons[provider]}" style="font-size: 64px; opacity: 0.3; margin-bottom: 20px; display: block;"></i>
+                <h3>${providerNames[provider]} integration coming soon</h3>
+            </div>
+        `;
     }
+}
+
+function backToAccounts() {
+    const detailPage = document.getElementById('cloudProviderDetailPage');
+    if (detailPage) detailPage.classList.remove('active');
+    
+    const accountsPage = document.getElementById('accountsPage');
+    if (accountsPage) accountsPage.classList.add('active');
+}
+
+function loadAwsAccountsInDetail() {
+    const grid = document.getElementById('providerAccountsGrid');
+    
+    if (Object.keys(accounts).length === 0) {
+        grid.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 2rem;">No accounts found</p>';
+        return;
+    }
+    
+    grid.innerHTML = Object.entries(accounts).map(([accountId, accountData]) => `
+        <div class="account-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.borderColor='var(--primary-color)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="showAccountDetail('${accountId}')">
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 15px;">
+                <i class="fab fa-aws" style="font-size: 32px; color: #FF9900;"></i>
+                <div>
+                    <h4 style="margin: 0; color: var(--text-primary); font-size: 16px;">${accountData.name || accountId}</h4>
+                    <p style="margin: 0; color: var(--text-secondary); font-size: 12px;">${accountId}</p>
+                </div>
+            </div>
+            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <span class="badge badge-${accountData.environment === 'production' ? 'danger' : 'info'}" style="font-size: 11px;">${accountData.environment || 'NON-PROD'}</span>
+                <span class="badge badge-success" style="font-size: 11px;">Active</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showAccountDetail(accountId) {
+    alert(`Account detail page for ${accountId} - Coming soon!\n\nThis will show:\n- Resources\n- Permissions\n- Access history\n- Request access button`);
 }
 
 function loadAwsAccounts() {
@@ -1288,8 +1385,10 @@ function loadRequestModalData() {
     const startTime = new Date(now.getTime() + 5 * 60000); // 5 minutes from now
     const endTime = new Date(startTime.getTime() + 8 * 60 * 60 * 1000); // 8 hours later
     
-    document.getElementById('startDateTime').value = formatDateTimeLocal(startTime);
-    document.getElementById('endDateTime').value = formatDateTimeLocal(endTime);
+    const startEl = document.getElementById('startDateTime');
+    const endEl = document.getElementById('endDateTime');
+    if (startEl) startEl.value = formatDateTimeLocal(startTime);
+    if (endEl) endEl.value = formatDateTimeLocal(endTime);
 }
 
 let startCalendar, endCalendar;
@@ -1590,8 +1689,38 @@ async function generateAIPermissions() {
         
         const permissions = await response.json();
         
+        // Show live preview if available
+        if (permissions.grouped_actions || permissions.preview_actions) {
+            const preview = document.getElementById('aiPermissionsPreview');
+            const content = document.getElementById('aiPermissionsContent');
+            const actionsData = permissions.grouped_actions || permissions.preview_actions;
+            
+            const actionExplanations = {
+                'DescribeInstances': 'View instance details',
+                'StartInstances': 'Start stopped instances',
+                'StopInstances': 'Stop running instances',
+                'TerminateInstances': 'Delete instances permanently',
+                'CreateImage': 'Create AMI from instance',
+                'DescribeImages': 'View AMI details',
+                'CreateSnapshot': 'Create EBS snapshot',
+                'RunInstances': 'Launch new instances'
+            };
+            
+            let html = '';
+            for (const [svc, data] of Object.entries(actionsData)) {
+                html += `<div style="margin-bottom:15px;"><strong style="color:var(--primary-color);">${svc.toUpperCase()}</strong><ul style="list-style:none;padding:0;margin:8px 0 0 0;">`;
+                data.actions.forEach(a => {
+                    const actionName = a.split(':')[1];
+                    const explanation = actionExplanations[actionName] || 'AWS action';
+                    html += `<li style="padding:6px 0;border-bottom:1px solid var(--border-color);font-size:11px;"><strong>${actionName}</strong><br><span style="color:var(--text-secondary);">${explanation}</span></li>`;
+                });
+                html += `</ul></div>`;
+            }
+            content.innerHTML = html;
+            preview.style.display = 'block';
+        }
+        
         if (permissions.error) {
-            // Show inline message instead of alert
             if (permissions.intent_analysis) {
                 showIntentMessage(permissions.intent_analysis, permissions.suggestion);
             } else if (permissions.suggestion === 'use_existing_permission_sets') {
@@ -1619,19 +1748,7 @@ async function generateAIPermissions() {
             alert(`⚠️ AI Risk Assessment: MEDIUM RISK (${riskScore}/10)\n\nPlease ensure your justification is detailed.`);
         }
         
-        // Check for restricted permissions
-        const restrictedActions = permissions.actions.filter(action => 
-            action.includes('Delete') || 
-            action.includes('Create') || 
-            action.includes('Admin') ||
-            action.includes('RunInstances') ||
-            action.includes('TerminateInstances')
-        );
-        
-        if (restrictedActions.length > 0) {
-            alert(`⚠️ Restricted permissions detected:\n\n${restrictedActions.join('\n')}\n\nYou are not authorized for these permissions. Please ask for read/list and limited write permissions only.\n\nFor resource creation/deletion, please connect with DevOps team with proper JIRA ticket and approvals.`);
-            return;
-        }
+        // Backend handles all permission validation via toggles - no frontend blocking
         
         // Auto-select services based on detected permissions
         const servicesSelect = document.getElementById('awsServices');
@@ -1673,14 +1790,30 @@ async function generateAIPermissions() {
         const preview = document.getElementById('aiPermissionsPreview');
         const content = document.getElementById('aiPermissionsContent');
         
-        content.innerHTML = `
-            <p><strong>Description:</strong> ${permissions.description}</p>
-            <p><strong>Actions:</strong></p>
-            <ul>
-                ${permissions.actions.map(action => `<li class="permission-item">${action}</li>`).join('')}
-            </ul>
-            <p><strong>Resources:</strong> ${JSON.stringify(permissions.resources)}</p>
-        `;
+        // Handle grouped actions (separate statements per service)
+        if (permissions.grouped_actions) {
+            let statementsHtml = '<p><strong>Description:</strong> ' + permissions.description + '</p>';
+            statementsHtml += '<p><strong>Policy Statements (Separate SID per service):</strong></p>';
+            
+            for (const [service, data] of Object.entries(permissions.grouped_actions)) {
+                statementsHtml += `<div style="margin: 10px 0; padding: 10px; background: var(--bg-secondary); border-radius: 6px;">`;
+                statementsHtml += `<strong>📦 ${service.toUpperCase()}</strong><ul>`;
+                data.actions.forEach(action => {
+                    statementsHtml += `<li class="permission-item">${action}</li>`;
+                });
+                statementsHtml += `</ul><small>Resources: ${JSON.stringify(data.resources)}</small></div>`;
+            }
+            content.innerHTML = statementsHtml;
+        } else {
+            content.innerHTML = `
+                <p><strong>Description:</strong> ${permissions.description}</p>
+                <p><strong>Actions:</strong></p>
+                <ul>
+                    ${permissions.actions.map(action => `<li class="permission-item">${action}</li>`).join('')}
+                </ul>
+                <p><strong>Resources:</strong> ${JSON.stringify(permissions.resources)}</p>
+            `;
+        }
         
         preview.style.display = 'block';
         
@@ -1712,6 +1845,7 @@ async function generateAIPermissions() {
 async function handleNewRequest(e) {
     e.preventDefault();
     console.log('Form submitted');
+    console.log('window.currentAIPermissions at submit:', window.currentAIPermissions);
     
     // Check if user is logged in
     const userEmail = localStorage.getItem('userEmail');
@@ -1760,103 +1894,31 @@ async function handleNewRequest(e) {
     }
     
     // Check if AI permissions were generated
-    if (window.currentAIPermissions) {
-        formData.use_case = `Access to ${selectedService} resources: ${selectedResources.map(r => r.id).join(', ')}`;
+    console.log('=== SUBMIT DEBUG ===');
+    console.log('window.currentAIPermissions:', window.currentAIPermissions);
+    console.log('Type:', typeof window.currentAIPermissions);
+    console.log('Has grouped_actions?', window.currentAIPermissions?.grouped_actions);
+    console.log('grouped_actions value:', window.currentAIPermissions?.grouped_actions);
+    console.log('===================');
+    if (window.currentAIPermissions && window.currentAIPermissions.grouped_actions) {
+        console.log('✅ AI permissions found');
         
-        formData.aws_services = [selectedService];
-        formData.service_configs = {};
+        formData.use_case = window.currentAIPermissions.description || 'AI-generated access request';
+        formData.ai_generated = true;
+        formData.is_jit = true;
+        formData.ai_permissions = {
+            grouped_actions: window.currentAIPermissions.grouped_actions,
+            description: window.currentAIPermissions.description
+        };
         
-        if (false) {
-            // Auto-select services based on AI permissions if none selected
-            if (window.currentAIPermissions && window.currentAIPermissions.actions) {
-                const actions = window.currentAIPermissions.actions;
-                const autoServices = [];
-                
-                if (actions.some(a => a.includes('ec2:') || a.includes('ssm:'))) autoServices.push('ec2');
-                if (actions.some(a => a.includes('s3:'))) autoServices.push('s3');
-                if (actions.some(a => a.includes('lambda:'))) autoServices.push('lambda');
-                if (actions.some(a => a.includes('rds:'))) autoServices.push('rds');
-                if (actions.some(a => a.includes('logs:'))) autoServices.push('cloudwatch');
-                if (actions.some(a => a.includes('secretsmanager:'))) autoServices.push('secretsmanager');
-                
-                if (autoServices.length > 0) {
-                    formData.aws_services = autoServices;
-                    formData.service_configs = {};
-                } else {
-                    alert('Please select at least one AWS service');
-                    return;
-                }
-            } else {
-                alert('Please select at least one AWS service');
-                return;
-            }
-        } else {
-            formData.aws_services = selectedServices;
-        }
+        // Services already set from grouped_actions above
         
-        // Collect service configurations
-        if (selectedServices.length > 0) {
-            const serviceConfigs = {};
-            let hasRequiredFields = true;
-            
-            selectedServices.forEach(service => {
-                const configs = {};
-                
-                // Service-specific validation and collection
-                if (service === 'ec2') {
-                    const tags = document.getElementById('ec2Tags')?.value;
-                    configs.tags = tags || '';
-                    configs.actions = document.getElementById('ec2Actions')?.value || 'describe';
-                }
-                
-                if (service === 's3') {
-                    const bucket = document.getElementById('s3Bucket')?.value;
-                    configs.bucket = bucket || '';
-                    configs.prefix = document.getElementById('s3Prefix')?.value || '';
-                }
-                
-                if (service === 'secretsmanager') {
-                    const secretName = document.getElementById('secretName')?.value;
-                    if (!secretName) {
-                        alert('Secret name is required for Secrets Manager access');
-                        hasRequiredFields = false;
-                        return;
-                    }
-                    configs.secret_name = secretName;
-                }
-                
-                if (service === 'lambda') {
-                    const functionName = document.getElementById('lambdaFunction')?.value;
-                    if (!functionName) {
-                        alert('Lambda function name is required');
-                        hasRequiredFields = false;
-                        return;
-                    }
-                    configs.function_name = functionName;
-                    configs.actions = document.getElementById('lambdaActions')?.value || 'invoke';
-                }
-                
-                if (service === 'rds') {
-                    configs.instance_id = document.getElementById('rdsInstance')?.value || '';
-                }
-                
-                if (service === 'cloudwatch') {
-                    configs.log_group = document.getElementById('logGroup')?.value || '';
-                }
-                
-                serviceConfigs[service] = configs;
-            });
-            
-            if (!hasRequiredFields) {
-                return;
-            }
-            
-            formData.aws_services = selectedServices;
-            formData.service_configs = serviceConfigs;
-        }
+        // Service configs already handled above
         
     } else {
-        alert('Please complete the wizard: Select service → Select resources → Add tags → Generate permissions');
+        console.error('❌ No AI permissions found');
+        console.log('window.currentAIPermissions:', window.currentAIPermissions);
+        alert('Please chat with AI Copilot to generate permissions first');
         return;
     }
     
@@ -1904,12 +1966,15 @@ async function testConnection() {
     }
 }
 
-// Admin Functions (Dashboard merged into main page)
+// Admin Functions
 function loadAdminPage() {
-    showAdminTab('users');
-    if (typeof loadUsersManagement === 'function') loadUsersManagement();
+    loadAdminDashboard();
 }
 
+function loadAdminDashboard() {
+    updateAdminDashboard();
+    setTimeout(loadCharts, 500);
+}
 
 function loadUsersManagement() {
     loadUsersTable();
@@ -1969,14 +2034,6 @@ function updateAdminDashboard() {
 }
 
 function loadCharts() {
-    if (window.userActivityChartInstance) {
-        window.userActivityChartInstance.destroy();
-        window.userActivityChartInstance = null;
-    }
-    if (window.requestTypesChartInstance) {
-        window.requestTypesChartInstance.destroy();
-        window.requestTypesChartInstance = null;
-    }
     loadUserActivityChart();
     loadRequestTypesChart();
 }
@@ -1996,12 +2053,11 @@ function loadUserActivityChart() {
         }]
     };
     
-    window.userActivityChartInstance = new Chart(ctx, {
+    new Chart(ctx, {
         type: 'line',
         data: data,
         options: {
             responsive: true,
-            maintainAspectRatio: true,
             plugins: { legend: { display: false } },
             scales: { y: { beginAtZero: true } }
         }
@@ -2020,12 +2076,11 @@ function loadRequestTypesChart() {
         }]
     };
     
-    window.requestTypesChartInstance = new Chart(ctx, {
+    new Chart(ctx, {
         type: 'doughnut',
         data: data,
         options: {
             responsive: true,
-            maintainAspectRatio: true,
             plugins: { legend: { position: 'bottom' } }
         }
     });
@@ -2121,10 +2176,9 @@ function onboardCloud(provider) {
 function showIntegrationTab(tabName) {
     document.querySelectorAll('.integration-tab-btn').forEach(btn => btn.classList.remove('active'));
     document.querySelectorAll('.integration-tab-content').forEach(content => content.classList.remove('active'));
-    const btn = event?.target?.closest('.integration-tab-btn');
-    if (btn) btn.classList.add('active');
-    const tabEl = document.getElementById(tabName + 'IntegrationTab');
-    if (tabEl) tabEl.classList.add('active');
+    
+    event.target.classList.add('active');
+    document.getElementById(tabName + 'IntegrationTab').classList.add('active');
 }
 
 function showIntentMessage(intentAnalysis, suggestion) {
@@ -2169,15 +2223,6 @@ function showIntentMessage(intentAnalysis, suggestion) {
 
 function configureIntegration(provider) {
     alert(`Configure ${provider} integration`);
-}
-
-function showAdminIntegrationCategory(category) {
-    document.querySelectorAll('.admin-integration-tab-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelectorAll('.admin-integration-category').forEach(el => el.classList.remove('active'));
-    const btn = event?.target?.closest('.admin-integration-tab-btn');
-    if (btn) btn.classList.add('active');
-    const el = document.getElementById('adminIntegration' + category.charAt(0).toUpperCase() + category.slice(1));
-    if (el) el.classList.add('active');
 }
 
 function filterAuditLogs() {
@@ -2593,7 +2638,6 @@ document.addEventListener('click', function(e) {
 // OTP Input Auto-Focus
 function setupOTPInputs() {
     const otpInputs = document.querySelectorAll('.otp-input');
-    if (!otpInputs.length) return;
     otpInputs.forEach((input, index) => {
         input.addEventListener('input', function() {
             if (this.value.length === 1 && index < otpInputs.length - 1) {
@@ -2605,17 +2649,6 @@ function setupOTPInputs() {
             if (e.key === 'Backspace' && this.value === '' && index > 0) {
                 otpInputs[index - 1].focus();
             }
-        });
-        
-        input.addEventListener('paste', function(e) {
-            e.preventDefault();
-            const pasted = (e.clipboardData || window.clipboardData).getData('text').replace(/\D/g, '').slice(0, 6);
-            pasted.split('').forEach((char, i) => {
-                if (otpInputs[i]) {
-                    otpInputs[i].value = char;
-                }
-            });
-            if (otpInputs[pasted.length - 1]) otpInputs[pasted.length - 1].focus();
         });
     });
 }

@@ -1,0 +1,191 @@
+/* Approval Flow Visualization */
+.approval-flow-container {
+    background: var(--bg-secondary);
+    border: 1.5px solid var(--border-color);
+    border-radius: 12px;
+    padding: 30px;
+    margin: 20px 0;
+}
+
+.approval-flow-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 30px;
+}
+
+.approval-flow-header h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.approval-flow-timeline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    overflow-x: auto;
+    padding: 20px 0;
+}
+
+.flow-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 180px;
+    position: relative;
+}
+
+.flow-step-card {
+    background: var(--bg-primary);
+    border: 2px solid;
+    border-radius: 12px;
+    padding: 20px;
+    min-width: 180px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    position: relative;
+}
+
+.flow-step-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+}
+
+/* State Colors */
+.flow-step-card.approved {
+    border-color: #22C55E;
+    background: rgba(34, 197, 94, 0.1);
+}
+
+.flow-step-card.pending {
+    border-color: #F59E0B;
+    background: rgba(245, 158, 11, 0.1);
+}
+
+.flow-step-card.active {
+    border-color: #38BDF8;
+    background: rgba(56, 189, 248, 0.1);
+    box-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
+}
+
+.flow-step-card.denied {
+    border-color: #EF4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.flow-step-card.inactive {
+    border-color: #6B7280;
+    background: rgba(107, 116, 128, 0.05);
+    opacity: 0.6;
+}
+
+.flow-step-icon {
+    font-size: 32px;
+    margin-bottom: 12px;
+}
+
+.flow-step-card.approved .flow-step-icon { color: #22C55E; }
+.flow-step-card.pending .flow-step-icon { color: #F59E0B; }
+.flow-step-card.active .flow-step-icon { color: #38BDF8; }
+.flow-step-card.denied .flow-step-icon { color: #EF4444; }
+.flow-step-card.inactive .flow-step-icon { color: #6B7280; }
+
+.flow-step-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+}
+
+.flow-step-status {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.flow-step-status.approved { background: #22C55E; color: white; }
+.flow-step-status.pending { background: #F59E0B; color: white; }
+.flow-step-status.active { background: #38BDF8; color: white; }
+.flow-step-status.denied { background: #EF4444; color: white; }
+.flow-step-status.inactive { background: #6B7280; color: white; }
+
+.flow-step-actor {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.flow-step-time {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.flow-arrow {
+    font-size: 32px;
+    color: #6B7280;
+    flex-shrink: 0;
+}
+
+.flow-arrow.approved { color: #22C55E; }
+.flow-arrow.pending { color: #F59E0B; }
+.flow-arrow.active { color: #38BDF8; }
+.flow-arrow.denied { color: #EF4444; }
+
+/* Tooltip */
+.flow-step-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    white-space: nowrap;
+    margin-bottom: 10px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+    z-index: 1000;
+}
+
+.flow-step-card:hover .flow-step-tooltip {
+    opacity: 1;
+}
+
+.flow-step-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.9);
+}
+
+/* Countdown Timer */
+.flow-countdown {
+    font-size: 13px;
+    font-weight: 600;
+    color: #38BDF8;
+    margin-top: 8px;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+    .approval-flow-timeline {
+        justify-content: flex-start;
+    }
+    
+    .flow-step-card {
+        min-width: 150px;
+    }
+}

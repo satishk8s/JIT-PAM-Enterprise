@@ -1,0 +1,395 @@
+/* UNIFIED DESIGN SYSTEM - Home Page as Source of Truth */
+/* This file enforces visual parity across ALL UI surfaces */
+
+/* ========================================
+   1. COLOR TOKENS (from Home page)
+   ======================================== */
+:root {
+    --bg-primary: #0B1220;
+    --bg-secondary: #1a2332;
+    --bg-tertiary: #242d3d;
+    --border-color: #2d3748;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --primary-color: #38BDF8;
+    --primary-hover: #0ea5e9;
+    --success-color: #22C55E;
+    --warning-color: #F59E0B;
+    --danger-color: #EF4444;
+    --ai-accent: #8B5CF6;
+}
+
+/* ========================================
+   2. BUTTONS (Unified)
+   ======================================== */
+.btn, .btn-primary, .btn-secondary, .btn-danger, .btn-warning, button[class*="btn"] {
+    padding: 10px 20px !important;
+    border-radius: 8px !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    border: none !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+
+.btn-primary, button.btn-primary {
+    background: linear-gradient(135deg, #38BDF8 0%, #0ea5e9 100%) !important;
+    color: white !important;
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3) !important;
+}
+
+.btn-secondary, button.btn-secondary {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.btn-secondary:hover {
+    background: var(--bg-tertiary) !important;
+}
+
+.btn-danger, button.btn-danger {
+    background: var(--danger-color) !important;
+    color: white !important;
+}
+
+.btn-sm {
+    padding: 6px 12px !important;
+    font-size: 13px !important;
+}
+
+/* ========================================
+   3. CARDS (Unified)
+   ======================================== */
+.card, .panel, .section, [class*="card"] {
+    background: var(--bg-secondary) !important;
+    border: 1.5px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    padding: 20px !important;
+    color: var(--text-primary) !important;
+}
+
+.card h3, .card h4, .panel h3, .panel h4 {
+    color: var(--text-primary) !important;
+    font-size: 16px !important;
+    font-weight: 500 !important;
+    margin-bottom: 15px !important;
+}
+
+/* ========================================
+   4. MODALS & POPUPS (Unified)
+   ======================================== */
+.modal, .modal-overlay, .popup, [class*="modal"] {
+    background: rgba(0, 0, 0, 0.8) !important;
+}
+
+.modal-content, .popup-content, [class*="modal-content"] {
+    background: var(--bg-primary) !important;
+    border: 1.5px solid var(--border-color) !important;
+    border-radius: 12px !important;
+    padding: 30px !important;
+    color: var(--text-primary) !important;
+    max-width: 800px !important;
+}
+
+.modal-header, .popup-header {
+    color: var(--text-primary) !important;
+    font-size: 18px !important;
+    font-weight: 600 !important;
+    margin-bottom: 20px !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    padding-bottom: 15px !important;
+}
+
+.modal-close-btn {
+    background: transparent !important;
+    border: none !important;
+    color: var(--text-secondary) !important;
+    font-size: 24px !important;
+    cursor: pointer !important;
+    padding: 0 !important;
+}
+
+.modal-close-btn:hover {
+    color: var(--text-primary) !important;
+}
+
+/* ========================================
+   5. TABS (Unified)
+   ======================================== */
+.tabs, .tab-list, [class*="tab"] {
+    display: flex !important;
+    gap: 10px !important;
+    border-bottom: 1px solid var(--border-color) !important;
+    margin-bottom: 20px !important;
+}
+
+.tab, .tab-btn, [class*="tab-btn"] {
+    padding: 12px 20px !important;
+    background: transparent !important;
+    border: none !important;
+    border-bottom: 2px solid transparent !important;
+    color: var(--text-secondary) !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+}
+
+.tab.active, .tab-btn.active, [class*="tab-btn"].active {
+    color: var(--primary-color) !important;
+    border-bottom-color: var(--primary-color) !important;
+}
+
+.tab:hover, .tab-btn:hover {
+    color: var(--text-primary) !important;
+}
+
+/* ========================================
+   6. FORMS & INPUTS (Unified)
+   ======================================== */
+input, textarea, select {
+    background: var(--bg-primary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    padding: 10px 15px !important;
+    color: var(--text-primary) !important;
+    font-size: 14px !important;
+}
+
+input:focus, textarea:focus, select:focus {
+    outline: none !important;
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1) !important;
+}
+
+label {
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+    font-weight: 400 !important;
+    margin-bottom: 6px !important;
+    display: block !important;
+}
+
+/* ========================================
+   7. TABLES (Unified)
+   ======================================== */
+table, .table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    background: var(--bg-secondary) !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+
+table th, .table th {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-secondary) !important;
+    font-size: 13px !important;
+    font-weight: 500 !important;
+    padding: 12px 15px !important;
+    text-align: left !important;
+    border-bottom: 1px solid var(--border-color) !important;
+}
+
+table td, .table td {
+    padding: 12px 15px !important;
+    color: var(--text-primary) !important;
+    font-size: 13px !important;
+    border-bottom: 1px solid var(--border-color) !important;
+}
+
+table tr:hover, .table tr:hover {
+    background: var(--bg-tertiary) !important;
+}
+
+/* ========================================
+   8. BADGES & STATUS (Unified)
+   ======================================== */
+.badge, .status-badge, [class*="badge"] {
+    display: inline-block !important;
+    padding: 4px 12px !important;
+    border-radius: 12px !important;
+    font-size: 12px !important;
+    font-weight: 500 !important;
+}
+
+.badge-success { background: rgba(34, 197, 94, 0.2) !important; color: #22C55E !important; }
+.badge-warning { background: rgba(245, 158, 11, 0.2) !important; color: #F59E0B !important; }
+.badge-danger { background: rgba(239, 68, 68, 0.2) !important; color: #EF4444 !important; }
+.badge-info { background: rgba(56, 189, 248, 0.2) !important; color: #38BDF8 !important; }
+
+/* ========================================
+   9. DROPDOWNS (Unified)
+   ======================================== */
+.dropdown, .dropdown-menu, [class*="dropdown"] {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    padding: 8px 0 !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+.dropdown-item, .dropdown a {
+    padding: 10px 16px !important;
+    color: var(--text-primary) !important;
+    font-size: 14px !important;
+    display: block !important;
+    text-decoration: none !important;
+    transition: background 0.2s ease !important;
+}
+
+.dropdown-item:hover, .dropdown a:hover {
+    background: var(--bg-tertiary) !important;
+}
+
+/* ========================================
+   10. ADMIN PANEL (Force Consistency)
+   ======================================== */
+#adminPage, .admin-tab, .admin-section {
+    background: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
+}
+
+.admin-tab-btn {
+    background: var(--bg-secondary) !important;
+    color: var(--text-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    padding: 12px 20px !important;
+    border-radius: 8px !important;
+    font-size: 14px !important;
+    font-weight: 500 !important;
+}
+
+.admin-tab-btn.active {
+    background: linear-gradient(135deg, #38BDF8 0%, #0ea5e9 100%) !important;
+    color: white !important;
+    border-color: transparent !important;
+}
+
+/* ========================================
+   11. EMPTY STATES (Unified)
+   ======================================== */
+.empty-state, .no-data {
+    text-align: center !important;
+    padding: 60px 20px !important;
+    color: var(--text-secondary) !important;
+}
+
+.empty-state i {
+    font-size: 48px !important;
+    opacity: 0.5 !important;
+    margin-bottom: 15px !important;
+    display: block !important;
+}
+
+/* ========================================
+   12. LOADING STATES (Unified)
+   ======================================== */
+.loading, .spinner {
+    color: var(--primary-color) !important;
+    text-align: center !important;
+    padding: 40px !important;
+}
+
+.fa-spinner {
+    color: var(--primary-color) !important;
+}
+
+/* ========================================
+   13. TOOLTIPS (Unified)
+   ======================================== */
+.tooltip, [data-tooltip] {
+    background: rgba(0, 0, 0, 0.9) !important;
+    color: white !important;
+    padding: 8px 12px !important;
+    border-radius: 6px !important;
+    font-size: 12px !important;
+}
+
+/* ========================================
+   14. NOTIFICATIONS (Unified)
+   ======================================== */
+.notification, .toast {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    padding: 15px 20px !important;
+    color: var(--text-primary) !important;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ========================================
+   15. SPECIFIC OVERRIDES (Force Compliance)
+   ======================================== */
+/* Ensure icons are visible */
+i, .fas, .fab, .far, [class*="fa-"] {
+    color: inherit !important;
+    opacity: 1 !important;
+    display: inline-block !important;
+}
+
+/* Request Modal */
+.request-modal-content {
+    background: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
+}
+
+/* Profile Menu */
+.profile-menu {
+    background: var(--bg-secondary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+/* Sidebar */
+.sidebar {
+    background: var(--bg-primary) !important;
+}
+
+.nav-item {
+    color: var(--text-secondary) !important;
+}
+
+.nav-item.active, .nav-item:hover {
+    color: var(--text-primary) !important;
+    background: var(--bg-secondary) !important;
+}
+
+/* Page Headers */
+.page-header {
+    color: var(--text-primary) !important;
+    margin-bottom: 30px !important;
+}
+
+.page-header h2 {
+    font-size: 18px !important;
+    font-weight: 600 !important;
+}
+
+/* ========================================
+   16. REMOVE LEGACY STYLES
+   ======================================== */
+/* Force dark theme everywhere */
+* {
+    scrollbar-width: thin !important;
+    scrollbar-color: var(--border-color) var(--bg-primary) !important;
+}
+
+/* Remove any white backgrounds */
+[style*="background: white"],
+[style*="background: #fff"],
+[style*="background: #ffffff"] {
+    background: var(--bg-secondary) !important;
+}
+
+/* Remove any black text on light backgrounds */
+[style*="color: black"] {
+    color: var(--text-primary) !important;
+}

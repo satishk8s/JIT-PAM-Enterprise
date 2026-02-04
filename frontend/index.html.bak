@@ -1,0 +1,2453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nykaa JIT Access Portal</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
+    <link href="calendar.css" rel="stylesheet">
+    <link href="instances.css" rel="stylesheet">
+    <link href="toggle-switch.css" rel="stylesheet">
+    <link href="s3-explorer.css" rel="stylesheet">
+    <link href="styles.css?v=5" rel="stylesheet">
+</head>
+<body>
+    <!-- Login Page -->
+    <div id="loginPage" class="login-container">
+        <div class="login-card">
+            <!-- Default: Email/OTP Login -->
+            <div id="emailOTPView">
+                <div class="login-header">
+                    <h2>Login to your Account</h2>
+                    <p>Please enter your email to receive a one-time passcode.</p>
+                </div>
+                
+                <form id="emailOTPForm" class="login-form">
+                    <div class="form-group">
+                        <label>Email <span class="required">*</span></label>
+                        <input type="email" id="emailOTP" placeholder="Enter Email" required>
+                        <small class="input-hint">Please enter a username or email</small>
+                    </div>
+                    <button type="submit" class="btn-primary">Continue</button>
+                </form>
+                
+                <div class="divider">
+                    <span>Or</span>
+                </div>
+                
+                <div class="alt-login-options">
+                    <button class="alt-login-btn" onclick="showSSOLogin()">Login with SSO</button>
+                    <button class="alt-login-btn" onclick="showUsernamePasswordLogin()">Login with Password</button>
+                </div>
+            </div>
+
+            <!-- Password Login -->
+            <div id="passwordLoginView" style="display: none;">
+                <button class="back-btn" onclick="showDefaultLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="login-header">
+                    <h2>Login with Password</h2>
+                    <p>Enter your credentials to access your account.</p>
+                </div>
+                
+                <form id="usernamePasswordForm" class="login-form">
+                    <div class="form-group">
+                        <label>Email or Username <span class="required">*</span></label>
+                        <input type="text" id="username" placeholder="Enter Email or Username" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password <span class="required">*</span></label>
+                        <input type="password" id="password" placeholder="Enter Password" required>
+                    </div>
+                    <button type="submit" class="btn-primary">Continue</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('Password reset coming soon')">Forgot Password?</a>
+                </div>
+            </div>
+
+            <!-- OTP Verification -->
+            <div id="otpVerifyView" style="display: none;">
+                <button class="back-btn" onclick="showDefaultLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="otp-header">
+                    <i class="fas fa-mobile-alt"></i>
+                    <h3>Verify One-Time Passcode</h3>
+                    <p>Enter the 6-digit code sent to <strong id="otpEmail"></strong></p>
+                </div>
+                
+                <form id="otpVerifyForm" class="login-form">
+                    <div class="otp-inputs">
+                        <input type="text" maxlength="1" class="otp-input" id="otp1">
+                        <input type="text" maxlength="1" class="otp-input" id="otp2">
+                        <input type="text" maxlength="1" class="otp-input" id="otp3">
+                        <input type="text" maxlength="1" class="otp-input" id="otp4">
+                        <input type="text" maxlength="1" class="otp-input" id="otp5">
+                        <input type="text" maxlength="1" class="otp-input" id="otp6">
+                    </div>
+                    <button type="submit" class="btn-primary">Verify & Continue</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('✅ OTP resent')">Resend Code</a>
+                </div>
+            </div>
+
+            <!-- MFA Verification -->
+            <div id="mfaView" style="display: none;">
+                <button class="back-btn" onclick="showUsernamePasswordLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="mfa-header">
+                    <i class="fas fa-shield-alt"></i>
+                    <h3>Two-Factor Authentication</h3>
+                    <p>Open your authenticator app to get your verification code</p>
+                </div>
+                
+                <form id="mfaForm" class="login-form">
+                    <div class="form-group">
+                        <label>Authentication Code <span class="required">*</span></label>
+                        <input type="text" id="mfaCode" placeholder="Enter 6-digit code" maxlength="6" required class="mfa-input">
+                    </div>
+                    <button type="submit" class="btn-primary">Verify & Sign In</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('MFA help coming soon')">Having trouble?</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Application -->
+    <div id="mainApp" class="app-container" style="display: none;">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <h1>JIT Access Portal</h1>
+                <button class="btn-secondary" onclick="refreshRequests()" style="margin-left: 1rem;" title="Refresh">
+                    <i class="fas fa-sync-alt"></i>
+                </button>
+            </div>
+            <div class="header-right">
+                <button class="theme-toggle" onclick="toggleTheme()">
+                    <i class="fas fa-moon"></i>
+                </button>
+                <button class="btn-secondary" onclick="alert('📚 Documentation\n\nKnowledge base articles and user guides are under construction.\n\nComing soon!')" style="margin-right: 0.5rem;">
+                    <i class="fas fa-book"></i> Documentation
+                </button>
+                <button class="btn-secondary" onclick="alert('🆘 Support\n\nSupport portal is under construction.\n\nFor immediate assistance, contact:\nadmin@company.com')" style="margin-right: 0.5rem;">
+                    <i class="fas fa-life-ring"></i> Support
+                </button>
+                <button class="btn-secondary" id="adminPanelBtn" onclick="showPage('admin')" style="margin-right: 1rem;">
+                    <i class="fas fa-shield-alt"></i> Admin Panel
+                </button>
+                <div class="profile-dropdown">
+                    <button class="profile-btn" onclick="toggleProfileMenu()">
+                        <i class="fas fa-user-circle"></i>
+                        <span id="userName">Satish Korra</span>
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                    <div id="profileMenu" class="profile-menu">
+                        <a href="#" onclick="showProfile()"><i class="fas fa-user"></i> My Profile</a>
+                        <a href="#" onclick="showPasswordReset()"><i class="fas fa-key"></i> Reset Password</a>
+                        <a href="#" onclick="showMFAReset()"><i class="fas fa-shield-alt"></i> Reset MFA</a>
+                        <a href="#" onclick="showManager()"><i class="fas fa-users"></i> My Manager</a>
+                        <hr>
+                        <a href="#" onclick="logout()"><i class="fas fa-sign-out-alt"></i> Logout</a>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Sidebar Navigation -->
+        <div class="app-layout">
+            <aside class="sidebar">
+                <nav class="sidebar-nav">
+                    <div class="nav-item active" onclick="showPage('dashboard')">
+                        <i class="fas fa-tachometer-alt"></i>
+                        <span>Dashboard</span>
+                    </div>
+                    
+                    <div class="nav-category">Management</div>
+                    <div class="nav-item" onclick="showPage('requests')">
+                        <i class="fas fa-list-alt"></i>
+                        <span>My Requests</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('sessions')">
+                        <i class="fas fa-history"></i>
+                        <span>Active Sessions</span>
+                    </div>
+                    
+                    <div class="nav-category">Workloads</div>
+                    <div class="nav-item" onclick="showPage('instances')">
+                        <i class="fas fa-server"></i>
+                        <span>Instances</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('containers')">
+                        <i class="fas fa-cube"></i>
+                        <span>Containers</span>
+                    </div>
+                    
+                    <div class="nav-category">Storage</div>
+                    <div class="nav-item" onclick="showPage('s3')">
+                        <i class="fab fa-aws"></i>
+                        <span>S3</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('gcs')">
+                        <i class="fab fa-google"></i>
+                        <span>GCS</span>
+                    </div>
+                    
+                    <div class="nav-category">Databases</div>
+                    <div class="nav-item" onclick="showPage('rds')">
+                        <i class="fas fa-database"></i>
+                        <span>RDS</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('mongodb')">
+                        <i class="fas fa-leaf"></i>
+                        <span>MongoDB</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('mysql')">
+                        <i class="fas fa-database"></i>
+                        <span>MySQL</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('mssql')">
+                        <i class="fas fa-database"></i>
+                        <span>MSSQL</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('postgres')">
+                        <i class="fas fa-database"></i>
+                        <span>PostgreSQL</span>
+                    </div>
+                    
+                    <div class="nav-category">Reports & Audit</div>
+                    <div class="nav-item" onclick="showPage('reports')">
+                        <i class="fas fa-chart-bar"></i>
+                        <span>Reports</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('audit')">
+                        <i class="fas fa-clipboard-list"></i>
+                        <span>Audit Logs</span>
+                    </div>
+                    
+                    <div class="nav-category">Configuration</div>
+                    <div class="nav-item" onclick="showPage('integrations')">
+                        <i class="fas fa-plug"></i>
+                        <span>Integrations</span>
+                    </div>
+                    
+                    <div class="nav-item" onclick="showPage('terminal')" style="margin-top: 1rem;">
+                        <i class="fas fa-terminal"></i>
+                        <span>Terminal</span>
+                    </div>
+                    
+                </nav>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="app-main">
+            <!-- Dashboard Page -->
+            <div id="dashboardPage" class="page active">
+                <div class="page-header">
+                    <h2><i class="fas fa-tachometer-alt"></i> Dashboard</h2>
+                </div>
+                <div class="dashboard-cards">
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-clock"></i></div>
+                        <div class="card-content">
+                            <h3 id="activeAccessCount">0</h3>
+                            <p>Active Access</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-hourglass-half"></i></div>
+                        <div class="card-content">
+                            <h3 id="pendingRequestsCount">0</h3>
+                            <p>Pending Requests</p>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-icon"><i class="fas fa-check-circle"></i></div>
+                        <div class="card-content">
+                            <h3 id="approvedRequestsCount">0</h3>
+                            <p>Approved This Month</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="recent-activity">
+                    <h3>Recent Activity</h3>
+                    <div id="recentActivity" class="activity-list">
+                        <!-- Activity items will be loaded here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- My Requests Page -->
+            <div id="requestsPage" class="page">
+                <div class="page-header">
+                    <h2>My Requests</h2>
+                    <div class="request-dropdown">
+                        <button class="btn-primary" onclick="toggleRequestDropdown()">
+                            <i class="fas fa-plus"></i> New Request <i class="fas fa-chevron-down"></i>
+                        </button>
+                        <div id="requestDropdownMenu" class="request-dropdown-menu">
+                            <a href="#" onclick="showNewRequestPage(); return false;">
+                                <i class="fas fa-user"></i> Request for Myself
+                            </a>
+                            <a href="#" onclick="showRequestForOthersModal(); return false;">
+                                <i class="fas fa-user-plus"></i> Request for Others
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="requests-modern">
+                    <div class="requests-filters">
+                        <div class="filter-chip active" onclick="filterRequests('all')">All</div>
+                        <div class="filter-chip" onclick="filterRequests('pending')">Pending</div>
+                        <div class="filter-chip" onclick="filterRequests('approved')">Approved</div>
+                        <div class="filter-chip" onclick="filterRequests('denied')">Denied</div>
+                    </div>
+                    
+                    <div class="requests-grid" id="requestsGrid">
+                        <!-- Requests will be loaded here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- New Request Page -->
+            <div id="newRequestPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-plus"></i> New Access Request</h2>
+                    <button class="btn-secondary" onclick="cancelNewRequest()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                </div>
+                
+                <!-- Step 1: What do you want to request? -->
+                <div id="requestStep1" class="request-wizard-step">
+                    <h3 style="font-family: 'Inter', sans-serif; font-size: 18px; margin-bottom: 20px; color: var(--text-primary);">What do you want to request access for?</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; max-width: 800px;">
+                        <div class="cloud-choice-card" onclick="selectCloudProvider('aws')">
+                            <i class="fab fa-aws" style="font-size: 48px; color: #FF9900;"></i>
+                            <h4>AWS</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProvider('gcp')">
+                            <i class="fab fa-google" style="font-size: 48px; color: #4285F4;"></i>
+                            <h4>GCP</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProvider('azure')">
+                            <i class="fab fa-microsoft" style="font-size: 48px; color: #0078D4;"></i>
+                            <h4>Azure</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProvider('oracle')">
+                            <i class="fas fa-cloud" style="font-size: 48px; color: #F80000;"></i>
+                            <h4>Oracle</h4>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step 2: AWS Flow -->
+                <div id="requestStep2AWS" class="request-wizard-step" style="display: none;">
+                    <button class="btn-secondary" onclick="backToStep1()" style="margin-bottom: 20px;">
+                        <i class="fas fa-arrow-left"></i> Back
+                    </button>
+                    
+                    <div style="display: flex; gap: 20px;">
+                        <form id="newRequestForm" style="flex: 0 0 450px; max-width: 450px;">
+                            <div class="form-group">
+                                <label>Select AWS Account *</label>
+                                <select id="requestAccount" required onchange="fetchAWSResources()">
+                                    <option value="">Select Account</option>
+                                </select>
+                            </div>
+
+                            <div id="resourceExplorerSection" style="display: none;">
+                                <div class="form-group">
+                                    <label>Available AWS Services</label>
+                                    <div id="resourceExplorerLoading" style="display: none; text-align: center; padding: 20px;">
+                                        <i class="fas fa-spinner fa-spin" style="font-size: 24px; color: #667eea;"></i>
+                                        <p style="margin-top: 10px; color: var(--text-secondary); font-size: 14px;">Fetching resources from AWS...</p>
+                                    </div>
+                                    <div id="awsServicesList" style="display: none;"></div>
+                                </div>
+
+                                <div class="form-group" id="myResourcesSection" style="display: none;">
+                                    <label>My Resources</label>
+                                    <div id="myResourcesList" class="resources-list"></div>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Duration</label>
+                                <select id="requestDuration">
+                                    <option value="4">4 hours</option>
+                                    <option value="8" selected>8 hours</option>
+                                    <option value="24">24 hours</option>
+                                    <option value="72">3 days</option>
+                                    <option value="120">5 days (max)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Business Justification *</label>
+                                <textarea id="requestJustification" placeholder="Explain why you need this access" rows="3" required></textarea>
+                            </div>
+
+                            <!-- AI Copilot Section -->
+                            <div id="aiCopilotSection" style="display: none; margin-top: 20px; padding: 15px; background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%); border: 1.5px solid #667eea; border-radius: 8px;">
+                                <h4 style="margin: 0 0 10px 0; font-size: 14px; color: var(--text-primary); font-family: 'Inter', sans-serif;">
+                                    <i class="fas fa-robot"></i> AI Copilot - Generate Permissions
+                                </h4>
+                                <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">Describe what you want to do with the selected resources</p>
+                                <textarea id="aiCopilotUseCase" placeholder="Example: I need to read logs from these instances and restart services" rows="2" style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; font-family: 'Inter', sans-serif; font-size: 13px; background: var(--bg-primary); color: var(--text-primary);"></textarea>
+                                <button type="button" class="btn-primary" onclick="generateAICopilotPermissions()" style="margin-top: 10px; font-size: 13px;">
+                                    <i class="fas fa-magic"></i> Generate Permissions
+                                </button>
+                                <div id="aiCopilotPreview" style="display: none; margin-top: 15px; padding: 10px; background: var(--bg-secondary); border-radius: 4px; border: 1px solid var(--border-color);">
+                                    <strong style="font-size: 12px; color: var(--text-primary);">Generated Permissions:</strong>
+                                    <div id="aiCopilotContent" style="font-size: 11px; color: var(--text-secondary); margin-top: 5px;"></div>
+                                </div>
+                            </div>
+                            
+                            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                                <button type="button" class="btn-secondary" onclick="cancelNewRequest()">Cancel</button>
+                                <button type="submit" class="btn-primary">Submit Request</button>
+                            </div>
+                        </form>
+                        
+                        <div style="flex: 0 0 280px;">
+                            <div style="position: sticky; top: 20px; background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 8px; padding: 16px;">
+                                <h4 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-weight: 600;">Selected Resources</h4>
+                                <div id="selectedResourcesPanel" style="max-height: 400px; overflow-y: auto;">
+                                    <p style="color: var(--text-secondary); font-size: 12px;">No resources selected</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cloud Accounts Page -->
+            <div id="accountsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-cloud"></i> Cloud Accounts</h2>
+                </div>
+                <div class="cloud-providers">
+                    <div class="cloud-provider-card">
+                        <button class="cloud-provider-btn" onclick="toggleCloudProvider('aws')">
+                            <i class="fab fa-aws" style="color: #FF9900;"></i>
+                            <span>AWS Accounts</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                        <div id="awsAccounts" class="cloud-accounts-list" style="display: none;">
+                            <div id="awsAccountsGrid" class="accounts-grid">
+                                <!-- AWS accounts will be loaded here -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="cloud-provider-card">
+                        <button class="cloud-provider-btn" onclick="toggleCloudProvider('gcp')">
+                            <i class="fab fa-google" style="color: #4285F4;"></i>
+                            <span>GCP Projects</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                        <div id="gcpProjects" class="cloud-accounts-list" style="display: none;">
+                            <div class="coming-soon-small">
+                                <p>GCP integration coming soon</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="cloud-provider-card">
+                        <button class="cloud-provider-btn" onclick="toggleCloudProvider('azure')">
+                            <i class="fab fa-microsoft" style="color: #0078D4;"></i>
+                            <span>Azure Subscriptions</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                        <div id="azureSubscriptions" class="cloud-accounts-list" style="display: none;">
+                            <div class="coming-soon-small">
+                                <p>Azure integration coming soon</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="cloud-provider-card">
+                        <button class="cloud-provider-btn" onclick="toggleCloudProvider('oracle')">
+                            <i class="fas fa-cloud" style="color: #F80000;"></i>
+                            <span>Oracle Compartments</span>
+                            <i class="fas fa-chevron-down toggle-icon"></i>
+                        </button>
+                        <div id="oracleCompartments" class="cloud-accounts-list" style="display: none;">
+                            <div class="coming-soon-small">
+                                <p>Oracle Cloud integration coming soon</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Applications Page -->
+            <div id="applicationsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-apps"></i> Applications & Services</h2>
+                    <button class="btn-primary" onclick="showNewAppRequestModal()">
+                        <i class="fas fa-plus"></i> New Request
+                    </button>
+                </div>
+                
+                <div class="applications-grid">
+                    <div class="app-category">
+                        <h3><i class="fas fa-ticket-alt"></i> Ticketing Systems</h3>
+                        <div class="app-cards">
+                            <div class="app-card" onclick="requestAppAccess('jira')">
+                                <div class="app-logo app-logo-jira">J</div>
+                                <h4>JIRA</h4>
+                                <p>Issue & Project Tracking</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('splunk')">
+                                <div class="app-logo app-logo-splunk">S</div>
+                                <h4>Splunk</h4>
+                                <p>Log Analysis & SIEM</p>
+                            </div>
+                            <div class="app-card" onclick="requestAppAccess('servicenow')">
+                                <div class="app-logo app-logo-servicenow">SN</div>
+                                <h4>ServiceNow</h4>
+                                <p>IT Service Management</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Databases Page -->
+            <div id="databasesPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-database"></i> Database Access</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-database" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Database Access Management</h3>
+                    <p>Manage temporary database credentials and access</p>
+                </div>
+            </div>
+
+            <!-- S3 Explorer Page -->
+            <div id="s3Page" class="page">
+                <div class="page-header">
+                    <h2><i class="fab fa-aws"></i> S3 Explorer</h2>
+                    <button class="btn-secondary" onclick="loadS3Buckets()">
+                        <i class="fas fa-sync"></i> Refresh
+                    </button>
+                </div>
+                
+                <!-- Buckets List View -->
+                <div id="s3BucketsList">
+                    <div id="s3BucketsContainer" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; padding: 20px;">
+                        <p style="color: #999; text-align: center; padding: 40px;">Loading buckets...</p>
+                    </div>
+                </div>
+                
+                <!-- Bucket Content View -->
+                <div id="s3BucketContent" style="display: none;">
+                    <div id="s3Breadcrumb" style="margin-bottom: 15px; padding: 10px; background: #f5f5f5; border-radius: 4px;"></div>
+                    
+                    <div style="margin-bottom: 15px; display: flex; gap: 10px;">
+                        <button class="btn-primary" id="s3UploadBtn" style="display: none;"><i class="fas fa-upload"></i> Upload</button>
+                        <button class="btn-secondary" id="s3DownloadBtn" onclick="downloadS3Selected()" disabled><i class="fas fa-download"></i> Download</button>
+                        <button class="btn-danger" id="s3DeleteBtn" onclick="deleteS3Selected()" disabled><i class="fas fa-trash"></i> Delete</button>
+                        <button class="btn-secondary" onclick="refreshS3Bucket()" style="margin-left: auto;"><i class="fas fa-sync"></i> Refresh</button>
+                    </div>
+                    
+                    <table class="instances-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px;"><input type="checkbox" id="s3SelectAll" onchange="toggleS3SelectAll()"></th>
+                                <th>Name</th>
+                                <th style="width: 120px;">Size</th>
+                                <th style="width: 180px;">Last Modified</th>
+                                <th style="width: 100px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="s3FileTableBody">
+                            <tr>
+                                <td colspan="5" style="text-align: center; padding: 40px; color: #999;">No files</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- GCS Page -->
+            <div id="gcsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fab fa-google"></i> Google Cloud Storage</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fab fa-google" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>GCS Integration Coming Soon</h3>
+                    <p>Access Google Cloud Storage buckets</p>
+                </div>
+            </div>
+
+            <!-- Integrations Page -->
+            <div id="integrationsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-plug"></i> Integrations</h2>
+                </div>
+                <!-- TODO: Fix logo sizes - AWS/GCP/Chronicle need balancing with Azure/Oracle/SaaS logos -->
+                <div class="integration-tabs">
+                    <button class="integration-tab-btn active" onclick="showIntegrationTab('cloud')">Cloud</button>
+                    <button class="integration-tab-btn" onclick="showIntegrationTab('saas')">SaaS</button>
+                    <button class="integration-tab-btn" onclick="showIntegrationTab('webhook')">Webhook</button>
+                </div>
+                
+                <!-- Cloud Tab -->
+                <div id="cloudIntegrationTab" class="integration-tab-content active">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <img src="assets/logos/aws.png" alt="AWS" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>AWS</h3>
+                            <button class="btn-primary" onclick="configureIntegration('aws')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        <div class="integration-card">
+                            <img src="assets/logos/azure.png" alt="Azure" style="width: 120px; height: 120px; object-fit: contain;">
+                            <h3>Azure</h3>
+                            <button class="btn-primary" onclick="configureIntegration('azure')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        <div class="integration-card">
+                            <img src="assets/logos/gcp.png" alt="GCP" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>GCP</h3>
+                            <button class="btn-primary" onclick="configureIntegration('gcp')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        <div class="integration-card">
+                            <img src="assets/logos/oracle.png" alt="Oracle" style="width: 120px; height: 120px; object-fit: contain;">
+                            <h3>Oracle</h3>
+                            <button class="btn-primary" onclick="configureIntegration('oracle')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- SaaS Tab -->
+                <div id="saasIntegrationTab" class="integration-tab-content">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <img src="assets/logos/jira.png" alt="JIRA" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>JIRA</h3>
+                            <button class="btn-primary" onclick="configureIntegration('jira')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        <div class="integration-card">
+                            <img src="assets/logos/servicenow.png" alt="ServiceNow" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>ServiceNow</h3>
+                            <button class="btn-primary" onclick="configureIntegration('servicenow')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                        <div class="integration-card">
+                            <img src="assets/logos/slack.png" alt="Slack" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>Slack</h3>
+                            <button class="btn-primary" onclick="configureIntegration('slack')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Webhook Tab -->
+                <div id="webhookIntegrationTab" class="integration-tab-content">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <img src="assets/logos/siem.png" alt="Google Chronicle" style="width: 140px; height: 140px; object-fit: contain;">
+                            <h3>Google Chronicle</h3>
+                            <button class="btn-primary" onclick="configureIntegration('chronicle')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Reports Page -->
+            <div id="reportsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-chart-bar"></i> Reports & Analytics</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-chart-bar" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Access Reports & Analytics</h3>
+                    <p>View detailed reports and analytics on access patterns</p>
+                </div>
+            </div>
+
+            <!-- Terminal Page -->
+            <div id="terminalPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-terminal"></i> Terminal</h2>
+                    <button class="btn-secondary" onclick="refreshApprovedInstances()">
+                        <i class="fas fa-sync"></i> Refresh
+                    </button>
+                </div>
+                <div id="approvedInstancesList" style="margin-bottom: 20px;">
+                    <h3 style="font-size: 16px; margin-bottom: 15px;">My Approved Instances</h3>
+                    <table class="instances-table">
+                        <thead>
+                            <tr>
+                                <th>Instance ID</th>
+                                <th>Name</th>
+                                <th>Private IP</th>
+                                <th>Expires At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="approvedInstancesTableBody">
+                            <tr>
+                                <td colspan="5" style="text-align: center; padding: 40px; color: #999;">
+                                    No approved instances. Request access from Instances page.
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div id="terminalContainer" style="margin-top: 20px;">
+                    <!-- Terminal iframe will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Instances (EC2) Page -->
+            <div id="instancesPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-server"></i> EC2 Instances</h2>
+                    <button class="btn-primary btn-sm" id="requestAccessBtn" onclick="showInstanceAccessModal()" style="padding: 8px 16px; font-size: 13px;">
+                        <i class="fas fa-key"></i> Request Access
+                    </button>
+                </div>
+                <div class="instances-container">
+                    <div class="instances-filters" style="margin-bottom: 20px; display: flex; gap: 15px; align-items: center;">
+                        <div>
+                            <label style="margin-right: 10px; font-weight: 600;">Account:</label>
+                            <select id="instanceAccountSelect" onchange="loadInstancesByAccount()" style="padding: 8px; min-width: 300px;">
+                                <option value="">-- Select Account --</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="margin-right: 10px; font-weight: 600;">State:</label>
+                            <select id="instanceStateFilter" onchange="filterByState()" style="padding: 8px;">
+                                <option value="">All</option>
+                                <option value="running">Running</option>
+                                <option value="stopped">Stopped</option>
+                            </select>
+                        </div>
+                    </div>
+                    <table class="instances-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 40px;"><input type="checkbox" id="selectAllInstances" onchange="toggleSelectAll()"></th>
+                                <th>Instance ID</th>
+                                <th>Name</th>
+                                <th>Private IP</th>
+                                <th>State</th>
+                            </tr>
+                        </thead>
+                        <tbody id="instancesTableBody">
+                            <tr>
+                                <td colspan="5" style="text-align: center; padding: 40px; color: #999;">
+                                    <i class="fas fa-server" style="font-size: 3rem; margin-bottom: 10px; display: block;"></i>
+                                    Select an account to view instances
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Container Access Page -->
+            <div id="containersPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-cube"></i> Container Access</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-cube" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Kubernetes & Docker Access</h3>
+                    <p>Access Kubernetes pods and Docker containers with temporary credentials</p>
+                </div>
+            </div>
+
+            <!-- Secrets Manager Page -->
+            <div id="secretsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-key"></i> Secrets Manager</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-key" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Secrets & Credentials</h3>
+                    <p>Manage and access secrets securely</p>
+                </div>
+            </div>
+
+            <!-- Active Sessions Page -->
+            <div id="sessionsPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-history"></i> Active Sessions</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-history" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Active Access Sessions</h3>
+                    <p>Monitor and manage currently active access sessions</p>
+                </div>
+            </div>
+
+            <!-- Audit Logs Page -->
+            <div id="auditPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-clipboard-list"></i> Audit Logs</h2>
+                </div>
+                <div class="coming-soon">
+                    <i class="fas fa-clipboard-list" style="font-size: 4rem; color: var(--primary-color); margin-bottom: 1rem;"></i>
+                    <h3>Comprehensive Audit Trail</h3>
+                    <p>View complete audit logs of all access activities</p>
+                </div>
+            </div>
+
+            <!-- Admin Panel Page -->
+            <div id="adminPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
+                    <div class="admin-nav">
+                        <button class="admin-tab-btn active" onclick="showAdminTab('dashboard')">
+                            <i class="fas fa-chart-bar"></i> Dashboard
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('users')">
+                            <i class="fas fa-users"></i> Users & Groups
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('policies')">
+                            <i class="fas fa-cogs"></i> Management
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('features')">
+                            <i class="fas fa-toggle-on"></i> Features
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('security')">
+                            <i class="fas fa-shield-alt"></i> Security
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('integrations')">
+                            <i class="fas fa-plug"></i> Integrations
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Admin Dashboard Tab -->
+                <div id="adminDashboardTab" class="admin-tab active">
+                    <div class="admin-dashboard">
+                        <div class="admin-cards">
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-plus"></i></div>
+                                <div class="card-content">
+                                    <h3 id="newUsersCount">0</h3>
+                                    <p>New Users (30 days)</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-check"></i></div>
+                                <div class="card-content">
+                                    <h3 id="repeatedUsersCount">0</h3>
+                                    <p>Repeated Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-shield"></i></div>
+                                <div class="card-content">
+                                    <h3 id="exceptionalUsersCount">0</h3>
+                                    <p>Exceptional Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-exclamation-triangle"></i></div>
+                                <div class="card-content">
+                                    <h3 id="pendingApprovalsCount">0</h3>
+                                    <p>Pending Approvals</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="charts-container">
+                            <div class="chart-card">
+                                <h3>User Activity Trends</h3>
+                                <canvas id="userActivityChart" width="400" height="200"></canvas>
+                            </div>
+                            <div class="chart-card">
+                                <h3>Request Types Distribution</h3>
+                                <canvas id="requestTypesChart" width="400" height="200"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="admin-actions">
+                            <h3>Quick Actions</h3>
+                            <div class="action-buttons">
+                                <button class="btn-secondary" onclick="exportAuditLog()">
+                                    <i class="fas fa-download"></i> Export Audit Log
+                                </button>
+                                <button class="btn-warning" onclick="cleanupOldRequests()">
+                                    <i class="fas fa-broom"></i> Cleanup Old Requests
+                                </button>
+                                <button class="btn-danger" onclick="revokeAllExpired()">
+                                    <i class="fas fa-times-circle"></i> Revoke All Expired
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Admin Users & Groups Tab -->
+                <div id="adminUsersTab" class="admin-tab" style="font-family: 'Inter', sans-serif;">
+                    <!-- Sub-tabs -->
+                    <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
+                        <button class="btn-secondary" id="usersSubTab" onclick="showUsersSubTab('users')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
+                            <i class="fas fa-user"></i> Users
+                        </button>
+                        <button class="btn-secondary" id="groupsSubTab" onclick="showUsersSubTab('groups')" style="font-family: 'Inter', sans-serif;">
+                            <i class="fas fa-users-cog"></i> Groups
+                        </button>
+                    </div>
+
+                    <!-- Users Section -->
+                    <div id="usersSection">
+                        <div class="users-management">
+                            <div class="users-header">
+                                <h3>User Management</h3>
+                                <button class="btn-primary" onclick="showCreateUserModal()">
+                                    <i class="fas fa-user-plus"></i> Create User
+                                </button>
+                            </div>
+                            
+                            <div class="users-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Email</th>
+                                        <th>Phone</th>
+                                        <th>Department</th>
+                                        <th>Group</th>
+                                        <th>Role</th>
+                                        <th>Status</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersTableBody">
+                                    <tr>
+                                        <td>Satish Korra</td>
+                                        <td>satish.korra@nykaa.com</td>
+                                        <td>+91-9876543210</td>
+                                        <td>DevOps</td>
+                                        <td>DevOps Team</td>
+                                        <td><span class="badge badge-danger">Admin</span></td>
+                                        <td><span class="badge badge-success">Active</span></td>
+                                        <td>
+                                            <button class="btn-link" onclick="editUser('satish')">Edit</button>
+                                            <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        </div>
+                    </div>
+
+                    <!-- Groups Section -->
+                    <div id="groupsSection" style="display: none;">
+                    <div class="groups-management">
+                        <div class="section-header">
+                            <h3>Groups Management</h3>
+                            <button class="btn-primary" onclick="showCreateGroupModal()">
+                                <i class="fas fa-plus"></i> Create Group
+                            </button>
+                        </div>
+                        
+                        <div class="groups-list">
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>DevOps Team</h4>
+                                    <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('devops')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('devops')">Delete</button>
+                                    </div>
+                                </div>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> GCP Console</label>
+                                        <label><input type="checkbox" checked disabled> Azure Console</label>
+                                        <label><input type="checkbox" disabled> Oracle Console</label>
+                                        <label><input type="checkbox" checked disabled> Storage</label>
+                                        <label><input type="checkbox" checked disabled> Databases</label>
+                                        <label><input type="checkbox" checked disabled> Identity</label>
+                                        <label><input type="checkbox" checked disabled> Networking</label>
+                                        <label><input type="checkbox" checked disabled> Container</label>
+                                        <label><input type="checkbox" checked disabled> Instances</label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>Security Team</h4>
+                                    <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('security')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('security')">Delete</button>
+                                    </div>
+                                </div>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> GCP Console</label>
+                                        <label><input type="checkbox" checked disabled> Azure Console</label>
+                                        <label><input type="checkbox" checked disabled> Oracle Console</label>
+                                        <label><input type="checkbox" checked disabled> ALL (Read-Only)</label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>Developers</h4>
+                                    <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('developers')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('developers')">Delete</button>
+                                    </div>
+                                </div>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> Storage (S3)</label>
+                                        <label><input type="checkbox" checked disabled> Databases (RDS)</label>
+                                        <label><input type="checkbox" checked disabled> Container (ECS/EKS)</label>
+                                        <label><input type="checkbox" checked disabled> Instances (EC2)</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                </div>
+                
+                <!-- Admin Management Tab -->
+                <div id="adminPoliciesTab" class="admin-tab" style="display: none; font-family: 'Inter', sans-serif;">
+                    <div id="policiesSection" style="font-family: 'Inter', sans-serif;">
+                        <div class="policy-builder">
+                        <div class="builder-header">
+                            <h3>🎯 Organization Policy Builder</h3>
+                            <p style="color: #666; font-size: 13px;">Configure your organization's access control model - Groups, Policies, JIT Flow, and Approval Workflows</p>
+                        </div>
+
+                        <!-- User & Group Sync Options -->
+                        <div class="quick-start-section">
+                            <h4>👥 User & Group Management</h4>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Choose how to manage users and groups in your organization</p>
+                            <div class="template-cards">
+                                <div class="template-card" onclick="showSyncFromAD()">
+                                    <div class="template-icon">🔄</div>
+                                    <h5>Sync from Active Directory</h5>
+                                    <p>Import users and groups from AD</p>
+                                    <ul>
+                                        <li>Auto-sync users from AD</li>
+                                        <li>Auto-sync groups from AD</li>
+                                        <li>Scheduled sync (hourly/daily)</li>
+                                    </ul>
+                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure AD Sync</button>
+                                </div>
+                                <div class="template-card" onclick="showSyncFromIdentityCenter()">
+                                    <div class="template-icon">☁️</div>
+                                    <h5>Sync from AWS Identity Center</h5>
+                                    <p>Import from AWS SSO Identity Store</p>
+                                    <ul>
+                                        <li>Auto-sync from Identity Center</li>
+                                        <li>Sync permission sets</li>
+                                        <li>Real-time sync</li>
+                                    </ul>
+                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure Identity Center Sync</button>
+                                </div>
+                                <div class="template-card" onclick="showManualUserManagement()">
+                                    <div class="template-icon">✏️</div>
+                                    <h5>Manual Management</h5>
+                                    <p>Create users/groups in JIT tool</p>
+                                    <ul>
+                                        <li>Create users manually</li>
+                                        <li>Create groups manually</li>
+                                        <li>Push to Identity Center/AD</li>
+                                    </ul>
+                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Manage Manually</button>
+                                </div>
+                            </div>
+                            <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-radius: 6px;">
+                                <strong>⚠️ Security Note:</strong> Only users synced from AD or Identity Center can access cloud resources. This ensures unauthorized users cannot gain access even if they're in the company.
+                            </div>
+                        </div>
+
+                        <!-- Step-by-Step Builder -->
+                        <div class="builder-steps">
+                            <div class="step-card active" id="step1">
+                                <div class="step-header" onclick="toggleStep('step1')">
+                                    <span class="step-number">1</span>
+                                    <h4>Define Groups</h4>
+                                    <span class="step-status">✓ Configured</span>
+                                </div>
+                                <div class="step-content">
+                                    <button class="btn-primary btn-sm" onclick="showCreateGroupWizard()">+ Create Group</button>
+                                    <table class="mini-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Group Name</th>
+                                                <th>Type</th>
+                                                <th>Members</th>
+                                                <th>Access Model</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="groupsListTable">
+                                            <tr>
+                                                <td><strong>DevOps Team</strong></td>
+                                                <td><span class="badge badge-success">Permanent</span></td>
+                                                <td>5 users</td>
+                                                <td>Full Access (L3)</td>
+                                                <td>
+                                                    <button class="btn-link" onclick="editGroupConfig('devops')">Edit</button>
+                                                    <button class="btn-link" onclick="deleteGroupConfig('devops')">Delete</button>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Developers</strong></td>
+                                                <td><span class="badge badge-warning">JIT Only</span></td>
+                                                <td>45 users</td>
+                                                <td>Limited Write (L2)</td>
+                                                <td>
+                                                    <button class="btn-link" onclick="editGroupConfig('developers')">Edit</button>
+                                                    <button class="btn-link" onclick="deleteGroupConfig('developers')">Delete</button>
+                                                </td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Security Team</strong></td>
+                                                <td><span class="badge badge-success">Permanent</span></td>
+                                                <td>3 users</td>
+                                                <td>Read-Only (L1)</td>
+                                                <td>
+                                                    <button class="btn-link" onclick="editGroupConfig('security')">Edit</button>
+                                                    <button class="btn-link" onclick="deleteGroupConfig('security')">Delete</button>
+                                                </td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div class="step-card" id="step2">
+                                <div class="step-header" onclick="toggleStep('step2')">
+                                    <span class="step-number">2</span>
+                                    <h4>Define Access Levels (L1/L2/L3 or Custom)</h4>
+                                    <span class="step-status">✓ Configured</span>
+                                </div>
+                                <div class="step-content">
+                                    <button class="btn-primary btn-sm" onclick="showCreateLevelModal()">+ Add Level</button>
+                                    <div class="levels-grid">
+                                        <div class="level-card">
+                                            <div class="level-header">
+                                                <h5>L1 - Read Only</h5>
+                                                <button class="btn-link" onclick="editLevel('L1')">Edit</button>
+                                            </div>
+                                            <div class="level-details">
+                                                <p><strong>Allowed:</strong> Describe*, List*, Get*</p>
+                                                <p><strong>Denied:</strong> *Delete*, *Create*, iam:*</p>
+                                                <p><strong>Max Duration:</strong> 8 hours</p>
+                                                <p><strong>Approval:</strong> Self</p>
+                                            </div>
+                                        </div>
+                                        <div class="level-card">
+                                            <div class="level-header">
+                                                <h5>L2 - Limited Write</h5>
+                                                <button class="btn-link" onclick="editLevel('L2')">Edit</button>
+                                            </div>
+                                            <div class="level-details">
+                                                <p><strong>Allowed:</strong> Start*, Stop*, PutObject, GetLogEvents</p>
+                                                <p><strong>Denied:</strong> *Delete*, *Create*, iam:*</p>
+                                                <p><strong>Max Duration:</strong> 4 hours</p>
+                                                <p><strong>Approval:</strong> Manager</p>
+                                            </div>
+                                        </div>
+                                        <div class="level-card">
+                                            <div class="level-header">
+                                                <h5>L3 - Admin</h5>
+                                                <button class="btn-link" onclick="editLevel('L3')">Edit</button>
+                                            </div>
+                                            <div class="level-details">
+                                                <p><strong>Allowed:</strong> * (All)</p>
+                                                <p><strong>Denied:</strong> iam:*, organizations:*</p>
+                                                <p><strong>Max Duration:</strong> 2 hours</p>
+                                                <p><strong>Approval:</strong> Manager + Security Lead</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step-card" id="step3">
+                                <div class="step-header" onclick="toggleStep('step3')">
+                                    <span class="step-number">3</span>
+                                    <h4>Configure JIT Flow</h4>
+                                    <span class="step-status">⚙️ Configure</span>
+                                </div>
+                                <div class="step-content">
+                                    <div class="jit-config">
+                                        <div class="config-row">
+                                            <label><input type="checkbox" checked> Enable JIT for Production Accounts</label>
+                                        </div>
+                                        <div class="config-row">
+                                            <label><input type="checkbox"> Enable JIT for Non-Production Accounts</label>
+                                        </div>
+                                        <div class="config-row">
+                                            <label>Default JIT Duration:</label>
+                                            <select style="padding: 5px;">
+                                                <option>4 hours</option>
+                                                <option selected>8 hours</option>
+                                                <option>24 hours</option>
+                                            </select>
+                                        </div>
+                                        <div class="config-row">
+                                            <label>Max JIT Duration:</label>
+                                            <select style="padding: 5px;">
+                                                <option>24 hours</option>
+                                                <option>72 hours</option>
+                                                <option selected>120 hours (5 days)</option>
+                                            </select>
+                                        </div>
+                                        <div class="config-row">
+                                            <label><input type="checkbox" checked> Auto-revoke on expiry</label>
+                                        </div>
+                                        <div class="config-row">
+                                            <label><input type="checkbox" checked> Send expiry reminders (1 hour before)</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step-card" id="step4">
+                                <div class="step-header" onclick="toggleStep('step4')">
+                                    <span class="step-number">4</span>
+                                    <h4>Configure Approval Workflow</h4>
+                                    <span class="step-status">⚙️ Configure</span>
+                                </div>
+                                <div class="step-content">
+                                    <div class="workflow-builder">
+                                        <h5>Approval Rules by Scenario</h5>
+                                        <table class="mini-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Scenario</th>
+                                                    <th>Approvers</th>
+                                                    <th>Timeout</th>
+                                                    <th>Auto-Approve If</th>
+                                                    <th>Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td>Read-Only + Non-Prod</td>
+                                                    <td>Self</td>
+                                                    <td>Instant</td>
+                                                    <td>Always</td>
+                                                    <td><button class="btn-link" onclick="editApprovalRule('ro-nonprod')">Edit</button></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Read-Only + Prod</td>
+                                                    <td>Manager</td>
+                                                    <td>4 hours</td>
+                                                    <td>Duration < 8hrs</td>
+                                                    <td><button class="btn-link" onclick="editApprovalRule('ro-prod')">Edit</button></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Write + Non-Prod</td>
+                                                    <td>Manager</td>
+                                                    <td>2 hours</td>
+                                                    <td>None</td>
+                                                    <td><button class="btn-link" onclick="editApprovalRule('write-nonprod')">Edit</button></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Write + Prod</td>
+                                                    <td>Manager + Security Lead</td>
+                                                    <td>1 hour</td>
+                                                    <td>None</td>
+                                                    <td><button class="btn-link" onclick="editApprovalRule('write-prod')">Edit</button></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Admin Access</td>
+                                                    <td>Manager + Security + CISO</td>
+                                                    <td>30 mins</td>
+                                                    <td>Never</td>
+                                                    <td><button class="btn-link" onclick="editApprovalRule('admin')">Edit</button></td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                        <button class="btn-primary btn-sm" style="margin-top: 10px;" onclick="addApprovalRule()">+ Add Custom Rule</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step-card" id="step-delete">
+                                <div class="step-header" onclick="toggleStep('step-delete')">
+                                    <span class="step-number">5</span>
+                                    <h4>Delete & Destructive Actions</h4>
+                                    <span class="step-status">⚙️ Configure</span>
+                                </div>
+                                <div class="step-content">
+                                    <div class="delete-config-modern">
+                                        <div class="config-card">
+                                            <div class="config-header">
+                                                <h5>Non-Production Environments <span class="info-icon" onmouseenter="showInfoPopup(event, 'nonprod')" onmouseleave="hideInfoPopup('nonprod')" onclick="pinInfoPopup(event, 'nonprod')">?</span></h5>
+                                                <label class="toggle-switch">
+                                                    <input type="checkbox" id="allowDeleteNonProd" onchange="updateDeletePolicy()" checked>
+                                                    <span class="toggle-slider"></span>
+                                                </label>
+                                            </div>
+                                            <p class="config-desc">Allow delete operations on dev/staging resources</p>
+                                        </div>
+
+                                        <div class="config-card">
+                                            <div class="config-header">
+                                                <h5>Production Environment <span class="info-icon" onmouseenter="showInfoPopup(event, 'prod')" onmouseleave="hideInfoPopup('prod')" onclick="pinInfoPopup(event, 'prod')">?</span></h5>
+                                                <label class="toggle-switch">
+                                                    <input type="checkbox" id="allowDeleteProd" onchange="updateDeletePolicy()">
+                                                    <span class="toggle-slider"></span>
+                                                </label>
+                                            </div>
+                                            <p class="config-desc">Requires multi-level approval</p>
+                                        </div>
+
+                                        <!-- Info Popups -->
+                                        <div id="infoPopup-nonprod" class="info-popup" style="display: none;">
+                                            <div class="info-popup-header">
+                                                <strong>Non-Production Delete Actions</strong>
+                                                <button class="info-close" onclick="closeInfoPopup('nonprod')">&times;</button>
+                                            </div>
+                                            <div class="info-popup-content">
+                                                <p><strong>Allowed Actions:</strong></p>
+                                                <ul>
+                                                    <li><code>s3:DeleteObject</code> - Delete S3 objects</li>
+                                                    <li><code>logs:DeleteLogStream</code> - Delete CloudWatch log streams</li>
+                                                    <li><code>logs:DeleteLogGroup</code> - Delete log groups</li>
+                                                    <li><code>lambda:UpdateFunctionCode</code> - Update Lambda code</li>
+                                                    <li><code>dynamodb:DeleteItem</code> - Delete DynamoDB items</li>
+                                                    <li><code>sqs:DeleteMessage</code> - Delete SQS messages</li>
+                                                </ul>
+                                                <p><strong>Always Blocked:</strong> Bucket/Table deletion, IAM changes</p>
+                                            </div>
+                                        </div>
+
+                                        <div id="infoPopup-prod" class="info-popup" style="display: none;">
+                                            <div class="info-popup-header">
+                                                <strong>Production Delete Actions</strong>
+                                                <button class="info-close" onclick="closeInfoPopup('prod')">&times;</button>
+                                            </div>
+                                            <div class="info-popup-content">
+                                                <p><strong>High-Risk Operations:</strong></p>
+                                                <ul>
+                                                    <li>Same actions as non-prod but with stricter approval</li>
+                                                    <li>Requires Manager + Security Lead + CISO approval</li>
+                                                    <li>Time-limited L3-Delete permission set</li>
+                                                    <li>Full audit trail and real-time alerts</li>
+                                                </ul>
+                                                <p><strong>Recommendation:</strong> Keep disabled unless absolutely necessary</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="contact-grid">
+                                            <div class="contact-item">
+                                                <label>Infrastructure Requests</label>
+                                                <input type="email" id="emailCreateActions" value="devops@company.com" placeholder="team@company.com">
+                                            </div>
+                                            <div class="contact-item">
+                                                <label>Delete Operations</label>
+                                                <input type="email" id="emailDeleteActions" value="security@company.com" placeholder="team@company.com">
+                                            </div>
+                                            <div class="contact-item">
+                                                <label>IAM & Security</label>
+                                                <input type="email" id="emailIAMActions" value="security-team@company.com" placeholder="team@company.com">
+                                            </div>
+                                            <div class="contact-item">
+                                                <label>Emergency Access</label>
+                                                <input type="email" id="emailEmergency" value="ciso@company.com" placeholder="team@company.com">
+                                            </div>
+                                        </div>
+
+                                        <button class="btn-primary" onclick="saveContactEmails()" style="margin-top: 20px;">Save Configuration</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="step-card" id="step5">
+                                <div class="step-header" onclick="toggleStep('step5')">
+                                    <span class="step-number">6</span>
+                                    <h4>Test & Deploy</h4>
+                                    <span class="step-status">🚀 Ready</span>
+                                </div>
+                                <div class="step-content">
+                                    <div class="deploy-section">
+                                        <h5>Configuration Summary</h5>
+                                        <div class="summary-box">
+                                            <p>✓ 3 Groups configured (2 Permanent, 1 JIT)</p>
+                                            <p>✓ 3 Access Levels defined (L1, L2, L3)</p>
+                                            <p>✓ JIT enabled for Production accounts</p>
+                                            <p>✓ 5 Approval rules configured</p>
+                                        </div>
+                                        <div style="margin-top: 20px;">
+                                            <button class="btn-secondary" onclick="testConfiguration()">🧪 Test Configuration</button>
+                                            <button class="btn-primary" onclick="deployConfiguration()">🚀 Deploy to Production</button>
+                                            <button class="btn-secondary" onclick="exportConfiguration()">📥 Export as JSON</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Admin Features Tab -->
+                <div id="adminFeaturesTab" class="admin-tab" style="display: none; font-family: 'Inter', sans-serif;">
+                    <div id="featuresSection" style="font-family: 'Inter', sans-serif;">
+                        <div class="features-management">
+                            <div class="section-header">
+                                <h3><i class="fas fa-toggle-on"></i> Feature Management</h3>
+                                <p style="color: #666; font-size: 13px;">Enable or disable features based on your license</p>
+                            </div>
+
+                            <div class="license-info" style="background: #e7f3ff; border: 1px solid #4A90E2; border-radius: 6px; padding: 15px; margin-bottom: 20px;">
+                                <h4 style="margin: 0 0 10px 0;">📋 Current License</h4>
+                                <p style="margin: 5px 0;"><strong>Plan:</strong> Enterprise</p>
+                                <p style="margin: 5px 0;"><strong>Users:</strong> 100 / Unlimited</p>
+                                <p style="margin: 5px 0;"><strong>Expires:</strong> 2025-12-31</p>
+                                <button class="btn-secondary btn-sm" onclick="alert('Contact sales@company.com to upgrade')">Upgrade License</button>
+                            </div>
+
+                            <div class="features-grid">
+                                <button class="btn-secondary" onclick="syncAccountsFromOU()">
+                                    <i class="fas fa-sync"></i> Auto-Tag from OU Structure
+                                </button>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Tag accounts as prod/non-prod/dev/sandbox. Auto-sync reads from AWS OU structure or manually tag below.</p>
+                            <table class="config-table">
+                                <thead>
+                                    <tr>
+                                        <th>Account ID</th>
+                                        <th>Account Name</th>
+                                        <th>Environment Tag</th>
+                                        <th>JIT Required</th>
+                                        <th>Max Duration (hrs)</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="accountClassificationTable">
+                                    <!-- Will be populated dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- User Groups & Roles -->
+                        <div class="config-section" style="margin-top: 30px;">
+                            <div class="section-header">
+                                <h3><i class="fas fa-users-cog"></i> User Groups & Roles</h3>
+                                <button class="btn-primary" onclick="showAddGroupModal()">
+                                    <i class="fas fa-plus"></i> Add Group
+                                </button>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Define user groups with different access policies (DevOps, Security, Developers, QA, etc.)</p>
+                            <div class="groups-grid">
+                                <div class="group-card">
+                                    <div class="group-header">
+                                        <h4>DevOps Team</h4>
+                                        <span class="badge badge-success">5 users</span>
+                                    </div>
+                                    <div class="group-details">
+                                        <p><strong>JIT Required:</strong> No</p>
+                                        <p><strong>Permanent Access:</strong> PowerUserAccess</p>
+                                        <p><strong>Accounts:</strong> All</p>
+                                    </div>
+                                    <button class="btn-secondary btn-sm" onclick="editGroup('devops')">Edit</button>
+                                </div>
+                                <div class="group-card">
+                                    <div class="group-header">
+                                        <h4>Security Team</h4>
+                                        <span class="badge badge-info">3 users</span>
+                                    </div>
+                                    <div class="group-details">
+                                        <p><strong>JIT Required:</strong> No</p>
+                                        <p><strong>Permanent Access:</strong> SecurityAudit, ReadOnlyAccess</p>
+                                        <p><strong>Accounts:</strong> All (including Prod)</p>
+                                    </div>
+                                    <button class="btn-secondary btn-sm" onclick="editGroup('security')">Edit</button>
+                                </div>
+                                <div class="group-card">
+                                    <div class="group-header">
+                                        <h4>Developers</h4>
+                                        <span class="badge badge-warning">45 users</span>
+                                    </div>
+                                    <div class="group-details">
+                                        <p><strong>JIT Required:</strong> Yes (Prod only)</p>
+                                        <p><strong>Non-Prod Access:</strong> Full write access</p>
+                                        <p><strong>Prod Access:</strong> Limited write via JIT</p>
+                                    </div>
+                                    <button class="btn-secondary btn-sm" onclick="editGroup('developers')">Edit</button>
+                                </div>
+                                <div class="group-card">
+                                    <div class="group-header">
+                                        <h4>QA Team</h4>
+                                        <span class="badge badge-warning">12 users</span>
+                                    </div>
+                                    <div class="group-details">
+                                        <p><strong>JIT Required:</strong> Yes (Prod only)</p>
+                                        <p><strong>Non-Prod Access:</strong> Read/Write</p>
+                                        <p><strong>Prod Access:</strong> Read-only via JIT</p>
+                                    </div>
+                                    <button class="btn-secondary btn-sm" onclick="editGroup('qa')">Edit</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Approval Matrix -->
+                        <div class="config-section" style="margin-top: 30px;">
+                            <div class="section-header">
+                                <h3><i class="fas fa-check-double"></i> Approval Matrix</h3>
+                                <button class="btn-primary" onclick="showAddApprovalRuleModal()">
+                                    <i class="fas fa-plus"></i> Add Rule
+                                </button>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Configure who needs to approve different types of access requests</p>
+                            <table class="config-table">
+                                <thead>
+                                    <tr>
+                                        <th>Access Type</th>
+                                        <th>Environment</th>
+                                        <th>Approvers Required</th>
+                                        <th>Auto-Approve Conditions</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td><span class="badge badge-success">Read-Only</span></td>
+                                        <td>Non-Prod</td>
+                                        <td>Self-Approval</td>
+                                        <td>Always</td>
+                                        <td><button class="btn-link" onclick="editApprovalRule('read-nonprod')">Edit</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td><span class="badge badge-success">Read-Only</span></td>
+                                        <td>Prod</td>
+                                        <td>Manager</td>
+                                        <td>Duration &lt; 8hrs</td>
+                                        <td><button class="btn-link" onclick="editApprovalRule('read-prod')">Edit</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td><span class="badge badge-warning">Write Access</span></td>
+                                        <td>Non-Prod</td>
+                                        <td>Manager</td>
+                                        <td>None</td>
+                                        <td><button class="btn-link" onclick="editApprovalRule('write-nonprod')">Edit</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td><span class="badge badge-warning">Write Access</span></td>
+                                        <td>Prod</td>
+                                        <td>Manager + Security Lead</td>
+                                        <td>None</td>
+                                        <td><button class="btn-link" onclick="editApprovalRule('write-prod')">Edit</button></td>
+                                    </tr>
+                                    <tr>
+                                        <td><span class="badge badge-danger">Admin Access</span></td>
+                                        <td>Any</td>
+                                        <td>Manager + Security Lead + CISO</td>
+                                        <td>Never</td>
+                                        <td><button class="btn-link" onclick="editApprovalRule('admin-any')">Edit</button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Permission Templates -->
+                        <div class="config-section" style="margin-top: 30px;">
+                            <div class="section-header">
+                                <h3><i class="fas fa-file-alt"></i> Permission Templates</h3>
+                                <button class="btn-primary" onclick="showCreateTemplateModal()">
+                                    <i class="fas fa-plus"></i> Create Template
+                                </button>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Pre-defined permission templates for common use cases</p>
+                            <div class="templates-grid">
+                                <div class="template-card">
+                                    <div class="template-header">
+                                        <h4>Developer - Prod Limited</h4>
+                                        <span class="badge badge-warning">Custom</span>
+                                    </div>
+                                    <div class="template-actions">
+                                        <p style="font-size: 12px; color: #666;">EC2 connect, S3 read, Logs read, RDS describe</p>
+                                    </div>
+                                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                                        <button class="btn-secondary btn-sm" onclick="viewTemplate('dev-prod')">View</button>
+                                        <button class="btn-secondary btn-sm" onclick="editTemplate('dev-prod')">Edit</button>
+                                        <button class="btn-link" onclick="deleteTemplate('dev-prod')">Delete</button>
+                                    </div>
+                                </div>
+                                <div class="template-card">
+                                    <div class="template-header">
+                                        <h4>QA - Test Environment</h4>
+                                        <span class="badge badge-info">Custom</span>
+                                    </div>
+                                    <div class="template-actions">
+                                        <p style="font-size: 12px; color: #666;">EC2 full, S3 read/write, Lambda invoke, RDS read</p>
+                                    </div>
+                                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                                        <button class="btn-secondary btn-sm" onclick="viewTemplate('qa-test')">View</button>
+                                        <button class="btn-secondary btn-sm" onclick="editTemplate('qa-test')">Edit</button>
+                                        <button class="btn-link" onclick="deleteTemplate('qa-test')">Delete</button>
+                                    </div>
+                                </div>
+                                <div class="template-card">
+                                    <div class="template-header">
+                                        <h4>Data Analyst - Read Only</h4>
+                                        <span class="badge badge-success">AWS Managed</span>
+                                    </div>
+                                    <div class="template-actions">
+                                        <p style="font-size: 12px; color: #666;">S3 read, Athena query, Glue read, RDS describe</p>
+                                    </div>
+                                    <div style="display: flex; gap: 8px; margin-top: 10px;">
+                                        <button class="btn-secondary btn-sm" onclick="viewTemplate('analyst-ro')">View</button>
+                                        <button class="btn-secondary btn-sm" onclick="cloneTemplate('analyst-ro')">Clone</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Break-Glass / Emergency Access -->
+                        <div class="config-section" style="margin-top: 30px;">
+                            <div class="section-header">
+                                <h3><i class="fas fa-exclamation-triangle"></i> Break-Glass Emergency Access</h3>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Configure emergency access procedures that bypass normal approval workflows</p>
+                            <div class="emergency-config">
+                                <div class="form-group">
+                                    <label><input type="checkbox" checked> Enable Break-Glass Access</label>
+                                </div>
+                                <div class="form-group">
+                                    <label>Authorized Users (can trigger emergency access):</label>
+                                    <input type="text" value="security-team@nykaa.com, devops-leads@nykaa.com" style="width: 100%; padding: 8px;">
+                                </div>
+                                <div class="form-group">
+                                    <label>Max Duration:</label>
+                                    <select style="padding: 8px;">
+                                        <option>1 hour</option>
+                                        <option selected>2 hours</option>
+                                        <option>4 hours</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label><input type="checkbox" checked> Require incident ticket number</label>
+                                </div>
+                                <div class="form-group">
+                                    <label><input type="checkbox" checked> Send real-time alerts to CISO</label>
+                                </div>
+                                <button class="btn-primary">Save Emergency Config</button>
+                            </div>
+                        </div>
+
+                        <!-- Export/Import Policy -->
+                        <div class="config-section" style="margin-top: 30px;">
+                            <div class="section-header">
+                                <h3><i class="fas fa-file-export"></i> Policy Export/Import</h3>
+                            </div>
+                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Export current policy configuration or import from template</p>
+                            <div style="display: flex; gap: 15px;">
+                                <button class="btn-secondary" onclick="exportPolicy()">
+                                    <i class="fas fa-download"></i> Export Current Policy (JSON)
+                                </button>
+                                <button class="btn-secondary" onclick="showImportPolicyModal()">
+                                    <i class="fas fa-upload"></i> Import Policy
+                                </button>
+                                <button class="btn-secondary" onclick="loadPolicyTemplate()">
+                                    <i class="fas fa-file-code"></i> Load Template (Startup/Enterprise/Regulated)
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-hdd"></i> S3 Explorer</h4>
+                                        <p>Browse and manage S3 buckets through web interface</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureS3" onchange="toggleFeature('s3', this.checked)" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-success">✓ Enabled</span>
+                                    <span style="color: #666; font-size: 12px;">Included in license</span>
+                                </div>
+                            </div>
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-terminal"></i> Instance Terminal Access</h4>
+                                        <p>SSH/SSM access to EC2 instances via browser</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureTerminal" onchange="toggleFeature('terminal', this.checked)" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-success">✓ Enabled</span>
+                                    <span style="color: #666; font-size: 12px;">Included in license</span>
+                                </div>
+                            </div>
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-database"></i> Database Access Management</h4>
+                                        <p>Manage temporary database credentials and connections</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureDatabase" onchange="toggleFeature('database', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-warning">⚠ Disabled</span>
+                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
+                                </div>
+                            </div>
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-cube"></i> Container Access Management</h4>
+                                        <p>Access Kubernetes pods and Docker containers</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureContainer" onchange="toggleFeature('container', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-warning">⚠ Disabled</span>
+                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
+                                </div>
+                            </div>
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-key"></i> Secrets Manager Access</h4>
+                                        <p>Temporary access to secrets and credentials</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureSecrets" onchange="toggleFeature('secrets', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-warning">⚠ Disabled</span>
+                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
+                                </div>
+                            </div>
+
+                            <div class="feature-card">
+                                <div class="feature-header">
+                                    <div>
+                                        <h4><i class="fas fa-chart-line"></i> Advanced Analytics</h4>
+                                        <p>Detailed reports and usage analytics</p>
+                                    </div>
+                                    <label class="toggle-switch">
+                                        <input type="checkbox" id="featureAnalytics" onchange="toggleFeature('analytics', this.checked)">
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+                                <div class="feature-status">
+                                    <span class="badge badge-warning">⚠ Disabled</span>
+                                    <span style="color: #666; font-size: 12px;">Premium feature</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Admin Integrations Tab -->
+                <div id="adminIntegrationsTab" class="admin-tab" style="display: none;">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-jira">J</div>
+                                <h3>JIRA</h3>
+                            </div>
+                            <p>Issue & Project Tracking System</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('jira')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-splunk">S</div>
+                                <h3>Splunk</h3>
+                            </div>
+                            <p>Log Analysis & SIEM Platform</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('splunk')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
+                        </div>
+                        
+                        <div class="integration-card">
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-servicenow">SN</div>
+                                <h3>ServiceNow</h3>
+                            </div>
+                            <p>IT Service Management Platform</p>
+                            <div class="integration-status disconnected">
+                                <i class="fas fa-times-circle"></i> Not Connected
+                            </div>
+                            <button class="btn-primary" onclick="configureIntegration('servicenow')">
+                                <i class="fas fa-plug"></i> Connect
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Admin Security Tab -->
+                <div id="adminSecurityTab" class="admin-tab" style="display: none; font-family: 'Inter', sans-serif;">
+                    <!-- Sub-tabs -->
+                    <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
+                        <button class="btn-secondary" id="securitySubTab" onclick="showSecuritySubTab('security')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
+                            <i class="fas fa-shield-alt"></i> Security
+                        </button>
+                        <button class="btn-secondary" id="auditSubTab" onclick="showSecuritySubTab('audit')" style="font-family: 'Inter', sans-serif;">
+                            <i class="fas fa-clipboard-list"></i> Audit Logs
+                        </button>
+                    </div>
+
+                    <!-- Security Section -->
+                    <div id="securitySection">
+                    <div class="security-management">
+                        <div class="section-header">
+                            <h3><i class="fas fa-shield-alt"></i> Security Configuration</h3>
+                        </div>
+
+                        <!-- Blocked IPs -->
+                        <div class="config-section" style="margin-bottom: 30px;">
+                            <div class="section-header">
+                                <h4>Blocked IP Addresses</h4>
+                                <button class="btn-primary btn-sm" onclick="addBlockedIP()">
+                                    <i class="fas fa-plus"></i> Add IP
+                                </button>
+                            </div>
+                            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 15px;">Block specific IP addresses or ranges from accessing the JIT portal</p>
+                            <div id="blockedIPsList" style="display: flex; flex-direction: column; gap: 10px;">
+                                <div class="ip-item">
+                                    <input type="text" value="192.168.1.100" readonly style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
+                                    <input type="text" value="Suspicious activity" readonly style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
+                                    <button class="btn-danger btn-sm" onclick="removeBlockedIP(this)"><i class="fas fa-trash"></i></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Allowed IPs -->
+                        <div class="config-section">
+                            <div class="section-header">
+                                <h4>Allowed IP Addresses (Whitelist)</h4>
+                                <button class="btn-primary btn-sm" onclick="addAllowedIP()">
+                                    <i class="fas fa-plus"></i> Add IP
+                                </button>
+                            </div>
+                            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 15px;">Restrict JIT portal access to specific internal IP addresses or ranges. Leave empty to allow all IPs.</p>
+                            <div class="form-group">
+                                <label>
+                                    <input type="checkbox" id="enableIPWhitelist" onchange="toggleIPWhitelist()">
+                                    Enable IP Whitelist (Only allow access from specified IPs)
+                                </label>
+                            </div>
+                            <div id="allowedIPsList" style="display: none; flex-direction: column; gap: 10px; margin-top: 15px;">
+                                <div class="ip-item">
+                                    <input type="text" value="10.0.0.0/8" readonly style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
+                                    <input type="text" value="Internal network" readonly style="flex: 1; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
+                                    <button class="btn-danger btn-sm" onclick="removeAllowedIP(this)"><i class="fas fa-trash"></i></button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button class="btn-primary" onclick="saveSecurityConfig()" style="margin-top: 30px;">
+                            <i class="fas fa-save"></i> Save Security Configuration
+                        </button>
+                    </div>
+
+                    <!-- Audit Section -->
+                    <div id="auditSection" style="display: none;">
+                    <div class="audit-logs">
+                        <div class="audit-header">
+                            <h3>Audit Logs</h3>
+                            <div class="audit-filters">
+                                <select id="auditFilter">
+                                    <option value="all">All Events</option>
+                                    <option value="login">Login Events</option>
+                                    <option value="request">Access Requests</option>
+                                    <option value="approval">Approvals</option>
+                                    <option value="revoke">Revocations</option>
+                                </select>
+                                <input type="date" id="auditDateFrom" placeholder="From Date">
+                                <input type="date" id="auditDateTo" placeholder="To Date">
+                                <button class="btn-secondary" onclick="filterAuditLogs()">
+                                    <i class="fas fa-filter"></i> Filter
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div class="audit-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Timestamp</th>
+                                        <th>User</th>
+                                        <th>Event</th>
+                                        <th>Resource</th>
+                                        <th>IP Address</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="auditLogsTableBody">
+                                    <!-- Audit logs will be loaded here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+            </div>
+
+            <!-- Request for Others Page -->
+            <div id="requestForOthersPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-user-plus"></i> Request Access for Others</h2>
+                    <button class="btn-secondary" onclick="cancelRequestForOthers()">
+                        <i class="fas fa-times"></i> Cancel
+                    </button>
+                </div>
+                
+                <div id="othersStep1" class="request-wizard-step">
+                    <h3 style="font-family: 'Inter', sans-serif; font-size: 18px; margin-bottom: 20px; color: var(--text-primary);">What do you want to request access for?</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; max-width: 800px;">
+                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('aws')">
+                            <i class="fab fa-aws" style="font-size: 48px; color: #FF9900;"></i>
+                            <h4>AWS</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('gcp')">
+                            <i class="fab fa-google" style="font-size: 48px; color: #4285F4;"></i>
+                            <h4>GCP</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('azure')">
+                            <i class="fab fa-microsoft" style="font-size: 48px; color: #0078D4;"></i>
+                            <h4>Azure</h4>
+                        </div>
+                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('oracle')">
+                            <i class="fas fa-cloud" style="font-size: 48px; color: #F80000;"></i>
+                            <h4>Oracle</h4>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="othersStep2AWS" class="request-wizard-step" style="display: none;">
+                    <button class="btn-secondary" onclick="backToOthersStep1()" style="margin-bottom: 20px;">
+                        <i class="fas fa-arrow-left"></i> Back
+                    </button>
+                    
+                    <div style="display: flex; gap: 20px;">
+                        <form id="requestForOthersForm" style="flex: 0 0 450px; max-width: 450px;">
+                            <div class="form-group">
+                                <label>Requester Email(s) *</label>
+                                <div class="email-tags-container" style="display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary);">
+                                    <div id="othersEmailTags" style="display: flex; flex-wrap: wrap; gap: 5px;"></div>
+                                    <input type="text" id="othersEmailInput" placeholder="Type email and press Tab" style="border: none; outline: none; flex: 1; min-width: 200px; background: transparent; color: var(--text-primary);">
+                                </div>
+                                <small>Press Tab or Enter to add multiple emails</small>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Select AWS Account *</label>
+                                <select id="othersRequestAccount" required onchange="fetchAWSResourcesForOthers()">
+                                    <option value="">Select Account</option>
+                                </select>
+                            </div>
+
+                            <div id="othersResourceExplorerSection" style="display: none;">
+                                <div class="form-group">
+                                    <label>Available AWS Services</label>
+                                    <div id="othersResourceExplorerLoading" style="display: none; text-align: center; padding: 20px;">
+                                        <i class="fas fa-spinner fa-spin" style="font-size: 24px; color: #667eea;"></i>
+                                        <p style="margin-top: 10px; color: var(--text-secondary); font-size: 14px;">Fetching resources from AWS...</p>
+                                    </div>
+                                    <div id="othersAWSServicesList" style="display: none;"></div>
+                                </div>
+
+                                <div class="form-group" id="othersMyResourcesSection" style="display: none;">
+                                    <label>Selected Resources</label>
+                                    <div id="othersMyResourcesList" class="resources-list"></div>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Duration</label>
+                                <select id="othersRequestDuration">
+                                    <option value="4">4 hours</option>
+                                    <option value="8" selected>8 hours</option>
+                                    <option value="24">24 hours</option>
+                                    <option value="72">3 days</option>
+                                    <option value="120">5 days (max)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Business Justification *</label>
+                                <textarea id="othersRequestJustification" placeholder="Explain why this access is needed" rows="3" required></textarea>
+                            </div>
+                            
+                            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                                <button type="button" class="btn-secondary" onclick="cancelRequestForOthers()">Cancel</button>
+                                <button type="submit" class="btn-primary">Submit Request</button>
+                            </div>
+                        </form>
+                        
+                        <div style="flex: 0 0 280px;">
+                            <div style="position: sticky; top: 20px; background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 8px; padding: 16px;">
+                                <h4 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-weight: 600;">Selected Resources</h4>
+                                <div id="othersSelectedResourcesPanel" style="max-height: 400px; overflow-y: auto;">
+                                    <p style="color: var(--text-secondary); font-size: 12px;">No resources selected</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div id="modalOverlay" class="modal-overlay">
+
+        <!-- Profile Modal -->
+        <div id="profileModal" class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-user"></i> My Profile</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="profile-info">
+                    <div class="profile-avatar">
+                        <i class="fas fa-user-circle"></i>
+                    </div>
+                    <div class="profile-details">
+                        <h4>Satish Korra</h4>
+                        <p>Satish.Korra@nykaa.com</p>
+                        <p>Senior DevOps Engineer</p>
+                    </div>
+                </div>
+                <div class="theme-settings">
+                    <h4>Theme Settings</h4>
+                    <div class="theme-options">
+                        <button class="theme-option active" onclick="setTheme('light')">
+                            <i class="fas fa-sun"></i> Light
+                        </button>
+                        <button class="theme-option" onclick="setTheme('dark')">
+                            <i class="fas fa-moon"></i> Dark
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+
+    <!-- Create User Modal -->
+    <div id="createUserModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-user-plus"></i> Create User</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="createUserForm">
+                <div class="form-group">
+                    <label>First Name <span class="required">*</span></label>
+                    <input type="text" id="userFirstName" required placeholder="John">
+                </div>
+                <div class="form-group">
+                    <label>Last Name <span class="required">*</span></label>
+                    <input type="text" id="userLastName" required placeholder="Doe">
+                </div>
+                <div class="form-group">
+                    <label>Email Address <span class="required">*</span></label>
+                    <input type="email" id="userEmail" required placeholder="john.doe@company.com">
+                </div>
+                <div class="form-group">
+                    <label>Phone Number <span class="required">*</span></label>
+                    <input type="tel" id="userPhone" required placeholder="+91-9876543210">
+                </div>
+                <div class="form-group">
+                    <label>Department <span class="required">*</span></label>
+                    <select id="userDepartment" required>
+                        <option value="">Select Department</option>
+                        <option value="devops">DevOps</option>
+                        <option value="engineering">Engineering</option>
+                        <option value="security">Security</option>
+                        <option value="qa">QA</option>
+                        <option value="finance">Finance</option>
+                        <option value="networking">Networking</option>
+                        <option value="data">Data Analytics</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Group <span class="required">*</span></label>
+                    <select id="userGroup" required>
+                        <option value="">Select Group</option>
+                        <option value="devops">DevOps Team</option>
+                        <option value="security">Security Team</option>
+                        <option value="developers">Developers</option>
+                        <option value="qa">QA Team</option>
+                        <option value="finance">Finance Team</option>
+                        <option value="networking">Networking Team</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Role <span class="required">*</span></label>
+                    <select id="userRole" required>
+                        <option value="">Select Role</option>
+                        <option value="engineer">Engineer</option>
+                        <option value="manager">Manager</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <small style="color: #666; font-size: 12px;">
+                        <strong>Engineer:</strong> Create users/groups, manage policies (no delete)<br>
+                        <strong>Manager:</strong> Approve requests, delete actions, manage access, tag accounts<br>
+                        <strong>Admin:</strong> Full control over JIT console
+                    </small>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Create User</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Create Group Modal -->
+    <div id="createGroupModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-users-cog"></i> Create Group</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="createGroupForm">
+                <div class="form-group">
+                    <label>Group Name <span class="required">*</span></label>
+                    <input type="text" id="groupName" required placeholder="e.g., Data Engineers">
+                </div>
+                <div class="form-group">
+                    <label>Permissions <span class="required">*</span></label>
+                    <div class="permission-checkboxes">
+                        <label><input type="checkbox" name="groupPerms" value="aws"> AWS Console</label>
+                        <label><input type="checkbox" name="groupPerms" value="gcp"> GCP Console</label>
+                        <label><input type="checkbox" name="groupPerms" value="azure"> Azure Console</label>
+                        <label><input type="checkbox" name="groupPerms" value="oracle"> Oracle Console</label>
+                        <label><input type="checkbox" name="groupPerms" value="storage"> Storage</label>
+                        <label><input type="checkbox" name="groupPerms" value="databases"> Databases</label>
+                        <label><input type="checkbox" name="groupPerms" value="identity"> Identity</label>
+                        <label><input type="checkbox" name="groupPerms" value="networking"> Networking</label>
+                        <label><input type="checkbox" name="groupPerms" value="container"> Container</label>
+                        <label><input type="checkbox" name="groupPerms" value="instances"> Instances</label>
+                        <label><input type="checkbox" name="groupPerms" value="all"> ALL</label>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Create Group</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Manual Onboard Modal -->
+    <div id="manualOnboardModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-user-plus"></i> Manual User Onboarding</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="manualOnboardForm">
+                <div class="form-group">
+                    <label>Email Address <span class="required">*</span></label>
+                    <input type="email" id="onboardEmail" required placeholder="user@nykaa.com">
+                </div>
+                <div class="form-group">
+                    <label>Full Name <span class="required">*</span></label>
+                    <input type="text" id="onboardName" required placeholder="John Doe">
+                </div>
+                <div class="form-group">
+                    <label>Department</label>
+                    <select id="onboardDepartment">
+                        <option value="">Select Department</option>
+                        <option value="engineering">Engineering</option>
+                        <option value="devops">DevOps</option>
+                        <option value="security">Security</option>
+                        <option value="qa">Quality Assurance</option>
+                        <option value="product">Product</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Temporary Password <span class="required">*</span></label>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <input type="password" id="onboardPassword" required style="flex: 1;">
+                        <button type="button" class="btn-secondary" onclick="generateTempPassword()">Generate</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="enableMFA" checked>
+                        Enable MFA (Recommended)
+                    </label>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Onboard User</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Application Request Modal -->
+    <div id="appRequestModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-apps"></i> Application Access Request</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <form id="appRequestForm">
+                <div class="form-group">
+                    <label>Application Type <span class="required">*</span></label>
+                    <select id="appType" required>
+                        <option value="">Select Application Type</option>
+                        <option value="cloud">Cloud Platform</option>
+                        <option value="kubernetes">Kubernetes</option>
+                        <option value="database">Database</option>
+                        <option value="application">Application</option>
+                        <option value="ticketing">Ticketing System</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Specific Application <span class="required">*</span></label>
+                    <select id="specificApp" required>
+                        <option value="">Select Application</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Access Level <span class="required">*</span></label>
+                    <select id="appAccessLevel" required>
+                        <option value="read">Read Only</option>
+                        <option value="write">Read/Write</option>
+                        <option value="admin">Admin (Requires Approval)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Duration <span class="required">*</span></label>
+                    <select id="appRequestDuration" required>
+                        <option value="1">1 Hour</option>
+                        <option value="4">4 Hours</option>
+                        <option value="8" selected>8 Hours</option>
+                        <option value="24">1 Day</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Business Justification <span class="required">*</span></label>
+                    <textarea id="appRequestJustification" required rows="3" placeholder="Explain why this access is needed..."></textarea>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
+                    <button type="submit" class="btn-primary">Submit Request</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Cloud Onboarding Modal -->
+    <div id="cloudOnboardingModal" class="modal">
+        <div class="modal-header">
+            <h3><i class="fas fa-cloud"></i> Cloud Onboarding</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="cloud-onboard-grid">
+                <button class="cloud-onboard-btn" onclick="onboardCloud('aws')">
+                    <i class="fab fa-aws" style="color: #FF9900;"></i>
+                </button>
+                <button class="cloud-onboard-btn" onclick="onboardCloud('gcp')">
+                    <i class="fab fa-google" style="color: #4285F4;"></i>
+                </button>
+                <button class="cloud-onboard-btn" onclick="onboardCloud('azure')">
+                    <i class="fab fa-microsoft" style="color: #0078D4;"></i>
+                </button>
+                <button class="cloud-onboard-btn" onclick="onboardCloud('oracle')">
+                    <i class="fas fa-cloud" style="color: #F80000;"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+            <!-- Request for Others Page -->
+            </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <script src="calendar.js"></script>
+    <script src="wizard.js"></script>
+    <script src="policy-config.js"></script>
+    <script src="policy-builder.js"></script>
+    <script src="feature-management.js"></script>
+    <script src="delete-permissions.js"></script>
+    <script src="admin-functions.js"></script>
+    <script src="security-management.js"></script>
+    <script src="instances.js"></script>
+    <script src="s3-explorer.js"></script>
+    <script src="app.js"></script>
+    <script>
+        // Auto logout after 30 minutes of inactivity
+        let inactivityTimer;
+        const INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+        
+        function resetInactivityTimer() {
+            clearTimeout(inactivityTimer);
+            inactivityTimer = setTimeout(() => {
+                alert('Session expired due to inactivity. You will be logged out.');
+                logout();
+            }, INACTIVITY_TIMEOUT);
+        }
+        
+        // Track user activity
+        document.addEventListener('mousedown', resetInactivityTimer);
+        document.addEventListener('mousemove', resetInactivityTimer);
+        document.addEventListener('keypress', resetInactivityTimer);
+        document.addEventListener('scroll', resetInactivityTimer);
+        document.addEventListener('touchstart', resetInactivityTimer);
+        
+        // Start timer on page load
+        resetInactivityTimer();
+        
+        // Sub-tab switching functions
+        function showUsersSubTab(tab) {
+            document.getElementById('usersSection').style.display = tab === 'users' ? 'block' : 'none';
+            document.getElementById('groupsSection').style.display = tab === 'groups' ? 'block' : 'none';
+            
+            const usersBtn = document.getElementById('usersSubTab');
+            const groupsBtn = document.getElementById('groupsSubTab');
+            
+            if (tab === 'users') {
+                usersBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                usersBtn.style.color = 'white';
+                usersBtn.style.border = 'none';
+                groupsBtn.style.background = 'var(--bg-secondary)';
+                groupsBtn.style.color = 'var(--text-primary)';
+                groupsBtn.style.border = '1.5px solid var(--border-color)';
+            } else {
+                groupsBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                groupsBtn.style.color = 'white';
+                groupsBtn.style.border = 'none';
+                usersBtn.style.background = 'var(--bg-secondary)';
+                usersBtn.style.color = 'var(--text-primary)';
+                usersBtn.style.border = '1.5px solid var(--border-color)';
+            }
+        }
+        
+        function showManagementSubTab(tab) {
+            document.getElementById('policiesSection').style.display = tab === 'policies' ? 'block' : 'none';
+            document.getElementById('featuresSection').style.display = tab === 'features' ? 'block' : 'none';
+            
+            const policiesBtn = document.getElementById('policiesSubTab');
+            const featuresBtn = document.getElementById('featuresSubTab');
+            
+            if (tab === 'policies') {
+                policiesBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                policiesBtn.style.color = 'white';
+                policiesBtn.style.border = 'none';
+                featuresBtn.style.background = 'var(--bg-secondary)';
+                featuresBtn.style.color = 'var(--text-primary)';
+                featuresBtn.style.border = '1.5px solid var(--border-color)';
+            } else {
+                featuresBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                featuresBtn.style.color = 'white';
+                featuresBtn.style.border = 'none';
+                policiesBtn.style.background = 'var(--bg-secondary)';
+                policiesBtn.style.color = 'var(--text-primary)';
+                policiesBtn.style.border = '1.5px solid var(--border-color)';
+            }
+        }
+        
+        function showSecuritySubTab(tab) {
+            document.getElementById('securitySection').style.display = tab === 'security' ? 'block' : 'none';
+            document.getElementById('auditSection').style.display = tab === 'audit' ? 'block' : 'none';
+            
+            const securityBtn = document.getElementById('securitySubTab');
+            const auditBtn = document.getElementById('auditSubTab');
+            
+            if (tab === 'security') {
+                securityBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                securityBtn.style.color = 'white';
+                securityBtn.style.border = 'none';
+                auditBtn.style.background = 'var(--bg-secondary)';
+                auditBtn.style.color = 'var(--text-primary)';
+                auditBtn.style.border = '1.5px solid var(--border-color)';
+            } else {
+                auditBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                auditBtn.style.color = 'white';
+                auditBtn.style.border = 'none';
+                securityBtn.style.background = 'var(--bg-secondary)';
+                securityBtn.style.color = 'var(--text-primary)';
+                securityBtn.style.border = '1.5px solid var(--border-color)';
+            }
+        }
+    </script>
+</body>
+</html>
