@@ -229,8 +229,8 @@ async function loadUsersManagement() {
             '<td>' + (user.group || 'N/A') + '</td>' +
             '<td><span class="badge ' + badgeClass + '">' + role + '</span></td>' +
             '<td><span class="badge badge-success">Active</span></td>' +
-            '<td><button class="btn-link" onclick="editUser(\'' + (user.email || '') + '\')">Edit</button> ' +
-            '<button class="btn-link" onclick="deleteUser(\'' + (user.email || '') + '\')">Delete</button></td>' +
+            '<td><div class="user-mgmt-actions"><button class="user-mgmt-glow-btn btn-sm" onclick="editUser(\'' + (user.email || '') + '\')">Edit</button>' +
+            '<button class="user-mgmt-glow-btn btn-sm" onclick="deleteUser(\'' + (user.email || '') + '\')">Delete</button></div></td>' +
             '</tr>';
     }).join('');
     if (typeof updateAccessGroupCounts === 'function') updateAccessGroupCounts();

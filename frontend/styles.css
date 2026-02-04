@@ -1449,6 +1449,92 @@ td {
     border: 1px solid var(--border-color);
 }
 
+/* Header buttons - same purple glow pattern (Documentation, Support, Admin Panel) */
+.header-glow-btn {
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid #8B5CF6;
+    background: rgba(139, 92, 246, 0.15);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
+}
+
+.header-glow-btn:hover {
+    background: rgba(139, 92, 246, 0.25);
+    border-color: #8B5CF6;
+    color: var(--text-primary);
+}
+
+/* Users & Groups - same as AI button & status buttons: no fill, subtle tint + border + glow */
+.user-mgmt-glow-btn {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1px solid #8B5CF6;
+    background: rgba(139, 92, 246, 0.15);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
+}
+
+.user-mgmt-glow-btn:hover {
+    background: rgba(139, 92, 246, 0.25);
+    border-color: #8B5CF6;
+    color: var(--text-primary);
+}
+
+.user-mgmt-glow-btn.btn-sm {
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
+/* User-mgmt sub-tabs - same pattern */
+.user-mgmt-subtab {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1.5px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    font-family: 'Inter', sans-serif;
+}
+
+.user-mgmt-subtab.user-mgmt-subtab-active {
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid #8B5CF6;
+    color: var(--text-primary);
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
+}
+
+.user-mgmt-subtab:not(.user-mgmt-subtab-active):hover {
+    background: var(--bg-primary);
+}
+
+.user-mgmt-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 .form-group input,
 .form-group select,
 .form-group textarea {
@@ -1916,13 +2002,13 @@ td {
 }
 
 .admin-tab-btn {
-    padding: 8px 16px;
-    border: 1px solid var(--border-color);
+    padding: 10px 18px;
+    border: 1.5px solid var(--border-color);
     background: var(--bg-secondary);
-    color: var(--text-secondary);
-    border-radius: 4px;
+    color: var(--text-primary);
+    border-radius: 8px;
     cursor: pointer;
-    transition: all 0.3s;
+    transition: all 0.2s;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1931,10 +2017,15 @@ td {
     font-weight: 500;
 }
 
+.admin-tab-btn:hover:not(.active) {
+    background: var(--bg-primary);
+}
+
 .admin-tab-btn.active {
-    background: var(--primary-color);
-    color: white;
-    border-color: var(--primary-color);
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid #8B5CF6;
+    color: var(--text-primary);
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
 }
 
 .admin-tab {
@@ -1995,34 +2086,85 @@ td {
     overflow-x: auto;
 }
 
+/* Unified Tab Glow Pattern - same as AI button & Pending/In Progress/Completed: no fill, subtle tint + border + glow */
+.tab-glow-active {
+    background: rgba(139, 92, 246, 0.15) !important;
+    border: 1px solid #8B5CF6 !important;
+    color: var(--text-primary) !important;
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
+}
+
+.tab-glow-inactive {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border: 1.5px solid var(--border-color) !important;
+}
+
+/* Sub-tabs using same pattern (Security, Management, etc.) */
+.tab-glow-subtab {
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: 1.5px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+    font-family: 'Inter', sans-serif;
+}
+
+.tab-glow-subtab.tab-glow-subtab-active {
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid #8B5CF6;
+    color: var(--text-primary);
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
+}
+
+.tab-glow-subtab:not(.tab-glow-subtab-active):hover {
+    background: var(--bg-primary);
+}
+
+@keyframes tab-glow-purple {
+    0%, 100% { box-shadow: 0 0 8px rgba(139, 92, 246, 0.5); }
+    50% { box-shadow: 0 0 24px rgba(139, 92, 246, 0.8); }
+}
+
 /* Integration Tabs */
 .integration-tabs {
     display: flex;
     gap: 1rem;
     margin-bottom: 2rem;
     border-bottom: 2px solid var(--border-color);
+    padding-bottom: 10px;
 }
 
 .integration-tab-btn {
-    padding: 12px 24px;
-    background: none;
-    border: none;
-    border-bottom: 3px solid transparent;
-    color: var(--text-secondary);
+    padding: 10px 18px;
+    background: var(--bg-secondary);
+    border: 1.5px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: 14px;
     font-weight: 500;
-    transition: all 0.3s;
-    margin-bottom: -2px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
-.integration-tab-btn:hover {
-    color: var(--text-primary);
+.integration-tab-btn:hover:not(.active) {
+    background: var(--bg-primary);
 }
 
 .integration-tab-btn.active {
-    color: var(--primary-color);
-    border-bottom-color: var(--primary-color);
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid #8B5CF6;
+    color: var(--text-primary);
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
 }
 
 .integration-tab-content {
@@ -2101,11 +2243,11 @@ td {
 }
 
 .admin-integration-tab-btn {
-    padding: 10px 20px;
+    padding: 10px 18px;
     background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    border: 1.5px solid var(--border-color);
     border-radius: 8px;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     cursor: pointer;
     font-size: 14px;
     font-weight: 500;
@@ -2115,15 +2257,15 @@ td {
     gap: 8px;
 }
 
-.admin-integration-tab-btn:hover {
-    border-color: var(--primary-color);
-    color: var(--primary-color);
+.admin-integration-tab-btn:hover:not(.active) {
+    background: var(--bg-primary);
 }
 
 .admin-integration-tab-btn.active {
-    background: var(--primary-color);
-    color: #0B1220;
-    border-color: var(--primary-color);
+    background: rgba(139, 92, 246, 0.15);
+    border: 1px solid #8B5CF6;
+    color: var(--text-primary);
+    animation: tab-glow-purple 1.5s ease-in-out infinite;
 }
 
 .admin-integration-category {
@@ -2173,6 +2315,15 @@ td {
 .integration-logo-zoho { background: #C8202B; }
 .integration-logo-confluence { background: #172B4D; }
 .integration-logo-slack { background: #4A154B; }
+/* Identity & Login providers */
+.integration-logo-okta { background: #007DC1; }
+.integration-logo-jumpcloud { background: #00A8E1; }
+.integration-logo-onelogin { background: #3F7DE0; }
+.integration-logo-azuread { background: #0078D4; }
+.integration-logo-google { background: #4285F4; }
+.integration-logo-ping { background: #00B140; }
+.integration-logo-auth0 { background: #EB5424; }
+.integration-logo-duo { background: #00A8E1; }
 
 /* Integration card icons (standalone Integrations page - larger) */
 .integration-card-icon {
@@ -3192,9 +3343,12 @@ td {
     margin-right: 8px;
 }
 
-/* Groups Management Styles */
+/* Groups Management Styles - Theme-aware */
 .groups-management {
     padding: 20px;
+    background: var(--bg-primary);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
 }
 
 .groups-list {
@@ -3204,11 +3358,11 @@ td {
 }
 
 .group-detail-card {
-    background: white;
-    border: 1px solid #dee2e6;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
     padding: 20px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    box-shadow: var(--shadow);
 }
 
 .group-detail-header {
@@ -3217,19 +3371,25 @@ td {
     align-items: center;
     margin-bottom: 15px;
     padding-bottom: 15px;
-    border-bottom: 2px solid #f0f0f0;
+    border-bottom: 2px solid var(--border-color);
 }
 
 .group-detail-header h4 {
     margin: 0;
     font-size: 18px;
-    color: #333;
+    color: var(--text-primary);
 }
 
 .group-permissions h5 {
     font-size: 14px;
-    color: #666;
+    color: var(--text-secondary);
     margin-bottom: 10px;
+}
+
+.group-permissions p,
+.group-desc,
+.group-members {
+    color: var(--text-primary);
 }
 
 .permission-checks {
@@ -3242,7 +3402,7 @@ td {
     display: flex;
     align-items: center;
     font-size: 13px;
-    color: #333;
+    color: var(--text-primary);
 }
 
 .permission-checks input[type="checkbox"] {
@@ -3260,6 +3420,7 @@ td {
     display: flex;
     align-items: center;
     font-size: 13px;
+    color: var(--text-primary);
 }
 
 .permission-checkboxes input[type="checkbox"] {

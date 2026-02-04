@@ -369,7 +369,8 @@ function addAdminNavigation() {
 
 // Theme Management
 function toggleTheme() {
-    const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+    var actualTheme = document.documentElement.getAttribute('data-theme') || 'light';
+    var newTheme = actualTheme === 'light' ? 'dark' : 'light';
     setTheme(newTheme);
 }
 

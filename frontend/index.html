@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>GovernAIX</title>
+    <script>
+        (function() {
+            var t = localStorage.getItem('theme') || 'light';
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
     <link href="calendar.css" rel="stylesheet">
@@ -150,13 +156,13 @@
                 <button class="theme-toggle" onclick="toggleTheme()">
                     <i class="fas fa-moon"></i>
                 </button>
-                <button class="btn-secondary" onclick="alert('📚 Documentation\n\nKnowledge base articles and user guides are under construction.\n\nComing soon!')" style="margin-right: 0.5rem;">
+                <button class="header-glow-btn" onclick="alert('📚 Documentation\n\nKnowledge base articles and user guides are under construction.\n\nComing soon!')" style="margin-right: 0.5rem;">
                     <i class="fas fa-book"></i> Documentation
                 </button>
-                <button class="btn-secondary" onclick="alert('🆘 Support\n\nSupport portal is under construction.\n\nFor immediate assistance, contact:\nadmin@company.com')" style="margin-right: 0.5rem;">
+                <button class="header-glow-btn" onclick="alert('🆘 Support\n\nSupport portal is under construction.\n\nFor immediate assistance, contact:\nadmin@company.com')" style="margin-right: 0.5rem;">
                     <i class="fas fa-life-ring"></i> Support
                 </button>
-                <button class="btn-secondary admin-only-nav" id="adminPanelBtn" onclick="showPage('admin')" style="margin-right: 1rem;">
+                <button class="header-glow-btn admin-only-nav" id="adminPanelBtn" onclick="showPage('admin')" style="margin-right: 1rem;">
                     <i class="fas fa-shield-alt"></i> Admin Panel
                 </button>
                 <div class="profile-dropdown">
@@ -1225,6 +1231,7 @@
                 </div>
                 <div class="integration-tabs">
                     <button class="integration-tab-btn active" onclick="showIntegrationTab('cloud')"><i class="fas fa-cloud"></i> Cloud</button>
+                    <button class="integration-tab-btn" onclick="showIntegrationTab('identity')"><i class="fas fa-key"></i> Identity & Login</button>
                     <button class="integration-tab-btn" onclick="showIntegrationTab('siem')"><i class="fas fa-shield-halved"></i> SIEM</button>
                     <button class="integration-tab-btn" onclick="showIntegrationTab('ticketing')"><i class="fas fa-ticket-alt"></i> Ticketing</button>
                 </div>
@@ -1251,6 +1258,52 @@
                             <div class="integration-card-icon integration-logo-oracle"><i class="fas fa-cloud"></i></div>
                             <h3>Oracle Cloud</h3>
                             <button class="btn-primary" onclick="configureIntegration('oracle')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Identity & Login Tab -->
+                <div id="identityIntegrationTab" class="integration-tab-content">
+                    <div class="integrations-grid">
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-okta"><i class="fas fa-key"></i></div>
+                            <h3>Okta</h3>
+                            <button class="btn-primary" onclick="configureIntegration('okta')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-jumpcloud"><i class="fas fa-user-shield"></i></div>
+                            <h3>JumpCloud</h3>
+                            <button class="btn-primary" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-onelogin"><i class="fas fa-sign-in-alt"></i></div>
+                            <h3>OneLogin</h3>
+                            <button class="btn-primary" onclick="configureIntegration('onelogin')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-azuread"><i class="fab fa-microsoft"></i></div>
+                            <h3>Azure AD</h3>
+                            <button class="btn-primary" onclick="configureIntegration('azuread')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-google"><i class="fab fa-google"></i></div>
+                            <h3>Google Workspace</h3>
+                            <button class="btn-primary" onclick="configureIntegration('googleworkspace')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-ping"><i class="fas fa-fingerprint"></i></div>
+                            <h3>Ping Identity</h3>
+                            <button class="btn-primary" onclick="configureIntegration('pingidentity')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-auth0"><i class="fas fa-lock"></i></div>
+                            <h3>Auth0</h3>
+                            <button class="btn-primary" onclick="configureIntegration('auth0')"><i class="fas fa-plug"></i> Connect</button>
+                        </div>
+                        <div class="integration-card">
+                            <div class="integration-card-icon integration-logo-duo"><i class="fas fa-shield-alt"></i></div>
+                            <h3>Duo Security</h3>
+                            <button class="btn-primary" onclick="configureIntegration('duo')"><i class="fas fa-plug"></i> Connect</button>
                         </div>
                     </div>
                 </div>
@@ -1540,8 +1593,7 @@
 
             <!-- Admin Panel Page (Dashboard moved to main page) -->
             <div id="adminPage" class="page">
-                <div class="page-header">
-                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
+                <div class="page-header" style="margin-bottom: 1.5rem;">
                     <div class="admin-nav">
                         <button class="admin-tab-btn active" onclick="showAdminTab('users', event)">
                             <i class="fas fa-users"></i> Users & Groups
@@ -1565,20 +1617,20 @@
                 <div id="adminUsersTab" class="admin-tab" style="font-family: 'Inter', sans-serif;">
                     <!-- Top Ribbon: Add User & Add Group -->
                     <div class="user-mgmt-ribbon">
-                        <button class="btn-primary" onclick="showCreateUserModal()">
+                        <button class="user-mgmt-glow-btn" onclick="showCreateUserModal()">
                             <i class="fas fa-user-plus"></i> Add User
                         </button>
-                        <button class="btn-primary" onclick="showCreateGroupModal()">
+                        <button class="user-mgmt-glow-btn" onclick="showCreateGroupModal()">
                             <i class="fas fa-users-cog"></i> Assign to Group
                         </button>
                     </div>
                     
                     <!-- Sub-tabs -->
                     <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="btn-secondary" id="usersSubTab" onclick="showUsersSubTab('users')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
+                        <button class="user-mgmt-subtab user-mgmt-subtab-active" id="usersSubTab" onclick="showUsersSubTab('users')">
                             <i class="fas fa-user"></i> Users
                         </button>
-                        <button class="btn-secondary" id="groupsSubTab" onclick="showUsersSubTab('groups')" style="font-family: 'Inter', sans-serif;">
+                        <button class="user-mgmt-subtab" id="groupsSubTab" onclick="showUsersSubTab('groups')">
                             <i class="fas fa-users-cog"></i> Groups
                         </button>
                     </div>
@@ -1614,9 +1666,11 @@
                                         <td><span class="badge badge-danger">Admin</span></td>
                                         <td><span class="badge badge-success">Active</span></td>
                                         <td>
-                                            <button class="btn-link" onclick="editUser('satish')">Edit</button>
-                                            <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
-                                            </td>
+                                            <div class="user-mgmt-actions">
+                                                <button class="user-mgmt-glow-btn btn-sm" onclick="editUser('satish')">Edit</button>
+                                                <button class="user-mgmt-glow-btn btn-sm" onclick="deleteUser('satish')">Delete</button>
+                                            </div>
+                                        </td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -1635,39 +1689,39 @@
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
                                         <h4>ReadOnly</h4>
-                                        <div>
-                                            <button class="btn-secondary btn-sm" onclick="editAccessGroup('ReadOnly')">Edit</button>
-                                            <button class="btn-link" onclick="deleteAccessGroup('ReadOnly')">Delete</button>
+                                        <div class="user-mgmt-actions">
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('ReadOnly')">Edit</button>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('ReadOnly')">Delete</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">View-only access to the JIT tool. Cannot approve requests or modify settings.</p>
+                                        <p class="group-desc">Users can access the JIT console with read access.</p>
                                         <p class="group-members"><strong>Members:</strong> <span id="readonlyGroupCount">0</span> users</p>
                                     </div>
                                 </div>
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
                                         <h4>Manager</h4>
-                                        <div>
-                                            <button class="btn-secondary btn-sm" onclick="editAccessGroup('Manager')">Edit</button>
-                                            <button class="btn-link" onclick="deleteAccessGroup('Manager')">Delete</button>
+                                        <div class="user-mgmt-actions">
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Manager')">Edit</button>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Manager')">Delete</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">Can approve requests, manage access, and tag accounts. No admin-level changes.</p>
+                                        <p class="group-desc">Integrations with cloud, create users and groups, download reports.</p>
                                         <p class="group-members"><strong>Members:</strong> <span id="managerGroupCount">0</span> users</p>
                                     </div>
                                 </div>
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
                                         <h4>Admin</h4>
-                                        <div>
-                                            <button class="btn-secondary btn-sm" onclick="editAccessGroup('Admin')">Edit</button>
-                                            <button class="btn-link" onclick="deleteAccessGroup('Admin')">Delete</button>
+                                        <div class="user-mgmt-actions">
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Admin')">Edit</button>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Admin')">Delete</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">Full control over the JIT tool. Can manage users, groups, policies, and all settings.</p>
+                                        <p class="group-desc">All above and manage guardrails, policies and security inside the tool.</p>
                                         <p class="group-members"><strong>Members:</strong> <span id="adminGroupCount">0</span> users</p>
                                     </div>
                                 </div>
@@ -2251,6 +2305,7 @@
                 <div id="adminIntegrationsTab" class="admin-tab" style="display: none;">
                     <div class="admin-integration-tabs">
                         <button class="admin-integration-tab-btn active" onclick="showAdminIntegrationCategory('cloud')"><i class="fas fa-cloud"></i> Cloud</button>
+                        <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('identity')"><i class="fas fa-key"></i> Identity & Login</button>
                         <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('siem')"><i class="fas fa-shield-halved"></i> SIEM</button>
                         <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('ticketing')"><i class="fas fa-ticket-alt"></i> Ticketing</button>
                     </div>
@@ -2293,6 +2348,84 @@
                                 <p>Oracle Cloud Infrastructure</p>
                                 <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
                                 <button class="btn-primary" onclick="configureIntegration('oracle')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Identity & Login Integrations -->
+                    <div id="adminIntegrationIdentity" class="admin-integration-category">
+                        <div class="integrations-grid">
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-okta"><i class="fas fa-key"></i></div>
+                                    <h3>Okta</h3>
+                                </div>
+                                <p>SSO & Identity Management</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('okta')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-jumpcloud"><i class="fas fa-user-shield"></i></div>
+                                    <h3>JumpCloud</h3>
+                                </div>
+                                <p>Directory-as-a-Service & SSO</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-onelogin"><i class="fas fa-sign-in-alt"></i></div>
+                                    <h3>OneLogin</h3>
+                                </div>
+                                <p>Unified Access Management</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('onelogin')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-azuread"><i class="fab fa-microsoft"></i></div>
+                                    <h3>Azure AD</h3>
+                                </div>
+                                <p>Microsoft Entra ID</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('azuread')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-google"><i class="fab fa-google"></i></div>
+                                    <h3>Google Workspace</h3>
+                                </div>
+                                <p>Google Identity & Directory</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('googleworkspace')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-ping"><i class="fas fa-fingerprint"></i></div>
+                                    <h3>Ping Identity</h3>
+                                </div>
+                                <p>Enterprise Identity Platform</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('pingidentity')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-auth0"><i class="fas fa-lock"></i></div>
+                                    <h3>Auth0</h3>
+                                </div>
+                                <p>Authentication & Authorization</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('auth0')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                            <div class="integration-card">
+                                <div class="integration-header">
+                                    <div class="integration-logo-icon integration-logo-duo"><i class="fas fa-shield-alt"></i></div>
+                                    <h3>Duo Security</h3>
+                                </div>
+                                <p>MFA & Zero Trust Access</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary" onclick="configureIntegration('duo')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
                         </div>
                     </div>
@@ -2458,13 +2591,13 @@
                 <div id="adminSecurityTab" class="admin-tab" style="display: none;">
                     <!-- Sub-tabs -->
                     <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="btn-secondary" id="securitySubTab" onclick="showSecuritySubTab('security')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
+                        <button class="tab-glow-subtab tab-glow-subtab-active" id="securitySubTab" onclick="showSecuritySubTab('security')">
                             <i class="fas fa-shield-alt"></i> Security
                         </button>
-                        <button class="btn-secondary" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')" style="font-family: 'Inter', sans-serif;">
+                        <button class="tab-glow-subtab" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')">
                             <i class="fas fa-shield-check"></i> Guardrails
                         </button>
-                        <button class="btn-secondary" id="auditSubTab" onclick="showSecuritySubTab('audit')" style="font-family: 'Inter', sans-serif;">
+                        <button class="tab-glow-subtab" id="auditSubTab" onclick="showSecuritySubTab('audit')">
                             <i class="fas fa-clipboard-list"></i> Audit Logs
                         </button>
                     </div>
@@ -3157,19 +3290,11 @@
             const groupsBtn = document.getElementById('groupsSubTab');
             
             if (tab === 'users') {
-                usersBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-                usersBtn.style.color = 'white';
-                usersBtn.style.border = 'none';
-                groupsBtn.style.background = 'var(--bg-secondary)';
-                groupsBtn.style.color = 'var(--text-primary)';
-                groupsBtn.style.border = '1.5px solid var(--border-color)';
+                usersBtn.classList.add('user-mgmt-subtab-active');
+                groupsBtn.classList.remove('user-mgmt-subtab-active');
             } else {
-                groupsBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-                groupsBtn.style.color = 'white';
-                groupsBtn.style.border = 'none';
-                usersBtn.style.background = 'var(--bg-secondary)';
-                usersBtn.style.color = 'var(--text-primary)';
-                usersBtn.style.border = '1.5px solid var(--border-color)';
+                groupsBtn.classList.add('user-mgmt-subtab-active');
+                usersBtn.classList.remove('user-mgmt-subtab-active');
             }
         }
         
@@ -3206,19 +3331,12 @@
             const guardrailsBtn = document.getElementById('guardrailsSubTab');
             const auditBtn = document.getElementById('auditSubTab');
             
-            // Reset all buttons
             [securityBtn, guardrailsBtn, auditBtn].forEach(btn => {
-                    btn.style.background = 'var(--bg-secondary)';
-                    btn.style.color = 'var(--text-primary)';
-                    btn.style.border = '1.5px solid var(--border-color)';
+                btn.classList.remove('tab-glow-subtab-active');
             });
-            
-            // Highlight active button
             const activeBtn = tab === 'security' ? securityBtn : (tab === 'guardrails' ? guardrailsBtn : auditBtn);
-                activeBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-                activeBtn.style.color = 'white';
-                activeBtn.style.border = 'none';
-            }
+            if (activeBtn) activeBtn.classList.add('tab-glow-subtab-active');
+        }
             
         // Security Copilot Functions
         function toggleSecurityCopilot() {

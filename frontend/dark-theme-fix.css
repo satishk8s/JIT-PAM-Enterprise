@@ -26,6 +26,8 @@
 [data-theme="dark"] .feature-card,
 [data-theme="dark"] .config-section,
 [data-theme="dark"] .group-card,
+[data-theme="dark"] .groups-management,
+[data-theme="dark"] .group-detail-card,
 [data-theme="dark"] .template-card,
 [data-theme="dark"] .level-card {
     background: var(--bg-secondary) !important;
