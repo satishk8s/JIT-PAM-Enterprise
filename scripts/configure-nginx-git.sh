@@ -13,6 +13,11 @@ fi
 
 chmod -R 755 "$WEB_ROOT" 2>/dev/null || true
 
+# Disable default nginx config to avoid "conflicting server name" (our config gets ignored)
+for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default; do
+    [ -f "$f" ] && mv "$f" "${f}.disabled" 2>/dev/null && echo "Disabled $f (was conflicting)"
+done
+
 # Verify mime.types has font entries (prevents blurry fonts from wrong Content-Type)
 if [ -f /etc/nginx/mime.types ] && ! grep -q 'font/woff2' /etc/nginx/mime.types 2>/dev/null; then
     echo "⚠️  Add to /etc/nginx/mime.types: font/woff2 woff2; font/woff woff;"
@@ -48,7 +53,8 @@ gzip_types
 # Correct Content-Type for fonts (font/woff2) prevents blurry rendering
 
 server {
-    listen 80;
+    listen 80 default_server;
+    listen [::]:80 default_server;
     server_name _;
     root $WEB_ROOT;
     index index.html;

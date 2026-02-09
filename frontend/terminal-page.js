@@ -220,7 +220,10 @@ function closeTerminalTab(id) {
 function appendTerminalOutputForTab(id, text) {
     const t = window.terminalTabs.find(x => x.id === id);
     if (t && t.outputEl) {
-        t.outputEl.innerHTML += escapeHtml(text).replace(/\n/g, '<br>');
+        let html = escapeHtml(text).replace(/\n/g, '<br>');
+        html = html.replace(/\[OK\]/g, '<i class="fas fa-check-circle" style="color:#22c55e;margin-right:4px"></i>');
+        html = html.replace(/\[ERROR\]/g, '<i class="fas fa-times-circle" style="color:#ef4444;margin-right:4px"></i>');
+        t.outputEl.innerHTML += html;
         t.outputEl.scrollTop = t.outputEl.scrollHeight;
     }
 }

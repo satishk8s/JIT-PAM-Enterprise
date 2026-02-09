@@ -90,8 +90,16 @@ If you see `Cache-Control: no-cache`, you likely hit `/` (index.html). Remove th
 
 ## Full Refresh (Git Deployment)
 
+**One command:**
 ```bash
 cd /root/JIT-PAM-Enterprise
+sudo ./scripts/fix-ec2-deploy.sh
+```
+
+Or manually:
+```bash
+cd /root/JIT-PAM-Enterprise
+git checkout -- frontend/databases.css frontend/databases.js frontend/index.html frontend/terminal-page.css frontend/terminal-page.js
 git pull origin main
 sudo ./scripts/configure-nginx-git.sh
 ```
