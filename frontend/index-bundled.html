@@ -108,8 +108,34 @@
                         <input type="text" maxlength="1" class="otp-input" id="otp6">
                     </div>
                     <small class="input-hint" style="display: block; margin-top: 8px; color: var(--text-secondary);">Demo: enter or paste 123456</small>
-                    <button type="button" class="btn-primary" onclick="verifyOTPAndLogin()">Verify & Continue</button>
+                    <button type="button" class="btn-primary" id="otpVerifyBtn">Verify & Continue</button>
                 </form>
+                <script>
+                (function(){
+                    function doOTPLogin(){
+                        var e=(sessionStorage.getItem('otp_email')||(document.getElementById('emailOTP')&&document.getElementById('emailOTP').value)||'').trim();
+                        if(!e){alert('Session expired. Go back and enter email again.');return;}
+                        var o='';for(var i=1;i<=6;i++){var x=document.getElementById('otp'+i);o+=x?x.value:'';}
+                        if(o.length!==6){alert('Please enter all 6 digits. Demo: 123456');return;}
+                        sessionStorage.removeItem('otp_email');
+                        var admins=['admin@nykaa.com','satish.korra@nykaa.com','satish@nykaa.com','security@nykaa.com'];
+                        var isA=admins.indexOf(e.toLowerCase())>=0;
+                        localStorage.setItem('isLoggedIn','true');
+                        localStorage.setItem('userEmail',e);
+                        localStorage.setItem('userName',e.split('@')[0].replace(/\./g,' '));
+                        localStorage.setItem('isAdmin',isA?'true':'false');
+                        localStorage.setItem('userRole',isA?'admin':'user');
+                        var lp=document.getElementById('loginPage'),ma=document.getElementById('mainApp');
+                        if(lp)lp.style.display='none';
+                        if(ma)ma.style.display='block';
+                        document.body.classList.remove('login-page');
+                        if(typeof showMainApp==='function')showMainApp();
+                    }
+                    var btn=document.getElementById('otpVerifyBtn');
+                    if(btn)btn.onclick=doOTPLogin;
+                    window.verifyOTPAndLogin=doOTPLogin;
+                })();
+                </script>
                 
                 <div class="login-links">
                     <a href="#" onclick="alert('✅ OTP resent')">Resend Code</a>
