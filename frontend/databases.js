@@ -60,15 +60,6 @@ const DB_TREE = [
         ]
     },
     {
-        id: 'azure',
-        label: 'Azure',
-        icon: 'fas fa-cloud',
-        children: [
-            { id: 'azure-sql', label: 'Azure SQL Database', engine: 'azuresql', provider: 'azure' },
-            { id: 'azure-cosmos', label: 'Cosmos DB', engine: 'cosmosdb', provider: 'azure' },
-        ]
-    },
-    {
         id: 'gcp',
         label: 'Google Cloud',
         icon: 'fas fa-cloud',
@@ -77,14 +68,7 @@ const DB_TREE = [
             { id: 'gcp-bigquery', label: 'BigQuery', engine: 'bigquery', provider: 'gcp' },
         ]
     },
-    {
-        id: 'oracle-cloud',
-        label: 'Oracle Cloud',
-        icon: 'fas fa-cloud',
-        children: [
-            { id: 'ora-autonomous', label: 'Autonomous DB', engine: 'autonomous', provider: 'oracle' },
-        ]
-    },
+    // Azure & Oracle: Governix only (removed for nykaa-jit)
 ];
 
 function renderDbTree() {

@@ -293,22 +293,15 @@
                         <span>Terminal</span>
                     </div>
                     
-                    <div class="nav-category admin-only-nav">Reports & Audit</div>
-                    <div class="nav-item admin-only-nav" onclick="showPage('reports')">
-                        <i class="fas fa-chart-bar"></i>
-                        <span>Reports</span>
-                    </div>
-                    <div class="nav-item admin-only-nav" onclick="showPage('audit')">
-                        <i class="fas fa-clipboard-list"></i>
-                        <span>Audit Logs</span>
-                    </div>
-                    
                 </nav>
-                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Collapse sidebar">
-                    <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
-                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">&lt;&lt;</span>
+                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Hide sidebar">
+                    <i class="fas fa-chevron-left"></i>
+                    <span class="sidebar-toggle-label">Hide</span>
                 </div>
             </aside>
+            <div class="sidebar-expand-fab" id="sidebarExpandFab" onclick="toggleSidebar(event)" title="Show sidebar" style="display: none;">
+                <i class="fas fa-bars"></i>
+            </div>
 
             <!-- Main Content -->
             <main class="app-main">
@@ -995,7 +988,12 @@
                         <div class="db-desc-card">
                             <h3><i class="fas fa-info-circle"></i> What We Provide</h3>
                             <p>JIT (Just-in-Time) database access with time-based credentials. No permanent access — request when needed, access expires automatically.</p>
-                            <p><strong>NPAMX:</strong> Click any database engine below. NPAMX will guide you through the request, ask the right questions, and submit for approval when you're ready.</p>
+                            <ul style="font-size: 13px; color: var(--text-secondary); margin-top: 8px;">
+                                <li><strong>Read-only:</strong> Auto-approve for non-prod; manager approval for prod</li>
+                                <li><strong>Write access:</strong> Chat with NPAMX to get custom roles</li>
+                                <li><strong>Prod DB changes:</strong> CISO + manager approval required</li>
+                                <li><strong>Non-prod changes:</strong> Manager approval; request goes to respective team</li>
+                            </ul>
                         </div>
                         <!-- Tree -->
                         <div class="db-tree-card">
@@ -1006,11 +1004,9 @@
                         <div class="db-roles-card">
                             <h3><i class="fas fa-user-shield"></i> Predefined Roles</h3>
                             <div class="db-roles-grid">
-                                <div class="db-role-card"><strong>Read-only</strong><span>SELECT, EXPLAIN</span></div>
-                                <div class="db-role-card"><strong>Limited Write</strong><span>+ INSERT, UPDATE, DELETE</span></div>
-                                <div class="db-role-card"><strong>Full Write</strong><span>+ DDL (CREATE, ALTER, DROP)</span></div>
-                                <div class="db-role-card"><strong>Admin</strong><span>All operations</span></div>
+                                <div class="db-role-card"><strong>Read-only</strong><span>SELECT, EXPLAIN — Non-prod: auto-approve; Prod: manager approval</span></div>
                             </div>
+                            <p class="db-roles-note" style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);">Other roles (write, DDL, admin): Chat with NPAMX to get AI-generated roles based on your requirements.</p>
                         </div>
                     </div>
                     <!-- Right: AI Panel + Requests -->
@@ -1042,8 +1038,14 @@
                             </div>
                         </div>
                         <div id="dbAiPlaceholder" class="db-ai-placeholder">
-                            <i class="fas fa-hand-pointer"></i>
-                            <p>Click a database engine on the left to start</p>
+                            <i class="fas fa-database" style="font-size: 2.5rem; color: var(--primary); margin-bottom: 12px;"></i>
+                            <h4>Select a database engine</h4>
+                            <p>Choose MySQL, PostgreSQL, or another engine from the left panel. NPAMX will guide you through the request flow.</p>
+                            <ul style="text-align: left; max-width: 320px; margin: 12px auto; color: var(--text-secondary); font-size: 13px;">
+                                <li>Read-only access: auto-approve for non-prod; manager approval for prod</li>
+                                <li>Write access: chat with NPAMX to get custom roles</li>
+                                <li>Manual prod changes require CISO + manager approval</li>
+                            </ul>
                         </div>
                         <!-- Approved + Query Terminal -->
                         <div class="db-section card">
@@ -1064,20 +1066,7 @@
                                 </tbody>
                             </table>
                         </div>
-                        <div class="db-section card">
-                            <h3><i class="fas fa-terminal"></i> Query Terminal</h3>
-                            <p class="db-terminal-hint">Click <strong>Connect & Run Queries</strong> to open the terminal on the Terminal page.</p>
-                            <div id="databaseTerminalContainer">
-                                <div class="db-terminal-placeholder">
-                                    <i class="fas fa-terminal"></i>
-                                    <p>Connect takes you to Terminal page</p>
-                                    <p class="hint">Click <strong>Connect & Run Queries</strong> above → opens Terminal with query box</p>
-                                    <button class="btn-primary" style="margin-top: 16px;" onclick="showPage('terminal')">
-                                        <i class="fas fa-terminal"></i> Go to Terminal Page
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
+                        <!-- Connect to Terminal: available from My Approved Databases row after approval -->
                     </div>
                 </div>
             </div>
@@ -1508,6 +1497,9 @@
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('reports', event)">
+                            <i class="fas fa-chart-bar"></i> Reports & Audit
                         </button>
                     </div>
                 </div>
@@ -2752,6 +2744,62 @@
                     </div>
                     </div>
             </div>
+            </div>
+
+                <!-- Admin Reports & Audit Tab -->
+                <div id="adminReportsTab" class="admin-tab" style="display: none;">
+                    <div class="admin-reports-audit">
+                        <div class="reports-audit-tabs" style="display: flex; gap: 10px; margin-bottom: 24px; border-bottom: 2px solid var(--border-color); padding-bottom: 12px;">
+                            <button class="tab-glow-subtab tab-glow-subtab-active" onclick="showReportsAuditSubTab('reports', event)">
+                                <i class="fas fa-chart-bar"></i> Reports & Analytics
+                            </button>
+                            <button class="tab-glow-subtab" onclick="showReportsAuditSubTab('audit', event)">
+                                <i class="fas fa-clipboard-list"></i> Audit Logs
+                            </button>
+                        </div>
+                        <div id="adminReportsContent" class="reports-content">
+                            <div class="reports-placeholder" style="text-align: center; padding: 60px 20px; background: var(--bg-card); border-radius: 12px; border: 1px dashed var(--border-color);">
+                                <i class="fas fa-chart-line" style="font-size: 3rem; color: var(--primary); margin-bottom: 16px;"></i>
+                                <h3>Access Reports & Analytics</h3>
+                                <p style="color: var(--text-secondary); margin-top: 8px;">View detailed reports on access patterns, trends, and compliance metrics</p>
+                            </div>
+                        </div>
+                        <div id="adminAuditContent" class="audit-content" style="display: none;">
+                            <div class="audit-logs">
+                                <div class="audit-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                    <h3><i class="fas fa-clipboard-list"></i> Audit Logs</h3>
+                                    <div class="audit-filters" style="display: flex; gap: 10px;">
+                                        <select id="adminAuditFilter" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary);">
+                                            <option value="all">All Events</option>
+                                            <option value="login">Login Events</option>
+                                            <option value="request">Access Requests</option>
+                                            <option value="approval">Approvals</option>
+                                            <option value="revoke">Revocations</option>
+                                        </select>
+                                        <input type="date" id="adminAuditDateFrom" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                        <input type="date" id="adminAuditDateTo" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                        <button class="btn-secondary" onclick="filterAdminAuditLogs()"><i class="fas fa-filter"></i> Filter</button>
+                                    </div>
+                                </div>
+                                <div class="audit-table">
+                                    <table style="width: 100%; border-collapse: collapse;">
+                                        <thead>
+                                            <tr>
+                                                <th>Timestamp</th>
+                                                <th>User</th>
+                                                <th>Event</th>
+                                                <th>Resource</th>
+                                                <th>IP Address</th>
+                                                <th>Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="adminAuditLogsTableBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
             </div>
 

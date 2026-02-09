@@ -419,8 +419,7 @@ function toggleSidebar(e) {
     const layout = document.querySelector('.app-layout');
     const sidebar = document.getElementById('mainSidebar');
     const toggle = document.getElementById('sidebarToggle');
-    const label = document.getElementById('sidebarToggleLabel');
-    const icon = document.getElementById('sidebarToggleIcon');
+    const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
     if (!sidebar || !toggle) return;
@@ -429,9 +428,8 @@ function toggleSidebar(e) {
     sidebar.classList.toggle('sidebar-collapsed', collapsed);
     if (main) main.classList.toggle('main-expanded', collapsed);
     if (container) container.classList.toggle('sidebar-collapsed', collapsed);
-    toggle.title = collapsed ? 'Expand sidebar (>>)' : 'Collapse sidebar (<<)';
-    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
-    if (label) label.textContent = collapsed ? '>>' : '<<';
+    toggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
+    if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
     localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 }
 
@@ -440,8 +438,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const layout = document.querySelector('.app-layout');
     const sidebar = document.getElementById('mainSidebar');
     const toggle = document.getElementById('sidebarToggle');
-    const label = document.getElementById('sidebarToggleLabel');
-    const icon = document.getElementById('sidebarToggleIcon');
+    const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
     if (collapsed && layout && sidebar && main) {
@@ -449,9 +446,8 @@ document.addEventListener('DOMContentLoaded', function() {
         sidebar.classList.add('sidebar-collapsed');
         main.classList.add('main-expanded');
         if (container) container.classList.add('sidebar-collapsed');
-        if (toggle) toggle.title = 'Expand sidebar (>>)';
-        if (icon) icon.className = 'fas fa-chevron-right';
-        if (label) label.textContent = '>>';
+        if (toggle) toggle.title = 'Show sidebar';
+        if (expandFab) expandFab.style.display = 'flex';
     }
 });
 
@@ -555,10 +551,11 @@ function showPage(pageId) {
         if (popup) popup.remove();
     }
 
-    // Hide Security Copilot on databases page (per user requirement)
+    // Hide Security Copilot on requests page (unified assistant shown there) and databases page - avoid duplicate
     const copilotBtn = document.getElementById('securityCopilotButton');
     const copilotPopup = document.getElementById('securityCopilotPopup');
-    if (copilotBtn) copilotBtn.style.display = pageId === 'databases' ? 'none' : '';
+    const hideCopilot = pageId === 'databases' || pageId === 'requests';
+    if (copilotBtn) copilotBtn.style.display = hideCopilot ? 'none' : '';
     if (copilotPopup) copilotPopup.classList.remove('show');
 }
 
@@ -576,7 +573,8 @@ function showAdminTab(tabId, event) {
         'policies': 'adminPoliciesTab',
         'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
-        'integrations': 'adminIntegrationsTab'
+        'integrations': 'adminIntegrationsTab',
+        'reports': 'adminReportsTab'
     };
     
     // Show selected tab
@@ -2285,6 +2283,18 @@ function showAdminIntegrationCategory(category) {
 
 function filterAuditLogs() {
     alert('Filter audit logs');
+}
+
+function showReportsAuditSubTab(subTab, ev) {
+    document.querySelectorAll('#adminReportsTab .tab-glow-subtab').forEach(b => { b.classList.remove('tab-glow-subtab-active'); });
+    if (ev && ev.target) ev.target.closest('.tab-glow-subtab')?.classList.add('tab-glow-subtab-active');
+    document.getElementById('adminReportsContent').style.display = subTab === 'reports' ? 'block' : 'none';
+    document.getElementById('adminAuditContent').style.display = subTab === 'audit' ? 'block' : 'none';
+    if (subTab === 'audit' && typeof loadAdminAuditLogs === 'function') loadAdminAuditLogs();
+}
+
+function filterAdminAuditLogs() {
+    if (typeof loadAdminAuditLogs === 'function') loadAdminAuditLogs();
 }
 
 function loadRequestForOthersModalData() {
