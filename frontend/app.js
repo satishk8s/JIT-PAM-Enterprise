@@ -2066,6 +2066,13 @@ function loadCharts() {
         window.requestTypesChartInstance.destroy();
         window.requestTypesChartInstance = null;
     }
+    if (typeof Chart === 'undefined') {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/chart.js';
+        s.onload = function() { loadUserActivityChart(); loadRequestTypesChart(); };
+        document.head.appendChild(s);
+        return;
+    }
     loadUserActivityChart();
     loadRequestTypesChart();
 }

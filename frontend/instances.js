@@ -476,56 +476,56 @@ function showSSHTerminal(instanceId, instanceName, privateIp, username, password
                     <i class="fas fa-times"></i> Disconnect
                 </button>
             </div>
-            <div id="xterm-container" style="height: 500px;"></div>
+            <div id="xterm-container" style="height: 500px;"><p style="color:#888;padding:20px;">Loading terminal...</p></div>
         </div>
     `;
     
     commandBuffer = '';
     
-    // Initialize xterm.js
-    terminalInstance = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-        theme: {
-            background: '#0B1220',
-            foreground: '#E5E7EB',
-            cursor: '#38BDF8',
-            selection: 'rgba(56, 189, 248, 0.3)'
+    function initXterm() {
+        const container = document.getElementById('xterm-container');
+        if (!container) return;
+        container.innerHTML = '';
+        terminalInstance = new Terminal({
+            cursorBlink: true,
+            fontSize: 14,
+            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+            theme: {
+                background: '#0B1220',
+                foreground: '#E5E7EB',
+                cursor: '#38BDF8',
+                selection: 'rgba(56, 189, 248, 0.3)'
+            }
+        });
+        const fitAddon = new FitAddon.FitAddon();
+        terminalInstance.loadAddon(fitAddon);
+        terminalInstance.open(document.getElementById('xterm-container'));
+        fitAddon.fit();
+        const wsUrl = `ws://127.0.0.1:5001/?host=${encodeURIComponent(privateIp)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+        terminalSocket = new WebSocket(wsUrl);
+        terminalSocket.onopen = () => terminalInstance.writeln('\x1b[32mConnecting to ' + instanceName + '...\x1b[0m');
+        terminalSocket.onmessage = (event) => terminalInstance.write(event.data);
+        terminalSocket.onerror = () => terminalInstance.writeln('\x1b[31mConnection error. Please check credentials.\x1b[0m');
+        terminalSocket.onclose = () => terminalInstance.writeln('\x1b[33m\r\nConnection closed\x1b[0m');
+        terminalInstance.onData(data => { if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) terminalSocket.send(data); });
+    }
+    
+    if (typeof Terminal !== 'undefined' && typeof FitAddon !== 'undefined') {
+        initXterm();
+    } else {
+        if (!document.querySelector('link[href*="xterm"]')) {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet'; link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css';
+            document.head.appendChild(link);
         }
-    });
-    
-    const fitAddon = new FitAddon.FitAddon();
-    terminalInstance.loadAddon(fitAddon);
-    terminalInstance.open(document.getElementById('xterm-container'));
-    fitAddon.fit();
-    
-    // Connect WebSocket with credentials
-    const wsUrl = `ws://127.0.0.1:5001/?host=${encodeURIComponent(privateIp)}&username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
-    terminalSocket = new WebSocket(wsUrl);
-    
-    terminalSocket.onopen = () => {
-        terminalInstance.writeln('\x1b[32mConnecting to ' + instanceName + '...\x1b[0m');
-    };
-    
-    terminalSocket.onmessage = (event) => {
-        terminalInstance.write(event.data);
-    };
-    
-    terminalSocket.onerror = (error) => {
-        terminalInstance.writeln('\x1b[31mConnection error. Please check credentials.\x1b[0m');
-    };
-    
-    terminalSocket.onclose = () => {
-        terminalInstance.writeln('\x1b[33m\r\nConnection closed\x1b[0m');
-    };
-    
-    // Send input directly to WebSocket
-    terminalInstance.onData(data => {
-        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
-            terminalSocket.send(data);
-        }
-    });
+        const loadScript = (src) => new Promise((resolve) => {
+            const s = document.createElement('script');
+            s.src = src; s.onload = resolve; document.head.appendChild(s);
+        });
+        loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js')
+            .then(() => loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'))
+            .then(() => initXterm());
+    }
 }
 
 function disconnectTerminal() {

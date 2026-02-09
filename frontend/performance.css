@@ -77,3 +77,11 @@ input, textarea, select {
     }
 }
 
+/* Lag fix: disable decorative animations (bulb glow, pulse) - saves CPU on scroll */
+body.performance-mode *,
+body.performance-mode *::before,
+body.performance-mode *::after {
+    animation: none !important;
+    transition-duration: 0.06s !important;
+}
+
