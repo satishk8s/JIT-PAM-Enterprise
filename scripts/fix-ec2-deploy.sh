@@ -7,7 +7,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
 echo "=== 1. Discard local frontend changes (blocking git pull) ==="
-git checkout -- frontend/databases.css frontend/databases.js frontend/index.html frontend/terminal-page.css frontend/terminal-page.js 2>/dev/null || true
+git checkout -- frontend/ 2>/dev/null || true
 
 echo "=== 2. Pull latest ==="
 git pull origin main
