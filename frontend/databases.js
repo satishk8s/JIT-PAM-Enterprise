@@ -186,7 +186,9 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            const dbs = await fetchDatabasesForAccount(accountId);
+            const wantEngine = (selectedEngine?.engine || '').toLowerCase();
+            const result = await fetchDatabasesForAccount(accountId, wantEngine);
+            const dbs = filterDatabasesByEngine(result.databases || [], wantEngine);
             content.innerHTML = `
                 <div class="db-step-field">
                     <label>Select Database(s)</label>
@@ -280,14 +282,33 @@ async function fetchAccounts() {
     }
 }
 
-async function fetchDatabasesForAccount(accountId) {
-    if (!accountId) return [];
+function normalizeEngineForFilter(displayEngine) {
+    if (!displayEngine) return '';
+    const s = (displayEngine || '').toString().toLowerCase();
+    if (s.includes('mysql') && !s.includes('aurora')) return 'mysql';
+    if (s.includes('mariadb')) return 'maria';
+    if (s.includes('postgres')) return 'postgres';
+    if (s.includes('sqlserver') || s.includes('mssql')) return 'mssql';
+    if (s.includes('aurora')) return 'aurora';
+    return s;
+}
+
+function filterDatabasesByEngine(databases, wantEngine) {
+    if (!wantEngine || !Array.isArray(databases)) return databases;
+    const want = wantEngine.toLowerCase();
+    return databases.filter(db => normalizeEngineForFilter(db.engine) === want);
+}
+
+async function fetchDatabasesForAccount(accountId, engine) {
+    if (!accountId) return { databases: [], error: null };
     try {
-        const r = await fetch(`${DB_API_BASE}/api/databases?account_id=${accountId}`);
+        let url = `${DB_API_BASE}/api/databases?account_id=${encodeURIComponent(accountId)}`;
+        if (engine) url += `&engine=${encodeURIComponent(engine)}`;
+        const r = await fetch(url);
         const data = await r.json();
-        return data.databases || [];
+        return { databases: data.databases || [], error: data.error || null };
     } catch (e) {
-        return [];
+        return { databases: [], error: e.message };
     }
 }
 
@@ -365,7 +386,9 @@ async function dbStepNext() {
             return;
         }
         if (step === 2) {
-            const dbs = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const wantEngine = (selectedEngine?.engine || '').toLowerCase();
+            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, wantEngine);
+            const dbs = filterDatabasesByEngine(result.databases || [], wantEngine);
             if (dbs.length && selectedDatabases.length === 0) {
                 alert('Please select at least one database.');
                 return;
@@ -465,7 +488,19 @@ async function sendDbAiMessage() {
                 conversation_id: dbConversationId
             })
         });
-        const data = await response.json();
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (parseErr) {
+            if (!response.ok || text.trim().startsWith('<')) {
+                chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>Server returned an error (${response.status}). Ensure the backend is running and reachable.</p></div>`;
+            } else {
+                throw parseErr;
+            }
+            chat.scrollTop = chat.scrollHeight;
+            return;
+        }
         if (data.conversation_id) dbConversationId = data.conversation_id;
         if (data.error) {
             chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>${escapeHtml(data.error)}</p></div>`;

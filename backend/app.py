@@ -16,6 +16,12 @@ from enforcement_engine import EnforcementEngine
 
 load_dotenv()
 
+# GUARDRAILS_OFF: Set to 'true' to disable ALL validations for security learning
+# WARNING: Only use in isolated dev/test. Observe what attacks become possible.
+GUARDRAILS_OFF = os.getenv('GUARDRAILS_OFF', 'false').lower() == 'true'
+if GUARDRAILS_OFF:
+    print("⚠️ GUARDRAILS_OFF=true — All validations disabled for security learning")
+
 app = Flask(__name__)
 CORS(app)
 
@@ -1052,22 +1058,24 @@ def generate_permissions():
                 ConversationManager.end_conversation(conv_id)
     
     # STRICT VALIDATION LAYER 1: Validate user input for prompt injection
-    is_valid, error = StrictPolicies.validate_user_input(use_case)
-    if not is_valid:
-        return jsonify({'error': error}), 403
+    if not GUARDRAILS_OFF:
+        is_valid, error = StrictPolicies.validate_user_input(use_case)
+        if not is_valid:
+            return jsonify({'error': error}), 403
     
     # STRICT VALIDATION LAYER 2: Detect non-AWS requests
-    is_non_aws, detected_services = AIValidator.detect_non_aws_request(use_case)
-    if is_non_aws:
-        return jsonify({
-            'error': f'❌ AI only generates AWS permissions. Detected: {", ".join(detected_services)}. Use Applications page for non-AWS access.'
-        }), 400
+    if not GUARDRAILS_OFF:
+        is_non_aws, detected_services = AIValidator.detect_non_aws_request(use_case)
+        if is_non_aws:
+            return jsonify({
+                'error': f'❌ AI only generates AWS permissions. Detected: {", ".join(detected_services)}. Use Applications page for non-AWS access.'
+            }), 400
     
     # LAYER 3: Intent Detection
     intent_result = IntentClassifier.detect_intent(use_case)
     
-    # Route infrastructure requests to DevOps (skip if handled by conversation)
-    if not conversation_id:
+    # Route infrastructure requests to DevOps (skipped when GUARDRAILS_OFF)
+    if not GUARDRAILS_OFF and not conversation_id:
         if intent_result['requires_infrastructure']:
             return jsonify({
                 'error': intent_result['message'],
@@ -1081,20 +1089,20 @@ def generate_permissions():
     # Simple validation - AI only responds to AWS access requests
     use_case_lower = use_case.lower()
     
-    # Check for explicitly non-AWS requests only
-    non_aws_keywords = ['azure', 'gcp', 'google cloud', 'mysql', 'postgres', 'mongodb', 'jenkins', 'grafana', 'sonar', 'jira', 'splunk', 'servicenow', 'okta', 'onelogin', 'auth0', 'ping', 'duo']
-    found_non_aws = [kw for kw in non_aws_keywords if kw in use_case_lower]
+    # Check for explicitly non-AWS requests only (skipped when GUARDRAILS_OFF)
+    if not GUARDRAILS_OFF:
+        non_aws_keywords = ['azure', 'gcp', 'google cloud', 'mysql', 'postgres', 'mongodb', 'jenkins', 'grafana', 'sonar', 'jira', 'splunk', 'servicenow', 'okta', 'onelogin', 'auth0', 'ping', 'duo']
+        found_non_aws = [kw for kw in non_aws_keywords if kw in use_case_lower]
+        if found_non_aws:
+            return jsonify({
+                'error': f'AI only generates AWS permissions. Detected non-AWS: {", ".join(found_non_aws)}. Use Applications page for non-AWS access.'
+            }), 400
     
-    if found_non_aws:
-        return jsonify({
-            'error': f'AI only generates AWS permissions. Detected non-AWS: {", ".join(found_non_aws)}. Use Applications page for non-AWS access.'
-        }), 400
-    
-    # Check for read-only access requests
+    # Check for read-only access requests (skipped when GUARDRAILS_OFF)
     use_case_lower = use_case.lower()
     readonly_keywords = ['read only', 'readonly', 'read access', 'view only', 'list only', 'describe only']
     
-    if any(keyword in use_case_lower for keyword in readonly_keywords):
+    if not GUARDRAILS_OFF and any(keyword in use_case_lower for keyword in readonly_keywords):
         return jsonify({
             'error': '📋 For read-only access, please select from existing permission sets instead of AI generation.\n\n' +
                     '✅ If you need to perform write actions additionally, please specify them clearly so I can create a custom permission set for you.\n\n' +
@@ -1116,12 +1124,14 @@ def generate_permissions():
         return jsonify(ai_output), 400
     
     # STRICT VALIDATION LAYER 4: Validate AI output
-    is_valid, sanitized_output, error = AIValidator.validate_ai_response(
-        ai_output, use_case, account_env
-    )
-    
-    if not is_valid:
-        return jsonify({'error': error}), 403
+    if GUARDRAILS_OFF:
+        sanitized_output = ai_output
+    else:
+        is_valid, sanitized_output, error = AIValidator.validate_ai_response(
+            ai_output, use_case, account_env
+        )
+        if not is_valid:
+            return jsonify({'error': error}), 403
     
     # STRICT VALIDATION LAYER 4.5: Filter actions to only selected services
     if selected_resources:
@@ -1140,14 +1150,18 @@ def generate_permissions():
     
     # STRICT VALIDATION LAYER 5: Check duration limits
     duration = data.get('duration_hours', 8)
-    is_valid, error = StrictPolicies.validate_duration(duration, account_env)
-    if not is_valid:
-        return jsonify({'error': error}), 403
+    if not GUARDRAILS_OFF:
+        is_valid, error = StrictPolicies.validate_duration(duration, account_env)
+        if not is_valid:
+            return jsonify({'error': error}), 403
     
     # STRICT VALIDATION LAYER 6: Determine approval requirements
-    requires_approval, approval_type = StrictPolicies.requires_approval(
-        sanitized_output['actions'], account_env
-    )
+    if GUARDRAILS_OFF:
+        requires_approval, approval_type = False, 'auto'
+    else:
+        requires_approval, approval_type = StrictPolicies.requires_approval(
+            sanitized_output['actions'], account_env
+        )
     
     sanitized_output['requires_approval'] = requires_approval
     sanitized_output['approval_type'] = approval_type
@@ -1160,33 +1174,33 @@ def request_access():
     data = request.json
     user_email = data.get('user_email')
     
-    # CHECK ACCESS RULES: Enforce group-based restrictions
-    rules = AccessRules.get_rules()
-    for rule in rules.get('rules', []):
-        if not rule.get('enabled'):
-            continue
-        
-        # Check if user is in restricted group
-        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
-        with open(groups_path, 'r') as f:
-            groups_data = json.load(f)
-        
-        user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
-        
-        if any(g in rule.get('groups', []) for g in user_groups):
-            # User is in restricted group - check if requesting denied service
-            use_case = data.get('use_case', '').lower()
-            denied_services = rule.get('denied_services', [])
-            
-            for denied_service in denied_services:
-                if denied_service in use_case:
-                    return jsonify({
-                        'error': f'❌ Access Denied\n\nYour group is restricted from requesting {denied_service.upper()} access.\n\nAllowed services: {", ".join([s.upper() for s in rule.get("allowed_services", [])])}\n\nContact your administrator for access to other services.'
-                    }), 403
+    # CHECK ACCESS RULES: Enforce group-based restrictions (skipped when GUARDRAILS_OFF)
+    if not GUARDRAILS_OFF:
+        rules = AccessRules.get_rules()
+        for rule in rules.get('rules', []):
+            if not rule.get('enabled'):
+                continue
+            groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+            with open(groups_path, 'r') as f:
+                groups_data = json.load(f)
+            user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
+            if any(g in rule.get('groups', []) for g in user_groups):
+                use_case = data.get('use_case', '').lower()
+                denied_services = rule.get('denied_services', [])
+                for denied_service in denied_services:
+                    if denied_service in use_case:
+                        return jsonify({
+                            'error': f'❌ Access Denied\n\nYour group is restricted from requesting {denied_service.upper()} access.\n\nAllowed services: {", ".join([s.upper() for s in rule.get("allowed_services", [])])}\n\nContact your administrator for access to other services.'
+                        }), 403
     
-    # ENFORCEMENT: Apply strict organizational policies
+    # ENFORCEMENT: Apply strict organizational policies (skipped when GUARDRAILS_OFF)
     org_policies = load_org_policies()  # Load from config/database
-    allowed, violations, action = EnforcementEngine.enforce_policy(data, org_policies)
+    if GUARDRAILS_OFF:
+        allowed = True
+        violations = []
+        action = 'allow'
+    else:
+        allowed, violations, action = EnforcementEngine.enforce_policy(data, org_policies)
     
     print(f"🔒 Enforcement check: allowed={allowed}, violations={violations}")
     
@@ -3594,23 +3608,51 @@ from vault_manager import VaultManager
 # Database AI conversation storage
 db_conversations = {}
 
+def _fallback_db_ai_response(message):
+    """Rule-based fallback when Bedrock is unavailable - avoids HTML/500 errors"""
+    msg = message.lower().strip()
+    if any(w in msg for w in ['dev', 'development', 'staging', 'prod', 'production']):
+        return "Got it! For **dev** environment, I'll set up read-only access to the test database. What's the database name or endpoint? (e.g. testdb, or host:port)"
+    if any(w in msg for w in ['read', 'view', 'select', 'query', 'look']):
+        return "**Read-only** is perfect for viewing data and running SELECT queries. I'll use that role. How long do you need access? (2, 4, or 8 hours)"
+    if any(w in msg for w in ['update', 'insert', 'delete', 'write', 'modify']):
+        return "For modifying data, I'll use **Limited Write** (INSERT, UPDATE, DELETE - no DDL). How long do you need access?"
+    if any(w in msg for w in ['2', '4', '8', 'hour']):
+        return "Duration set. Click **Submit for Approval** when ready, or tell me the database name/endpoint if you haven't yet."
+    if any(w in msg for w in ['testdb', 'test db', 'localhost', '127.0.0.1']):
+        return "Using **testdb** on localhost. For read-only access, you're all set. Click **Submit for Approval** to request access."
+    # Default response
+    return """I can help you request database access! Please tell me:
+1. **Environment** (dev, staging, prod)
+2. **Database name** (e.g. testdb) or endpoint
+3. **What you need** (read-only, run queries, update data, schema changes)
+4. **Duration** (2, 4, or 8 hours)
+
+Reply with your answers and I'll prepare the request."""
+
+
 @app.route('/api/databases/ai-chat', methods=['POST'])
 def database_ai_chat():
-    """AI chat for database access requests"""
+    """AI chat for database access requests. Falls back to rule-based when Bedrock unavailable."""
     try:
-        from prompt_injection_guard import validate_ai_input
-        
         data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body required'}), 400
         message = data.get('message', '')
         conversation_id = data.get('conversation_id')
         
         if not message:
             return jsonify({'error': 'Message required'}), 400
         
-        # Prompt injection guard - validate before sending to AI
-        is_valid, error = validate_ai_input(message, check_sql=True)
-        if not is_valid:
-            return jsonify({'error': error}), 400
+        # Prompt injection guard - validate before sending to AI (skipped when GUARDRAILS_OFF)
+        if not GUARDRAILS_OFF:
+            try:
+                from prompt_injection_guard import validate_ai_input
+                is_valid, error = validate_ai_input(message, check_sql=True)
+                if not is_valid:
+                    return jsonify({'error': error}), 400
+            except ImportError:
+                pass  # No guard module - continue
         
         # Create or get conversation
         if not conversation_id:
@@ -3620,42 +3662,36 @@ def database_ai_chat():
         # Add user message
         db_conversations[conversation_id].append({'role': 'user', 'content': message})
         
-        # Build conversation history - include JIT roles so AI can explain them
-        messages = [{
-            'role': 'user',
-            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. Help users choose the right access role and understand what they can do.
+        ai_response = None
+        try:
+            # Call Bedrock AI
+            bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1')
+            messages = [{
+                'role': 'user',
+                'content': f"""You are a database access advisor for a JIT system. Help users choose access role.
 
-AVAILABLE JIT ROLES (choose one when requesting access):
-1. **Read-only**: SELECT, EXPLAIN, SHOW, DESCRIBE — for viewing data, reports, debugging. Safest option.
-2. **Read + Limited Write**: Above + INSERT, UPDATE, DELETE — for modifying data (no DDL).
-3. **Read + Full Write**: Above + TRUNCATE, CREATE, ALTER, DROP — for schema changes, migrations.
-4. **Admin**: All operations including GRANT, CREATE USER — for DBA tasks. Highest approval needed.
+JIT ROLES: 1) Read-only (SELECT, EXPLAIN) 2) Limited Write (+INSERT,UPDATE,DELETE) 3) Full Write (+DDL) 4) Admin (all).
 
-When users ask "what roles are available", "what can I do", "which role do I need", explain these roles clearly and suggest the minimal role for their use case.
-
-User request: {message}
-
-Provide a helpful response. Be conversational and friendly. If they ask about roles, explain the 4 roles above."""
-        }]
-        
-        # Call Bedrock AI
-        bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1')
-        response = bedrock.invoke_model(
-            modelId='anthropic.claude-3-sonnet-20240229-v1:0',
-            body=json.dumps({
-                'anthropic_version': 'bedrock-2023-05-31',
-                'max_tokens': 500,
-                'messages': messages
-            })
-        )
-        
-        result = json.loads(response['body'].read())
-        ai_response = result['content'][0]['text']
+User: {message}
+Provide a short, helpful response."""
+            }]
+            response = bedrock.invoke_model(
+                modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+                body=json.dumps({
+                    'anthropic_version': 'bedrock-2023-05-31',
+                    'max_tokens': 500,
+                    'messages': messages
+                })
+            )
+            result = json.loads(response['body'].read())
+            ai_response = result['content'][0]['text']
+        except Exception as bedrock_err:
+            print(f"Bedrock unavailable, using fallback: {bedrock_err}")
+            ai_response = _fallback_db_ai_response(message)
         
         # Store AI response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
         
-        # Try to extract suggested permissions
         suggested_perms = []
         perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'GRANT', 'REVOKE']
         for perm in perms:
@@ -3716,10 +3752,11 @@ def get_mongodb_atlas_projects():
 
 @app.route('/api/databases', methods=['GET'])
 def get_databases():
-    """Get databases - from AWS RDS when account_id provided, else mock fallback"""
+    """Get databases - from AWS RDS when account_id provided, else mock fallback. Filter by engine when provided."""
     try:
         account_id = request.args.get('account_id')
         region = request.args.get('region', 'ap-south-1')
+        filter_engine = request.args.get('engine', '').lower().strip()
         
         if account_id and account_id in CONFIG.get('accounts', {}):
             # Fetch RDS instances from AWS
@@ -3728,24 +3765,43 @@ def get_databases():
                 response = rds.describe_db_instances()
                 databases = []
                 for db in response.get('DBInstances', []):
-                    engine = db.get('Engine', 'mysql')
+                    raw_engine = (db.get('Engine') or 'mysql').lower()
                     port = db.get('Endpoint', {}).get('Port', 3306)
                     host = db.get('Endpoint', {}).get('Address', '')
-                    if host:
-                        databases.append({
-                            'id': db['DBInstanceIdentifier'],
-                            'name': db.get('DBName', db['DBInstanceIdentifier']),
-                            'engine': 'MySQL' if 'mysql' in engine else 'PostgreSQL' if 'postgres' in engine else engine,
-                            'host': host,
-                            'port': port,
-                            'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
-                        })
+                    if not host:
+                        continue
+                    # Normalize engine
+                    if 'mysql' in raw_engine and 'aurora' not in raw_engine:
+                        norm_engine = 'mysql'
+                    elif 'mariadb' in raw_engine:
+                        norm_engine = 'maria'
+                    elif 'postgres' in raw_engine:
+                        norm_engine = 'postgres'
+                    elif 'sqlserver' in raw_engine or 'mssql' in raw_engine:
+                        norm_engine = 'mssql'
+                    elif 'aurora' in raw_engine:
+                        norm_engine = 'aurora'
+                    else:
+                        norm_engine = raw_engine
+                    # Filter by selected engine tab
+                    if filter_engine and norm_engine != filter_engine:
+                        continue
+                    display_engine = 'MySQL' if norm_engine == 'mysql' else 'MariaDB' if norm_engine == 'maria' else 'PostgreSQL' if norm_engine == 'postgres' else 'MSSQL' if norm_engine == 'mssql' else 'Aurora'
+                    databases.append({
+                        'id': db['DBInstanceIdentifier'],
+                        'name': db.get('DBName', db['DBInstanceIdentifier']),
+                        'engine': display_engine,
+                        'host': host,
+                        'port': port,
+                        'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
+                    })
+                databases.sort(key=lambda x: (x['engine'], x['id']))
                 return jsonify({'databases': databases})
             except Exception as e:
                 print(f"RDS fetch failed, using fallback: {e}")
         
-        # Fallback: mock data for when AWS not configured
-        databases = [{
+        # Fallback: mock data for when AWS not configured (only if no engine filter or filter matches mysql)
+        mock = [{
             'id': 'mysql-test',
             'name': 'testdb',
             'engine': 'MySQL',
@@ -3753,6 +3809,7 @@ def get_databases():
             'port': int(os.getenv('DB_PORT', '3306')),
             'status': 'available'
         }]
+        databases = mock if (not filter_engine or filter_engine == 'mysql') else []
         return jsonify({'databases': databases})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -3872,6 +3929,16 @@ def get_approved_databases():
                 req.get('user_email') == user_email and 
                 req.get('status') == 'approved'):
                 
+                # Skip expired - only show databases you can actually use
+                expires_at_str = req.get('expires_at', '')
+                if expires_at_str:
+                    try:
+                        exp = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
+                        if datetime.now() >= exp:
+                            continue  # Skip expired
+                    except Exception:
+                        pass
+                
                 for db in req.get('databases', []):
                     approved_databases.append({
                         'request_id': req_id,
@@ -3935,27 +4002,51 @@ def execute_database_query():
         if not all([host, username, password, database]):
             return jsonify({'error': 'Database credentials not available. Request may have expired.'}), 400
         
-        # SQL validation (role-based)
+        # SQL validation (role-based) - skipped when GUARDRAILS_OFF
         role = db_request.get('role', 'read_only')
-        is_valid, sql_error = validate_sql_query(query, role=role)
-        if not is_valid:
+        if not GUARDRAILS_OFF:
+            is_valid, sql_error = validate_sql_query(query, role=role)
+            if not is_valid:
+                try:
+                    from audit_log import log_db_query
+                    log_db_query(user_email, request_id, role, query, allowed=False, error=sql_error)
+                except Exception:
+                    pass
+                return jsonify({'error': sql_error}), 400
+        
+        # Forward to Database Access Proxy (enforcement point)
+        # TEACHING: Proxy enforces SELECT-only again, logs everything, and is the ONLY DB connector
+        proxy_url = os.getenv('DB_PROXY_URL', 'http://127.0.0.1:5002')
+        use_proxy = os.getenv('USE_DB_PROXY', 'true').lower() == 'true'
+        
+        if use_proxy:
             try:
-                from audit_log import log_db_query
-                log_db_query(user_email, request_id, role, query, allowed=False, error=sql_error)
-            except Exception:
-                pass
-            return jsonify({'error': sql_error}), 400
+                import requests
+                proxy_resp = requests.post(
+                    f'{proxy_url}/execute',
+                    json={
+                        'host': host,
+                        'port': port,
+                        'username': username,
+                        'password': password,
+                        'database': database,
+                        'query': query,
+                        'user_email': user_email,
+                        'request_id': request_id
+                    },
+                    timeout=30
+                )
+                result = proxy_resp.json()
+                if proxy_resp.status_code != 200:
+                    return jsonify(result), proxy_resp.status_code
+            except Exception as e:
+                # Fallback to direct if proxy unavailable (dev only)
+                print(f"⚠️ Proxy unavailable ({e}), falling back to direct execution")
+                result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
+        else:
+            result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
         
-        result = execute_query(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-            query=query
-        )
-        
-        # MVP 2: Audit log
+        # Audit log
         try:
             from audit_log import log_db_query
             rows = len(result.get('results', [])) if isinstance(result.get('results'), list) else result.get('affected_rows')
