@@ -1,6 +1,8 @@
 # NPAMX – Git Deployment (Auto-Restart on Pull)
 
-**Repo:** `git@github.com:satishk8s/JIT-PAM-Enterprise.git`
+**Repo:** `git@github-verityx:satishk8s/JIT-PAM-Enterprise.git`
+
+(Use `github-verityx` host for SSH – same key as vijenex/sso repos.)
 
 Backend runs as a systemd service. After `git pull`, the backend restarts automatically. No manual steps.
 
@@ -12,10 +14,10 @@ Backend runs as a systemd service. After `git pull`, the backend restarts automa
 cd /Users/satish.korra/Desktop/sso/nykaa-jit
 
 # Add remote (if not already)
-git remote add origin git@github.com:satishk8s/JIT-PAM-Enterprise.git
+git remote add origin git@github-verityx:satishk8s/JIT-PAM-Enterprise.git
 
 # Or change existing:
-git remote set-url origin git@github.com:satishk8s/JIT-PAM-Enterprise.git
+git remote set-url origin git@github-verityx:satishk8s/JIT-PAM-Enterprise.git
 
 # Push
 git add .
@@ -30,6 +32,7 @@ git push -u origin main
 
 ```bash
 # Clone (path can be anywhere, e.g. /root/JIT-PAM-Enterprise or /root/npamx)
+# On Mac: use github-verityx. On EC2: use github.com if you have a different key.
 cd /root
 git clone git@github.com:satishk8s/JIT-PAM-Enterprise.git
 cd JIT-PAM-Enterprise
@@ -98,10 +101,22 @@ systemctl restart npam-backend
 
 ---
 
-## 6. Frontend
+## 6. Frontend + Nginx (required for fast UI)
 
-- **Option A:** nginx serves from `/root/JIT-PAM-Enterprise/frontend` – update nginx config
-- **Option B:** Keep S3 for frontend – push frontend separately via `./push-to-s3.sh`
+After first clone (or when switching from S3 to Git):
+
+```bash
+cd /root/JIT-PAM-Enterprise
+chmod +x scripts/configure-nginx-git.sh
+./scripts/configure-nginx-git.sh
+```
+
+This configures nginx to serve from the Git frontend with:
+- **gzip** – smaller payloads, faster load
+- **cache** – static assets cached 1d, reduces latency on scroll
+- **keepalive** – lower API latency
+
+**Option B:** Keep S3 for frontend – push via `./push-to-s3.sh`, use `setup-ec2.sh` (serves from `/root/frontend`).
 
 ---
 
