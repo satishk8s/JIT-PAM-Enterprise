@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Access Request</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, select, textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-success { background-color: #28a745; color: white; }
+        .permissions-box { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; padding: 15px; margin: 15px 0; }
+        .result-box { padding: 15px; border-radius: 4px; margin-top: 20px; }
+        .success { background-color: #d4edda; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+    <h2>🤖 AI-Powered Access Request</h2>
+    
+    <div class="form-group">
+        <label>Account:</label>
+        <select id="account_id">
+            <option value="">Select Account</option>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label>Use Case (describe what you need to do):</label>
+        <textarea id="use_case" placeholder="e.g., I need to connect to EC2 instances and download files from S3 bucket" rows="3"></textarea>
+        <button class="btn-primary" onclick="generatePermissions()" style="margin-top: 10px;">🧠 Generate Permissions</button>
+    </div>
+
+    <div id="permissions-display" style="display: none;" class="permissions-box">
+        <h4>🔍 AI-Generated Permissions (for Security Review)</h4>
+        <div id="permissions-content"></div>
+    </div>
+
+    <div class="form-group">
+        <label>Duration (hours):</label>
+        <input type="number" id="duration_hours" value="8">
+    </div>
+
+    <div class="form-group">
+        <label>Justification:</label>
+        <textarea id="justification" placeholder="Business justification for this access" rows="2"></textarea>
+    </div>
+
+    <button class="btn-success" onclick="submitRequest()">🚀 Submit AI Access Request</button>
+
+    <div id="result" style="display: none;"></div>
+
+    <script>
+        let aiPermissions = null;
+
+        // Load accounts
+        fetch('http://localhost:5000/api/accounts')
+            .then(res => res.json())
+            .then(accounts => {
+                const select = document.getElementById('account_id');
+                Object.values(accounts).forEach(account => {
+                    const option = document.createElement('option');
+                    option.value = account.id;
+                    option.textContent = `${account.name} (${account.type})`;
+                    select.appendChild(option);
+                });
+            });
+
+        async function generatePermissions() {
+            const useCase = document.getElementById('use_case').value;
+            if (!useCase) return;
+
+            try {
+                const response = await fetch('http://localhost:5000/api/generate-permissions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ use_case: useCase })
+                });
+                
+                aiPermissions = await response.json();
+                
+                if (aiPermissions.error) {
+                    alert('Error: ' + aiPermissions.error);
+                    return;
+                }
+
+                // Display permissions
+                const content = `
+                    <p><strong>Description:</strong> ${aiPermissions.description}</p>
+                    <p><strong>Actions:</strong></p>
+                    <ul>${aiPermissions.actions.map(action => `<li style="font-family: monospace;">${action}</li>`).join('')}</ul>
+                    <p><strong>Resources:</strong> ${JSON.stringify(aiPermissions.resources)}</p>
+                `;
+                
+                document.getElementById('permissions-content').innerHTML = content;
+                document.getElementById('permissions-display').style.display = 'block';
+                
+            } catch (error) {
+                alert('Error generating permissions: ' + error.message);
+            }
+        }
+
+        async function submitRequest() {
+            if (!aiPermissions) {
+                alert('Please generate permissions first');
+                return;
+            }
+
+            const data = {
+                user_email: 'Satish.Korra@nykaa.com',
+                account_id: document.getElementById('account_id').value,
+                use_case: document.getElementById('use_case').value,
+                duration_hours: parseInt(document.getElementById('duration_hours').value),
+                justification: document.getElementById('justification').value
+            };
+
+            try {
+                const response = await fetch('http://localhost:5000/api/request-access', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                const resultDiv = document.getElementById('result');
+                resultDiv.className = `result-box ${result.error ? 'error' : 'success'}`;
+                resultDiv.innerHTML = `
+                    <h4>${result.error ? '❌ Error' : '✅ Success'}</h4>
+                    <p>${result.error || `Request submitted with ID: ${result.request_id}`}</p>
+                `;
+                resultDiv.style.display = 'block';
+                
+            } catch (error) {
+                alert('Error submitting request: ' + error.message);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+#!/bin/bash
+# Git post-merge hook: runs after 'git pull'
+# Restarts NPAMX backend so new code takes effect (no manual intervention)
+
+if systemctl is-active --quiet npam-backend 2>/dev/null; then
+    echo "[post-merge] Restarting npam-backend..."
+    systemctl restart npam-backend
+    echo "[post-merge] Backend restarted."
+fi

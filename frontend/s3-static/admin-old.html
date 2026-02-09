@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>S3 File Explorer – Admin</title>
+  <link href="https://fonts.googleapis.com/css2?family=Josefin+Sans&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="navbar">
+    <h1>S3 File Explorer – Admin</h1>
+    <div class="nav-links">
+      <button onclick="openProfile()">My Profile</button>
+      <button onclick="openSettings()">Settings</button>
+      <button onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h2>Manage Users</h2>
+    <button class="btn" onclick="loadUsers()">Refresh Users</button>
+
+    <table id="userTable">
+      <thead>
+        <tr>
+          <th>Email</th>
+          <th>Role</th>
+          <th>MFA</th>
+          <th>Last Login</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Create User</h3>
+    <div class="form-row">
+      <input id="newUser" placeholder="Email">
+      <input id="newPass" placeholder="Temp password">
+      <select id="newRole">
+        <option value="readonly">Read Only</option>
+        <option value="readwrite">Read & Write</option>
+        <option value="admin">Admin</option>
+      </select>
+      <button class="btn" onclick="createUser()">Create</button>
+    </div>
+
+    <!-- S3 Bucket Access Control Section -->
+    <div class="card" style="margin-top:30px;">
+      <h2>S3 Bucket Access Control</h2>
+      <p style="font-size:14px;color:#555;">
+        Manage which users can access which S3 buckets and what actions they can perform.
+      </p>
+
+      <div style="margin-bottom:10px;">
+        <label><b>User:</b></label>
+        <select id="perm_user" style="margin-left:10px;padding:6px;border-radius:6px;"></select>
+        <label style="margin-left:20px;"><b>Bucket:</b></label>
+        <input id="perm_bucket" placeholder="bucket-name" style="padding:6px;border-radius:6px;width:200px;">
+      </div>
+
+      <div style="margin-bottom:10px;">
+        <label><input type="checkbox" id="perm_read"> Read</label>
+        <label style="margin-left:15px;"><input type="checkbox" id="perm_upload"> Upload</label>
+        <label style="margin-left:15px;"><input type="checkbox" id="perm_download"> Download</label>
+        <label style="margin-left:15px;"><input type="checkbox" id="perm_delete"> Delete</label>
+      </div>
+
+      <button class="btn" onclick="saveBucketPerms()" style="margin-top:10px;">Save Permissions</button>
+      <div id="permMsg" style="margin-top:15px;font-weight:bold;"></div>
+
+      <h3 style="margin-top:30px;">Current Bucket Permissions</h3>
+      <table id="permTable" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="background:#007bff;color:white;">
+            <th>User</th>
+            <th>Bucket</th>
+            <th>Read</th>
+            <th>Upload</th>
+            <th>Download</th>
+            <th>Delete</th>
+          </tr>
+        </thead>
+        <tbody id="permBody"></tbody>
+      </table>
+    </div>
+
+    <div id="adminMsg"></div>
+  </div>
+
+  <!-- Profile Modal -->
+  <div id="profileModal" class="modal">
+    <div class="modal-content">
+      <h2>My Profile</h2>
+      <p><b>Email:</b> <span id="p_email"></span></p>
+      <p><b>Role:</b> <span id="p_role"></span></p>
+      <p><b>MFA Enabled:</b> <span id="p_mfa"></span></p>
+      <p><b>Last Login:</b> <span id="p_lastlogin"></span></p>
+      <p><b>Session Expires:</b> <span id="p_expiry"></span></p>
+      <div style="text-align:center;margin-top:20px;">
+        <button class="btn" onclick="closeProfile()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal">
+    <div class="modal-content">
+      <h2>Settings</h2>
+      <h4>Change Password</h4>
+      <input id="oldPassword" type="password" placeholder="Old password" style="width:100%;margin-bottom:10px;">
+      <input id="newPassword" type="password" placeholder="New password" style="width:100%;margin-bottom:10px;">
+      <button class="btn" style="width:100%;" onclick="changeMyPassword()">Update Password</button>
+      <hr style="margin:20px 0;">
+      <h4>Reset MFA</h4>
+      <button class="btn" style="width:100%;background:#dc3545;" onclick="resetMyMFA()">Reset My MFA</button>
+      <div style="text-align:center;margin-top:20px;">
+        <button class="btn" onclick="closeSettings()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    async function openProfile() {
+      try {
+        const data = await api("/api/profile");
+        document.getElementById("p_email").textContent = data.username;
+        document.getElementById("p_role").textContent = data.role;
+        document.getElementById("p_mfa").textContent = data.mfa_enabled ? "✅ Yes" : "❌ No";
+        document.getElementById("p_lastlogin").textContent = data.last_login_at || "—";
+        document.getElementById("p_expiry").textContent = data.session_expires_at || "—";
+        document.getElementById("profileModal").style.display = "flex";
+      } catch (e) {
+        alert("Failed to load profile: " + e.message);
+      }
+    }
+
+    function closeProfile() {
+      document.getElementById("profileModal").style.display = "none";
+    }
+
+    function openSettings() {
+      document.getElementById("settingsModal").style.display = "flex";
+    }
+
+    function closeSettings() {
+      document.getElementById("settingsModal").style.display = "none";
+    }
+
+    async function changeMyPassword() {
+      const old_password = document.getElementById("oldPassword").value;
+      const new_password = document.getElementById("newPassword").value;
+      if (!old_password || !new_password) return alert("Enter both fields");
+      const res = await api("/api/change-password", "POST", { old_password, new_password });
+      alert(res.message);
+      closeSettings();
+    }
+
+    async function resetMyMFA() {
+      if (!confirm("Are you sure you want to reset your MFA?")) return;
+      const res = await api("/api/reset-my-mfa", "POST", {});
+      alert(res.message);
+      closeSettings();
+    }
+
+    async function loadUsers() {
+      const data = await api("/api/admin/users");
+      const tbody = document.querySelector("#userTable tbody");
+      tbody.innerHTML = "";
+      for (const u of data.users) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${u.username}</td>
+          <td>${u.role}</td>
+          <td>${u.mfa_enabled ? '✔' : '❌'}</td>
+          <td>${u.last_login_at || ''}</td>
+          <td>
+            <button class='btn' onclick="changeRole('${u.username}','readonly')">RO</button>
+            <button class='btn' onclick="changeRole('${u.username}','readwrite')">RW</button>
+            <button class='btn' onclick="changeRole('${u.username}','admin')">Admin</button>
+            <button class='btn' onclick="deleteUser('${u.username}')">🗑</button>
+          </td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function createUser() {
+      const username = document.getElementById("newUser").value;
+      const password = document.getElementById("newPass").value;
+      const role = document.getElementById("newRole").value;
+      const res = await api("/api/admin/create-user", "POST", { username, password, role });
+      alert(res.message);
+      loadUsers();
+    }
+
+    async function changeRole(username, role) {
+      const res = await api("/api/admin/update-role", "POST", { username, role });
+      alert(res.message);
+      loadUsers();
+    }
+
+    async function deleteUser(username) {
+      if (!confirm("Delete " + username + "?")) return;
+      const res = await api("/api/admin/delete-user", "POST", { username });
+      alert(res.message);
+      loadUsers();
+    }
+
+    async function loadPermissionUsers() {
+      const res = await api("/api/admin/users");
+      const sel = document.getElementById("perm_user");
+      sel.innerHTML = "";
+      res.users.forEach(u => {
+        const opt = document.createElement("option");
+        opt.value = u.username;
+        opt.textContent = u.username + " (" + u.role + ")";
+        sel.appendChild(opt);
+      });
+    }
+
+    async function saveBucketPerms() {
+      const username = document.getElementById("perm_user").value;
+      const bucket = document.getElementById("perm_bucket").value.trim();
+      const can_read = document.getElementById("perm_read").checked ? 1 : 0;
+      const can_upload = document.getElementById("perm_upload").checked ? 1 : 0;
+      const can_download = document.getElementById("perm_download").checked ? 1 : 0;
+      const can_delete = document.getElementById("perm_delete").checked ? 1 : 0;
+
+      if (!username || !bucket) {
+        document.getElementById("permMsg").textContent = "Please select a user and bucket name.";
+        document.getElementById("permMsg").style.color = "red";
+        return;
+      }
+
+      const res = await api("/api/admin/set-bucket-perms", "POST", {
+        username, bucket_name: bucket,
+        can_read, can_upload, can_download, can_delete
+      });
+
+      document.getElementById("permMsg").textContent = res.message || "Permissions updated successfully.";
+      document.getElementById("permMsg").style.color = "green";
+      loadCurrentPerms();
+    }
+
+    async function loadCurrentPerms() {
+      const res = await api("/api/admin/bucket-permissions");
+      const tbody = document.getElementById("permBody");
+      tbody.innerHTML = "";
+      if (!res.permissions.length) {
+        tbody.innerHTML = "<tr><td colspan='6'>No permissions assigned yet.</td></tr>";
+        return;
+      }
+      res.permissions.forEach(p => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${p.username}</td>
+          <td>${p.bucket_name}</td>
+          <td>${p.can_read ? "✅" : "❌"}</td>
+          <td>${p.can_upload ? "✅" : "❌"}</td>
+          <td>${p.can_download ? "✅" : "❌"}</td>
+          <td>${p.can_delete ? "✅" : "❌"}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // Close modals when clicking outside
+    document.getElementById("profileModal").addEventListener("click", (e) => {
+      if (e.target.id === "profileModal") closeProfile();
+    });
+    document.getElementById("settingsModal").addEventListener("click", (e) => {
+      if (e.target.id === "settingsModal") closeSettings();
+    });
+
+    // Load data on page load
+    window.addEventListener("load", () => {
+      loadUsers();
+      loadPermissionUsers();
+      loadCurrentPerms();
+    });
+  </script>
+</body>
+</html>

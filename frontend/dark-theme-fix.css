@@ -1,0 +1,83 @@
+/* Comprehensive Dark Theme Fixes */
+
+[data-theme="dark"] {
+    --text-primary: #e0e0e0;
+    --text-secondary: #b0b0b0;
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #2a2a2a;
+    --border-color: #404040;
+}
+
+/* All text elements */
+[data-theme="dark"] h1, [data-theme="dark"] h2, [data-theme="dark"] h3, 
+[data-theme="dark"] h4, [data-theme="dark"] h5, [data-theme="dark"] h6,
+[data-theme="dark"] p, [data-theme="dark"] span, [data-theme="dark"] div,
+[data-theme="dark"] label, [data-theme="dark"] td, [data-theme="dark"] th,
+[data-theme="dark"] li, [data-theme="dark"] a {
+    color: var(--text-primary) !important;
+}
+
+[data-theme="dark"] small {
+    color: var(--text-secondary) !important;
+}
+
+/* Boxes and cards */
+[data-theme="dark"] .card,
+[data-theme="dark"] .feature-card,
+[data-theme="dark"] .config-section,
+[data-theme="dark"] .group-card,
+[data-theme="dark"] .groups-management,
+[data-theme="dark"] .group-detail-card,
+[data-theme="dark"] .template-card,
+[data-theme="dark"] .level-card {
+    background: var(--bg-secondary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* Tables */
+[data-theme="dark"] table,
+[data-theme="dark"] .config-table,
+[data-theme="dark"] .mini-table {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+}
+
+[data-theme="dark"] table th,
+[data-theme="dark"] table td {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* Inputs */
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+    background: var(--bg-primary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* License info box */
+[data-theme="dark"] .license-info {
+    background: rgba(74, 144, 226, 0.15) !important;
+    border-color: #4A90E2 !important;
+}
+
+/* Policy builder sections */
+[data-theme="dark"] .policy-builder *,
+[data-theme="dark"] .policy-config *,
+[data-theme="dark"] .features-management * {
+    color: var(--text-primary) !important;
+}
+
+/* Step cards */
+[data-theme="dark"] .step-card {
+    background: var(--bg-secondary) !important;
+    border-color: var(--border-color) !important;
+}
+
+/* Specific overrides for colored text */
+[data-theme="dark"] .section-header p {
+    color: var(--text-secondary) !important;
+}

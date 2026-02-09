@@ -1,0 +1,147 @@
+/* Typography Standards - Inter Font Only */
+
+/* Import Inter font */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+/* Global font rule - MANDATORY */
+html, body, #root, * {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+}
+
+/* Body text */
+body {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.5;
+}
+
+/* Typography scale */
+.text-xs { font-size: 11px; }
+.text-sm { font-size: 12px; }
+.text-base { font-size: 13px; }
+.text-md { font-size: 14px; }
+.text-lg { font-size: 16px; }
+.text-xl { font-size: 18px; }
+.text-2xl { font-size: 20px; }
+
+/* Font weights - STRICT */
+.font-normal { font-weight: 400; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+
+/* Remove bold */
+b, strong {
+    font-weight: 500 !important;
+}
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+h1 { font-size: 20px; }
+h2 { font-size: 18px; }
+h3 { font-size: 16px; }
+h4 { font-size: 15px; }
+h5 { font-size: 14px; }
+h6 { font-size: 13px; }
+
+/* Buttons */
+button, .btn, .btn-primary, .btn-secondary, .btn-danger {
+    font-size: 14px !important;
+    font-weight: 500 !important;
+    text-transform: none !important;
+    letter-spacing: normal !important;
+}
+
+/* Tables */
+table, .table, .instances-table {
+    font-size: 13px !important;
+    font-weight: 400 !important;
+    line-height: 1.4 !important;
+}
+
+table th, .table th {
+    font-weight: 500 !important;
+    font-size: 13px !important;
+}
+
+/* Labels */
+label {
+    font-size: 12px !important;
+    font-weight: 400 !important;
+}
+
+/* Section headings */
+.section-header, .panel-header h3 {
+    font-size: 16px !important;
+    font-weight: 500 !important;
+}
+
+/* Page titles */
+.page-header h2 {
+    font-size: 18px !important;
+    font-weight: 600 !important;
+}
+
+/* Inputs */
+input, textarea, select {
+    font-size: 14px !important;
+    font-weight: 400 !important;
+}
+
+/* Logs and code */
+.logs, .code, pre, code {
+    font-size: 13px !important;
+    font-weight: 400 !important;
+    line-height: 1.4 !important;
+}
+
+/* Navigation */
+.nav-item, .sidebar-nav .nav-item {
+    font-size: 14px !important;
+    font-weight: 400 !important;
+}
+
+.nav-item.active {
+    font-weight: 500 !important;
+}
+
+/* Tabs */
+.status-tab, .admin-tab-btn, .integration-tab-btn {
+    font-size: 14px !important;
+    font-weight: 500 !important;
+}
+
+/* Cards */
+.card, .kpi-card, .jit-request-card {
+    font-size: 14px !important;
+}
+
+.card h3, .card h4 {
+    font-size: 16px !important;
+    font-weight: 500 !important;
+}
+
+/* Badges */
+.badge, .status-badge {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+}
+
+/* Modal headers */
+.modal-header h3, .request-modal-header h3 {
+    font-size: 18px !important;
+    font-weight: 600 !important;
+}
+
+/* Remove all bold overrides */
+.font-bold {
+    font-weight: 500 !important;
+}
+
+/* Ensure no component overrides */
+div, span, p, a {
+    font-family: inherit !important;
+}

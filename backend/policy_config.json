@@ -1,0 +1,17 @@
+{
+  "allow_delete_nonprod": false,
+  "allow_delete_prod": false,
+  "allow_create_nonprod": false,
+  "allow_create_prod": false,
+  "allow_admin_nonprod": false,
+  "allow_admin_prod": false,
+  "allow_admin_sandbox": false,
+  "contact_emails": {
+    "create": "devops@company.com",
+    "delete": "security@company.com",
+    "terminate": "manager@company.com",
+    "iam": "security-team@company.com",
+    "emergency": "ciso@company.com",
+    "support": "support@company.com"
+  }
+}

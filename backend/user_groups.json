@@ -1,0 +1,24 @@
+{
+  "groups": [
+    {
+      "id": "networking_team",
+      "name": "Networking Team",
+      "description": "Network infrastructure team",
+      "members": [
+        "satish-test@nykaa.com"
+      ]
+    },
+    {
+      "id": "security_team",
+      "name": "Security Team",
+      "description": "Security and compliance team",
+      "members": []
+    },
+    {
+      "id": "devops_team",
+      "name": "DevOps Team",
+      "description": "DevOps and infrastructure team",
+      "members": []
+    }
+  ]
+}

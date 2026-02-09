@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>S3 File Explorer</title>
+  <link href="https://fonts.googleapis.com/css2?family=Josefin+Sans&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="navbar">
+    <h1>S3 File Explorer</h1>
+    <div class="nav-links">
+      <button onclick="openProfile()">My Profile</button>
+      <button onclick="openSettings()">Settings</button>
+      <button onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h2>My Buckets</h2>
+    <div class="card">
+      <div id="bucketList">Loading buckets...</div>
+    </div>
+
+    <!-- S3 Objects Viewer -->
+    <div id="objectsCard" class="card" style="display:none;margin-top:25px;">
+      <h3 id="objHeader">Objects</h3>
+      <div id="crumbs" style="margin-bottom:15px;font-size:14px;color:#666;"></div>
+      
+      <!-- Upload Section -->
+      <div id="uploadSection" style="margin-bottom:20px;display:none;">
+        <h4>Upload Files</h4>
+        <input type="file" id="fileInput" multiple style="margin-bottom:10px;">
+        <button class="btn" onclick="uploadFiles()">Upload Selected Files</button>
+        <div id="uploadProgress" style="margin-top:10px;"></div>
+      </div>
+
+      <div id="objects" style="max-height:400px;overflow-y:auto;"></div>
+    </div>
+  </div>
+
+  <!-- Profile Modal -->
+  <div id="profileModal" class="modal">
+    <div class="modal-content">
+      <h2>My Profile</h2>
+      <p><b>Email:</b> <span id="p_email"></span></p>
+      <p><b>Role:</b> <span id="p_role"></span></p>
+      <p><b>MFA Enabled:</b> <span id="p_mfa"></span></p>
+      <p><b>Last Login:</b> <span id="p_lastlogin"></span></p>
+      <p><b>Session Expires:</b> <span id="p_expiry"></span></p>
+      <div style="text-align:center;margin-top:20px;">
+        <button class="btn" onclick="closeProfile()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal">
+    <div class="modal-content">
+      <h2>Settings</h2>
+      <h4>Change Password</h4>
+      <input id="oldPassword" type="password" placeholder="Old password" style="width:100%;margin-bottom:10px;">
+      <input id="newPassword" type="password" placeholder="New password" style="width:100%;margin-bottom:10px;">
+      <button class="btn" style="width:100%;" onclick="changeMyPassword()">Update Password</button>
+      <hr style="margin:20px 0;">
+      <h4>Reset MFA</h4>
+      <button class="btn" style="width:100%;background:#dc3545;" onclick="resetMyMFA()">Reset My MFA</button>
+      <div style="text-align:center;margin-top:20px;">
+        <button class="btn" onclick="closeSettings()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    let currentBucket = "";
+    let currentPrefix = "";
+    let currentPermissions = {};
+
+    async function openProfile() {
+      try {
+        const data = await api("/api/profile");
+        document.getElementById("p_email").textContent = data.username;
+        document.getElementById("p_role").textContent = data.role;
+        document.getElementById("p_mfa").textContent = data.mfa_enabled ? "✅ Yes" : "❌ No";
+        document.getElementById("p_lastlogin").textContent = data.last_login_at || "—";
+        document.getElementById("p_expiry").textContent = data.session_expires_at || "—";
+        document.getElementById("profileModal").style.display = "flex";
+      } catch (e) {
+        alert("Failed to load profile: " + e.message);
+      }
+    }
+
+    function closeProfile() {
+      document.getElementById("profileModal").style.display = "none";
+    }
+
+    function openSettings() {
+      document.getElementById("settingsModal").style.display = "flex";
+    }
+
+    function closeSettings() {
+      document.getElementById("settingsModal").style.display = "none";
+    }
+
+    async function changeMyPassword() {
+      const old_password = document.getElementById("oldPassword").value;
+      const new_password = document.getElementById("newPassword").value;
+      if (!old_password || !new_password) return alert("Enter both fields");
+      const res = await api("/api/change-password", "POST", { old_password, new_password });
+      alert(res.message);
+      closeSettings();
+    }
+
+    async function resetMyMFA() {
+      if (!confirm("Are you sure you want to reset your MFA?")) return;
+      const res = await api("/api/reset-my-mfa", "POST", {});
+      alert(res.message);
+      closeSettings();
+    }
+
+    async function loadBuckets() {
+      try {
+        const res = await api("/api/s3/buckets");
+        const list = document.getElementById("bucketList");
+        list.innerHTML = "";
+        if (!res.buckets || !res.buckets.length) {
+          list.textContent = "No bucket access assigned.";
+          return;
+        }
+
+        res.buckets.forEach(b => {
+          const div = document.createElement("div");
+          div.style.marginBottom = "12px";
+          div.style.padding = "10px";
+          div.style.border = "1px solid #ddd";
+          div.style.borderRadius = "6px";
+          div.style.backgroundColor = "#f9f9f9";
+
+          const caps = [];
+          if (b.can_read) caps.push("Read");
+          if (b.can_upload) caps.push("Upload");
+          if (b.can_download) caps.push("Download");
+          if (b.can_delete) caps.push("Delete");
+
+          div.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;">
+              <div>
+                <b>${b.bucket_name}</b><br>
+                <small style="color:#666;">Permissions: ${caps.join(", ") || "No permissions"}</small>
+              </div>
+              ${b.can_read ? `<button class="btn" onclick="openBucket('${b.bucket_name}','')">Open</button>` : ""}
+            </div>
+          `;
+          list.appendChild(div);
+        });
+      } catch (e) {
+        console.error("Error loading buckets:", e);
+        document.getElementById("bucketList").textContent = "Failed to load buckets.";
+      }
+    }
+
+    async function openBucket(bucket, prefix) {
+      currentBucket = bucket;
+      currentPrefix = prefix || "";
+      
+      // Get user permissions for this bucket
+      const bucketData = await api("/api/s3/buckets");
+      const bucketInfo = bucketData.buckets.find(b => b.bucket_name === bucket);
+      currentPermissions = bucketInfo || {};
+
+      const data = await api(`/api/s3/list/${bucket}?prefix=${encodeURIComponent(currentPrefix)}`);
+      document.getElementById("objectsCard").style.display = "block";
+      document.getElementById("objHeader").textContent = `Objects in ${bucket}${currentPrefix ? (" / " + currentPrefix) : ""}`;
+      
+      // Update breadcrumbs
+      const crumbs = document.getElementById("crumbs");
+      crumbs.innerHTML = breadcrumb(bucket, currentPrefix);
+
+      // Show upload section if user has upload permission
+      const uploadSection = document.getElementById("uploadSection");
+      if (currentPermissions.can_upload) {
+        uploadSection.style.display = "block";
+      } else {
+        uploadSection.style.display = "none";
+      }
+
+      const cont = document.getElementById("objects");
+      cont.innerHTML = "";
+
+      // Add folders
+      data.folders.forEach(f => {
+        const p = f.Prefix;
+        const name = p.slice(currentPrefix.length).replace(/\/$/, "");
+        const div = document.createElement("div");
+        div.style.padding = "8px";
+        div.style.borderBottom = "1px solid #eee";
+        div.innerHTML = `
+          <a href="#" onclick="openBucket('${bucket}', '${p}'); return false;" style="text-decoration:none;">
+            📁 ${name}
+          </a>
+        `;
+        cont.appendChild(div);
+      });
+
+      // Add files
+      data.files.forEach(o => {
+        const div = document.createElement("div");
+        div.style.padding = "8px";
+        div.style.borderBottom = "1px solid #eee";
+        div.style.display = "flex";
+        div.style.justifyContent = "space-between";
+        div.style.alignItems = "center";
+
+        const name = o.Key.slice(currentPrefix.length);
+        const size = Math.round((o.Size || 0) / 1024);
+        
+        const actions = [];
+        if (currentPermissions.can_download) {
+          actions.push(`<button class="btn btn-sm" onclick="downloadObject('${bucket}','${encodeURIComponent(o.Key)}')">Download</button>`);
+        }
+        if (currentPermissions.can_delete) {
+          actions.push(`<button class="btn btn-sm" style="background:#dc3545;" onclick="deleteObject('${bucket}','${encodeURIComponent(o.Key)}')">Delete</button>`);
+        }
+
+        div.innerHTML = `
+          <div>
+            📄 ${name}<br>
+            <small style="color:#666;">${size} KB • ${o.LastModified ? new Date(o.LastModified).toLocaleString() : 'Unknown date'}</small>
+          </div>
+          <div>
+            ${actions.join(' ')}
+          </div>
+        `;
+        cont.appendChild(div);
+      });
+    }
+
+    function breadcrumb(bucket, prefix) {
+      const parts = (prefix || "").split("/").filter(Boolean);
+      let acc = "";
+      let html = `<a href="#" onclick="openBucket('${bucket}','');return false;" style="color:#007bff;text-decoration:none;">${bucket}</a>`;
+      for (const p of parts) {
+        acc += p + "/";
+        html += ` / <a href="#" onclick="openBucket('${bucket}','${acc}');return false;" style="color:#007bff;text-decoration:none;">${p}</a>`;
+      }
+      return html;
+    }
+
+    async function downloadObject(bucket, keyEncoded) {
+      const key = decodeURIComponent(keyEncoded);
+      try {
+        const r = await api(`/api/s3/presign-download/${bucket}`, "POST", { key });
+        window.open(r.url, '_blank');
+      } catch (e) {
+        alert("Download failed: " + e.message);
+      }
+    }
+
+    async function deleteObject(bucket, keyEncoded) {
+      const key = decodeURIComponent(keyEncoded);
+      if (!confirm(`Delete ${key}?`)) return;
+      
+      try {
+        await api(`/api/s3/delete/${bucket}`, "POST", { key });
+        alert("File deleted successfully");
+        openBucket(currentBucket, currentPrefix); // Refresh the view
+      } catch (e) {
+        alert("Delete failed: " + e.message);
+      }
+    }
+
+    async function uploadFiles() {
+      const fileInput = document.getElementById("fileInput");
+      const files = fileInput.files;
+      if (!files.length) {
+        alert("Please select files to upload");
+        return;
+      }
+
+      const progressDiv = document.getElementById("uploadProgress");
+      progressDiv.innerHTML = "Uploading...";
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const key = currentPrefix + file.name;
+        
+        try {
+          progressDiv.innerHTML = `Uploading ${file.name} (${i + 1}/${files.length})...`;
+          
+          // Get presigned URL
+          const uploadData = await api(`/api/s3/presign-upload/${currentBucket}`, "POST", {
+            key: key,
+            content_type: file.type || "application/octet-stream"
+          });
+
+          // Upload file using presigned URL
+          const uploadResponse = await fetch(uploadData.url, {
+            method: "PUT",
+            body: file,
+            headers: {
+              "Content-Type": file.type || "application/octet-stream"
+            }
+          });
+
+          if (!uploadResponse.ok) {
+            throw new Error(`Upload failed for ${file.name}`);
+          }
+        } catch (e) {
+          alert(`Upload failed for ${file.name}: ${e.message}`);
+          progressDiv.innerHTML = "";
+          return;
+        }
+      }
+
+      progressDiv.innerHTML = "Upload completed successfully!";
+      fileInput.value = ""; // Clear file input
+      setTimeout(() => {
+        progressDiv.innerHTML = "";
+        openBucket(currentBucket, currentPrefix); // Refresh the view
+      }, 2000);
+    }
+
+    // Close modals when clicking outside
+    document.getElementById("profileModal").addEventListener("click", (e) => {
+      if (e.target.id === "profileModal") closeProfile();
+    });
+    document.getElementById("settingsModal").addEventListener("click", (e) => {
+      if (e.target.id === "settingsModal") closeSettings();
+    });
+
+    // Load buckets on page load
+    window.addEventListener("load", () => {
+      loadBuckets();
+    });
+  </script>
+</body>
+</html>

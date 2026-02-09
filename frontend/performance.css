@@ -1,0 +1,24 @@
+/* Performance: faster render, sharper text, less jank */
+
+/* Crisp text on high-DPI */
+html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+}
+
+/* Reduce repaints - isolate scroll areas (paint only, safer) */
+.terminal-page-layout .terminal-sidebar {
+    contain: paint;
+}
+
+/* Avoid layout thrash on inputs */
+input, textarea, select {
+    will-change: auto;
+}
+
+/* Lighter shadows for faster paint */
+[data-theme="dark"] .kpi-card,
+[data-theme="dark"] .db-section.card {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}

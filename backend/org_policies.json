@@ -1,0 +1,47 @@
+{
+  "accounts": {
+    "867625663987": {
+      "environment": "nonprod",
+      "jit_required": true,
+      "max_duration_hours": 120,
+      "allow_delete": true
+    }
+  },
+  "environments": {
+    "prod": {
+      "allow_delete": false,
+      "max_duration_hours": 8,
+      "require_justification": true
+    },
+    "nonprod": {
+      "allow_delete": true,
+      "max_duration_hours": 120,
+      "require_justification": false
+    }
+  },
+  "roles": {
+    "developer": {
+      "forbidden_actions": ["iam:*", "organizations:*", "*:Delete*"],
+      "max_duration_hours": 24
+    },
+    "admin": {
+      "forbidden_actions": [],
+      "max_duration_hours": 120
+    }
+  },
+  "approvals": {
+    "prod_approvers": ["manager", "security_lead"],
+    "admin_approvers": ["manager", "security_lead", "ciso"],
+    "delete_approvers": ["manager", "security_lead"]
+  },
+  "time_restrictions": {
+    "business_hours_only": false,
+    "weekend_block": false
+  },
+  "contacts": {
+    "delete_operations": "security@company.com",
+    "infrastructure": "devops@company.com",
+    "iam_security": "security-team@company.com",
+    "emergency": "ciso@company.com"
+  }
+}
