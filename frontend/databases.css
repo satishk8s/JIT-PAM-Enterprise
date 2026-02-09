@@ -583,10 +583,31 @@
     overflow-y: auto;
 }
 
+.db-step-loading {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+.db-step-loading i {
+    margin-right: 8px;
+}
+
 .db-step-empty {
     color: var(--text-secondary);
     font-size: 13px;
     margin: 0;
+}
+
+.db-step-manual-toggle {
+    margin-top: 12px;
+}
+
+.db-manual-entry {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
 }
 
 .db-step-hint {

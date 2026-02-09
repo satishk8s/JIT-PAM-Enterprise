@@ -3876,30 +3876,51 @@ def get_mongodb_atlas_projects():
 
 @app.route('/api/databases', methods=['GET'])
 def get_databases():
-    """Get databases - from AWS RDS when account_id provided, else mock fallback"""
+    """Get databases - from AWS RDS. Tries to fetch when account_id provided."""
     try:
         account_id = request.args.get('account_id')
         region = request.args.get('region', 'ap-south-1')
-        
-        if account_id and account_id in CONFIG.get('accounts', {}):
-            # Fetch RDS instances from AWS
+
+        # Always try to fetch RDS when account selected (uses instance role/creds)
+        if account_id:
             try:
                 rds = boto3.client('rds', region_name=region)
                 response = rds.describe_db_instances()
+                filter_engine = request.args.get('engine', '').lower()
                 databases = []
                 for db in response.get('DBInstances', []):
-                    engine = db.get('Engine', 'mysql')
+                    raw_engine = (db.get('Engine') or 'mysql').lower()
                     port = db.get('Endpoint', {}).get('Port', 3306)
                     host = db.get('Endpoint', {}).get('Address', '')
-                    if host:
-                        databases.append({
-                            'id': db['DBInstanceIdentifier'],
-                            'name': db.get('DBName', db['DBInstanceIdentifier']),
-                            'engine': 'MySQL' if 'mysql' in engine else 'PostgreSQL' if 'postgres' in engine else engine,
-                            'host': host,
-                            'port': port,
-                            'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
-                        })
+                    if not host:
+                        continue
+                    # Normalize engine for display
+                    if 'mysql' in raw_engine and 'aurora' not in raw_engine:
+                        norm_engine = 'mysql'
+                    elif 'mariadb' in raw_engine:
+                        norm_engine = 'maria'
+                    elif 'postgres' in raw_engine:
+                        norm_engine = 'postgres'
+                    elif 'sqlserver' in raw_engine or 'mssql' in raw_engine:
+                        norm_engine = 'mssql'
+                    elif 'aurora' in raw_engine:
+                        norm_engine = 'aurora'
+                    else:
+                        norm_engine = raw_engine
+                    # Filter by selected engine tab - show only matching engines
+                    if filter_engine and norm_engine != filter_engine:
+                        continue
+                    display_engine = 'MySQL' if norm_engine == 'mysql' else 'MariaDB' if norm_engine == 'maria' else 'PostgreSQL' if norm_engine == 'postgres' else 'MSSQL' if norm_engine == 'mssql' else 'Aurora'
+                    databases.append({
+                        'id': db['DBInstanceIdentifier'],
+                        'name': db.get('DBName', db['DBInstanceIdentifier']),
+                        'engine': display_engine,
+                        'host': host,
+                        'port': port,
+                        'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
+                    })
+                # Sort by engine, then id
+                databases.sort(key=lambda x: (x['engine'], x['id']))
                 return jsonify({'databases': databases})
             except Exception as e:
                 print(f"RDS fetch failed: {e}")
@@ -3908,23 +3929,18 @@ def get_databases():
                     'error': str(e),
                     'error_type': 'rds_fetch_failed',
                     'instructions': [
-                        'Ensure AWS credentials are configured on the server (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or IAM role).',
-                        'The IAM user/role must have rds:DescribeDBInstances permission.',
-                        'Verify the RDS instances exist in the selected region (default: ap-south-1).',
-                        'If using cross-account: ensure the backend can assume a role in the target account.'
+                        'Ensure the app instance role has rds:DescribeDBInstances permission.',
+                        'Verify RDS instances exist in the selected region (default: ap-south-1).',
+                        'Check AWS credentials (instance role or env vars) are valid.'
                     ]
                 })
-        
-        # No account selected or account not in config
-        err_msg = 'Please select an AWS account.' if not account_id else 'Account not configured or invalid.'
+
+        # No account selected
         return jsonify({
             'databases': [],
-            'error': err_msg,
+            'error': 'Please select an AWS account.',
             'error_type': 'account_invalid',
-            'instructions': [
-                'Select a valid AWS account from the dropdown.',
-                'If accounts are empty, ensure AWS Organizations/SSO is configured.'
-            ]
+            'instructions': ['Select an account from the dropdown to list RDS instances.']
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500

@@ -173,15 +173,19 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2 && useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            const result = await fetchDatabasesForAccount(accountId);
+            content.innerHTML = `<div class="db-step-loading"><i class="fas fa-spinner fa-spin"></i> Fetching RDS instances…</div>`;
+            const result = await fetchDatabasesForAccount(accountId, selectedEngine?.engine);
             const instances = result.databases || [];
             if (result.error) {
                 showDbErrorPopup(result.error, result.instructions);
             } else {
                 dbLastFetchError = null;
             }
+            const emptyMsg = result.error
+                ? 'Could not list RDS instances. Check permissions or enter host manually.'
+                : 'No RDS instances found in this account.';
             content.innerHTML = `
-                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span></div>` : ''}
+                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
                 <div class="db-step-field">
                     <label>Select RDS Instance</label>
                     <div id="dbStepInstanceList" class="db-step-instance-list">
@@ -198,14 +202,17 @@ async function renderDbStepContent() {
                                     </div>
                                 </div>
                             </label>`;
-                        }).join('') : '<p class="db-step-empty">No instances found. Enter host manually below.</p>'}
+                        }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
+                        <div class="db-step-manual-toggle">
+                            <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Or enter host manually</button>
+                        </div>
+                        <div id="dbManualEntry" class="db-manual-entry" style="display:none">
+                            <div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
+                            <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
+                        </div>`}
                     </div>
                 </div>
             `;
-            if (!instances.length) {
-                content.innerHTML += `<div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
-                    <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>`;
-            }
         } else if (step === 3 && useChatFlow) {
             const inst = dbRequestDraft._selectedInstance || {};
             const defaultDb = inst.name || 'default';
@@ -218,15 +225,19 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2 && !useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            const result = await fetchDatabasesForAccount(accountId);
+            content.innerHTML = `<div class="db-step-loading"><i class="fas fa-spinner fa-spin"></i> Fetching databases…</div>`;
+            const result = await fetchDatabasesForAccount(accountId, selectedEngine?.engine);
             const dbs = result.databases || [];
             if (result.error) {
                 showDbErrorPopup(result.error, result.instructions);
             } else {
                 dbLastFetchError = null;
             }
+            const emptyMsg = result.error
+                ? 'Could not list databases. Check permissions or enter host manually.'
+                : 'No databases found in this account.';
             content.innerHTML = `
-                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list databases — Click to see instructions</span></div>` : ''}
+                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list databases — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
                 <div class="db-step-field">
                     <label>Select Database(s)</label>
                     <div id="dbStepDbList" class="db-step-db-list">
@@ -236,14 +247,17 @@ async function renderDbStepContent() {
                                 <input type="checkbox" value="${db.id}" data-name="${db.name}" data-host="${db.host}" data-port="${db.port || 3306}" data-engine="${eng}" onchange="toggleDbStepSelection()">
                                 <span>${db.name}</span> <small>${db.engine} @ ${db.host}</small>
                             </label>`;
-                        }).join('') : '<p class="db-step-empty">No databases found. Enter host manually below.</p>'}
+                        }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
+                        <div class="db-step-manual-toggle">
+                            <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Or enter host manually</button>
+                        </div>
+                        <div id="dbManualEntry" class="db-manual-entry" style="display:none">
+                            <div class="db-step-field"><label>Database Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
+                            <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
+                        </div>`}
                     </div>
                 </div>
             `;
-            if (!dbs.length) {
-                content.innerHTML += `<div class="db-step-field"><label>Database Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
-                    <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>`;
-            }
         }
     } else if (provider === 'managed') {
         if (step === 1) {
@@ -319,10 +333,12 @@ async function fetchAccounts() {
     }
 }
 
-async function fetchDatabasesForAccount(accountId) {
+async function fetchDatabasesForAccount(accountId, engine) {
     if (!accountId) return { databases: [], error: null, instructions: [] };
     try {
-        const r = await fetch(`${DB_API_BASE}/api/databases?account_id=${accountId}`);
+        let url = `${DB_API_BASE}/api/databases?account_id=${encodeURIComponent(accountId)}`;
+        if (engine) url += `&engine=${encodeURIComponent(engine)}`;
+        const r = await fetch(url);
         const data = await r.json();
         return {
             databases: data.databases || [],
@@ -362,6 +378,16 @@ function reopenDbErrorPopup() {
     if (dbLastFetchError) {
         showDbErrorPopup(dbLastFetchError.error, dbLastFetchError.instructions);
     }
+}
+
+async function retryDbFetch() {
+    if (!dbStepState || !selectedEngine) return;
+    await renderDbStepContent();
+}
+
+function toggleDbManualEntry() {
+    const el = document.getElementById('dbManualEntry');
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
 async function fetchGcpProjects() {
@@ -451,7 +477,7 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && useChatFlow) {
-            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
             const instances = result.databases || [];
             const selectedRadio = document.querySelector('#dbStepInstanceList input[name="dbInstance"]:checked');
             if (instances.length) {
@@ -498,7 +524,7 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && !useChatFlow) {
-            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
             const dbs = result.databases || [];
             if (dbs.length && selectedDatabases.length === 0) {
                 alert('Please select at least one database.');
