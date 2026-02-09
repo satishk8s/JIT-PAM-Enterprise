@@ -120,8 +120,6 @@ This configures nginx to serve from the Git frontend with:
 
 **Verify:** `curl -sI http://YOUR-IP/app.js | grep -E "Content-Encoding|Cache-Control"` → expect `gzip` and `public`
 
-**Option B:** Keep S3 for frontend – push via `./push-to-s3.sh`, use `setup-ec2.sh` (serves from `/root/frontend`).
-
 ---
 
 ## 7. Future: CI/CD

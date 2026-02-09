@@ -3,31 +3,20 @@
 # Fixes 502 Bad Gateway by ensuring services run on ports 5000 and 5002
 
 set -e
-REGION="ap-south-1"
-BUCKET="scptestbucketsatish"
-PREFIX="npam-backend"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="${BACKEND_DIR:-$SCRIPT_DIR}"
 
 echo "=== NPAM Backend Startup ==="
 
-# 1. Pull from S3 only if app.py missing (e.g. fresh EC2). Git clone has app.py.
+# 1. Ensure app.py exists (must run from git clone)
 if [ ! -f "$BACKEND_DIR/app.py" ]; then
-  if command -v aws &>/dev/null; then
-    echo "Pulling backend from S3..."
-    mkdir -p /root/backend
-    aws s3 sync "s3://$BUCKET/$PREFIX/" /root/backend/ --region "$REGION" --delete \
-      --exclude "venv/*" --exclude ".venv/*" --exclude "__pycache__/*"
-    BACKEND_DIR="/root/backend"
-  else
-    echo "ERROR: app.py not found. Clone from git or run from repo directory."
-    exit 1
-  fi
+  echo "ERROR: app.py not found. Run from repo: cd /root/JIT-PAM-Enterprise/backend && ./run-backend-on-ec2.sh"
+  exit 1
 fi
 
 cd "$BACKEND_DIR"
 
-# 2. Python venv (recreate if broken - e.g. deleted by "aws s3 sync --delete")
+# 2. Python venv
 if [ ! -f "venv/bin/activate" ]; then
   echo "Creating Python venv..."
   rm -rf venv 2>/dev/null || true
@@ -76,7 +65,7 @@ if curl -s http://127.0.0.1:5000/api/health >/dev/null 2>&1; then
   echo "   Proxy:  http://127.0.0.1:5002"
   echo ""
   echo "Keep this terminal open, or run in screen:"
-  echo "   cd /root/backend && screen -S npam ./run-backend-on-ec2.sh"
+  echo "   cd /root/JIT-PAM-Enterprise/backend && screen -S npam ./run-backend-on-ec2.sh"
   wait
 else
   echo "❌ Flask did not start. Check logs above."
