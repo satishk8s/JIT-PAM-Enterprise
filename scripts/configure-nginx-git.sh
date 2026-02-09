@@ -62,7 +62,7 @@ server {
     listen [::]:80 default_server;
     server_name _;
     root $WEB_ROOT;
-    index index-bundled.html index.html;
+    index index.html index-bundled.html;
     charset utf-8;
 
     # Zero-copy file send - bypasses userspace
@@ -88,7 +88,7 @@ server {
 
     # HTML - SPA fallback
     location / {
-        try_files \$uri \$uri/ /index-bundled.html /index.html;
+        try_files \$uri \$uri/ /index.html /index-bundled.html;
         add_header Cache-Control "no-cache";
     }
 

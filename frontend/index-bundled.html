@@ -24,9 +24,12 @@
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="preload" href="bundle.css" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=1" rel="stylesheet">
+    <link href="bundle.css?v=3" rel="stylesheet">
 </head>
 <body class="performance-mode">
+    <script>
+    (function(){ if (localStorage.getItem('isLoggedIn') !== 'true') document.body.classList.add('login-page'); })();
+    </script>
     <!-- Login Page -->
     <div id="loginPage" class="login-container">
         <div class="login-card">
@@ -105,7 +108,7 @@
                         <input type="text" maxlength="1" class="otp-input" id="otp6">
                     </div>
                     <small class="input-hint" style="display: block; margin-top: 8px; color: var(--text-secondary);">Demo: enter or paste 123456</small>
-                    <button type="submit" class="btn-primary">Verify & Continue</button>
+                    <button type="button" class="btn-primary" onclick="verifyOTPAndLogin()">Verify & Continue</button>
                 </form>
                 
                 <div class="login-links">
@@ -3094,14 +3097,13 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=1"></script>
+    <script src="bundle.js?v=3"></script>
     <script>
-        // Initialize unified assistant when requests page loads
+        // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
-            setTimeout(() => {
-                if (typeof initUnifiedAssistant === 'function') {
-                    initUnifiedAssistant();
-                }
+            if (localStorage.getItem('isLoggedIn') !== 'true') return;
+            setTimeout(function() {
+                if (typeof initUnifiedAssistant === 'function') initUnifiedAssistant();
             }, 500);
         });
         

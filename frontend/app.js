@@ -22,6 +22,34 @@ const API_BASE = (typeof window !== 'undefined' && window.API_BASE)
       ? '/api'
       : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
 
+// OTP login - defined at load time so button onclick always works
+function verifyOTPAndLogin() {
+    var o1 = document.getElementById('otp1'), o2 = document.getElementById('otp2'), o3 = document.getElementById('otp3');
+    var o4 = document.getElementById('otp4'), o5 = document.getElementById('otp5'), o6 = document.getElementById('otp6');
+    var otp = (o1 ? o1.value : '') + (o2 ? o2.value : '') + (o3 ? o3.value : '') +
+        (o4 ? o4.value : '') + (o5 ? o5.value : '') + (o6 ? o6.value : '');
+    if (otp.length !== 6) {
+        alert('Please enter all 6 digits. Demo: use 123456');
+        return;
+    }
+    var emailEl = document.getElementById('emailOTP');
+    var email = (sessionStorage.getItem('otp_email') || (emailEl ? emailEl.value : '')).trim();
+    if (!email) {
+        alert('Session expired. Please go back and enter your email again.');
+        return;
+    }
+    sessionStorage.removeItem('otp_email');
+    isAdmin = ADMIN_USERS.includes(email.toLowerCase());
+    currentUser = { email: email, name: email.split('@')[0], isAdmin: isAdmin };
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('userEmail', email);
+    localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
+    localStorage.setItem('isAdmin', isAdmin.toString());
+    localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+    showMainApp();
+}
+if (typeof window !== 'undefined') window.verifyOTPAndLogin = verifyOTPAndLogin;
+
 // Initialize app
 document.addEventListener('DOMContentLoaded', function() {
     // Hide AI assistant on login page (must run first)
@@ -83,42 +111,10 @@ function setupEventListeners() {
         });
     }
     
-    // OTP Verify form
+    // OTP Verify form (button also uses onclick="verifyOTPAndLogin()" directly)
     const otpVerifyForm = document.getElementById('otpVerifyForm');
     if (otpVerifyForm) {
-        otpVerifyForm.addEventListener('submit', function(e) {
-            e.preventDefault();
-            const otp = document.getElementById('otp1').value +
-                       document.getElementById('otp2').value +
-                       document.getElementById('otp3').value +
-                       document.getElementById('otp4').value +
-                       document.getElementById('otp5').value +
-                       document.getElementById('otp6').value;
-            
-            if (otp.length !== 6) {
-                alert('Please enter all 6 digits. Demo: use 123456');
-                return;
-            }
-            // Get email from sessionStorage (set in showOTPVerification) or fallback to input
-            const email = (sessionStorage.getItem('otp_email') || (document.getElementById('emailOTP') && document.getElementById('emailOTP').value) || '').trim();
-            if (!email) {
-                alert('Session expired. Please go back and enter your email again.');
-                return;
-            }
-            sessionStorage.removeItem('otp_email');
-            isAdmin = ADMIN_USERS.includes(email.toLowerCase());
-            currentUser = {
-                email: email,
-                name: email.split('@')[0],
-                isAdmin: isAdmin
-            };
-            localStorage.setItem('isLoggedIn', 'true');
-            localStorage.setItem('userEmail', email);
-            localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
-            localStorage.setItem('isAdmin', isAdmin.toString());
-            localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
-            showMainApp();
-        });
+        otpVerifyForm.addEventListener('submit', function(e) { e.preventDefault(); verifyOTPAndLogin(); });
     }
     
     // MFA form
@@ -154,10 +150,12 @@ function setupEventListeners() {
     setupOTPInputs();
     
     // New request form
-    document.getElementById('newRequestForm').addEventListener('submit', handleNewRequest);
+    var newRequestForm = document.getElementById('newRequestForm');
+    if (newRequestForm) newRequestForm.addEventListener('submit', handleNewRequest);
     
     // Close modal on overlay click
-    document.getElementById('modalOverlay').addEventListener('click', function(e) {
+    var modalOverlay = document.getElementById('modalOverlay');
+    if (modalOverlay) modalOverlay.addEventListener('click', function(e) {
         if (e.target === this) {
             closeModal();
         }
@@ -2709,6 +2707,9 @@ function setupOTPInputs() {
         input.addEventListener('keydown', function(e) {
             if (e.key === 'Backspace' && this.value === '' && index > 0) {
                 otpInputs[index - 1].focus();
+            }
+            if (e.key === 'Enter' && typeof verifyOTPAndLogin === 'function') {
+                verifyOTPAndLogin();
             }
         });
         
