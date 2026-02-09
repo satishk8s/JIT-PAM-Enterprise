@@ -917,7 +917,9 @@ function updateRecentActivity() {
                          request.status === 'denied' ? 'danger' : 'warning';
         const icon = request.status === 'approved' ? 'check' : 
                     request.status === 'denied' ? 'times' : 'clock';
-        
+        const label = request.type === 'database_access' 
+            ? `Database: ${(request.databases && request.databases[0]?.host) || 'DB'}`
+            : `${account ? account.name : 'Unknown Account'} - ${request.permission_set || 'access'}`;
         return `
             <div class="activity-item">
                 <div class="activity-icon ${iconClass}">
@@ -925,7 +927,7 @@ function updateRecentActivity() {
                 </div>
                 <div class="activity-content">
                     <p><strong>Access request ${request.status}</strong></p>
-                    <p>${account ? account.name : 'Unknown Account'} - ${request.permission_set}</p>
+                    <p>${label}</p>
                     <small>${formatDate(request.created_at)}</small>
                 </div>
             </div>
@@ -986,9 +988,10 @@ function filterRequests(filter) {
 function loadRequestsPage() {
     const grid = document.getElementById('requestsGrid');
     
-    let filteredRequests = requests;
+    // Cloud Access: exclude database_access (those show under Databases)
+    let filteredRequests = requests.filter(r => r.type !== 'database_access');
     if (currentFilter !== 'all') {
-        filteredRequests = requests.filter(r => r.status === currentFilter);
+        filteredRequests = filteredRequests.filter(r => r.status === currentFilter);
     }
     
     if (filteredRequests.length === 0) {

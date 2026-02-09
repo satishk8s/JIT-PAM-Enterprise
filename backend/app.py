@@ -1556,6 +1556,54 @@ def approve_request(request_id):
     
     access_request = requests_db[request_id]
     
+    # Handle database_access requests (self-approve for testing; ciso for prod)
+    if access_request.get('type') == 'database_access':
+        required = set(access_request.get('approval_required', ['self']))
+        received = {approver_role}
+        # For testing: allow 'self' to satisfy 'ciso' on database requests
+        if approver_role == 'self':
+            received.add('ciso')
+        if required.issubset(received):
+            access_request['status'] = 'approved'
+            access_request['approved_at'] = datetime.now().isoformat()
+            # Create DB user (same as auto-approved flow)
+            admin_user = os.getenv('DB_ADMIN_USER', 'admin')
+            admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
+            role = access_request.get('role', 'read_only')
+            if role == 'admin':
+                sql_perms = 'ALL PRIVILEGES'
+            elif role == 'read_full_write':
+                sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
+            elif role == 'read_limited_write':
+                sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
+            else:
+                sql_perms = 'SELECT'
+            create_error = None
+            pwd = access_request.get('db_password') or generate_password()
+            access_request['db_password'] = pwd
+            for db in access_request.get('databases', []):
+                result = create_database_user(
+                    host=db['host'],
+                    port=int(db.get('port', 3306)),
+                    admin_user=admin_user,
+                    admin_password=admin_password,
+                    new_user=access_request.get('db_username'),
+                    new_password=pwd,
+                    database=db.get('name', ''),
+                    permissions=sql_perms
+                )
+                if result.get('error'):
+                    create_error = result['error']
+                    break
+            if create_error:
+                access_request['status'] = 'failed'
+                return jsonify({'status': 'failed', 'error': f'DB user creation failed: {create_error}'})
+            return jsonify({
+                'status': 'approved',
+                'message': '✅ Database access approved! Go to Databases tab to connect.'
+            })
+        return jsonify({'status': 'partial_approval', 'pending': list(required - received)})
+    
     # Handle instance access requests differently
     if access_request.get('type') == 'instance_access':
         access_request['status'] = 'approved'

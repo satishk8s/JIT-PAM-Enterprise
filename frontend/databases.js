@@ -617,13 +617,35 @@ async function loadDbRequests() {
                     <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | ${req.justification?.slice(0, 50) || ''}...</p>
                 </div>
                 <div class="db-request-actions">
-                    ${canEdit ? `<button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id}')"><i class="fas fa-edit"></i> Edit Duration</button>` : ''}
+                    ${canEdit ? `
+                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id}')"><i class="fas fa-check"></i> Self-Approve</button>
+                    <button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id}')"><i class="fas fa-edit"></i> Edit Duration</button>
+                    ` : ''}
                 </div>
             </div>`;
         }).join('');
     } catch (e) {
         const list = document.getElementById('dbRequestsList');
         if (list) list.innerHTML = `<div class="db-requests-empty">Error loading requests</div>`;
+    }
+}
+
+async function approveDbRequest(requestId) {
+    if (!confirm('Self-approve this database access request?')) return;
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approver_role: 'self' })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        alert(data.message || '✅ Approved');
+        loadDbRequests();
+        refreshApprovedDatabases();
+        if (typeof loadRequests === 'function') loadRequests();
+    } catch (e) {
+        alert('Failed: ' + e.message);
     }
 }
 

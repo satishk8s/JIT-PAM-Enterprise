@@ -21,7 +21,7 @@ gzip_vary on;
 gzip_min_length 256;
 gzip_proxied any;
 gzip_comp_level 5;
-gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss;
+gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss application/font-woff2 font/woff2 font/woff font/ttf;
 
 server {
     listen 80;
