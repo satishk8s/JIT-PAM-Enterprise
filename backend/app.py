@@ -3933,12 +3933,14 @@ def request_database_access():
         ai_generated = data.get('ai_generated', False)
         role = data.get('role', 'read_only')  # MVP 2: read_only, read_limited_write, read_full_write, admin
         
-        has_delete = 'ALL' in permissions or 'DELETE' in permissions or 'DROP' in permissions or 'TRUNCATE' in permissions or 'DDL' in query_types
+        # Only DROP/TRUNCATE/DDL/ALL require approval; plain DELETE (data) allowed for Limited Write
+        perms = (permissions or []) if isinstance(permissions, list) else [p.strip() for p in str(permissions or '').split(',') if p.strip()]
+        has_destructive = 'ALL' in perms or 'DROP' in perms or 'TRUNCATE' in perms or 'DDL' in (query_types or [])
         
         request_id = str(uuid.uuid4())
         expires_at = datetime.now() + timedelta(hours=duration_hours)
         
-        if has_delete:
+        if has_destructive:
             status = 'pending'
             approval_required = ['ciso']
             approval_message = 'DDL/DELETE/Destructive queries require CISO approval'

@@ -138,8 +138,8 @@
 }
 
 .db-terminal-output {
-    background: #0d1117;
-    color: #7ee787;
+    background: var(--bg-main, #0B1220);
+    color: var(--primary, #38BDF8);
     font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
     padding: 20px 24px;
     min-height: 320px;

@@ -347,12 +347,13 @@
     flex: 1;
     min-height: 200px;
     padding: 16px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 13px;
-    line-height: 1.5;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 14px;
+    line-height: 1.6;
     overflow-y: auto;
-    background: #0d1117;
-    color: #c9d1d9;
+    background: var(--bg-main, #0B1220);
+    color: var(--text-primary, #E5E7EB);
+    border: 1px solid var(--border-subtle, #374151);
 }
 
 .term-query-input-row {

@@ -488,8 +488,10 @@ function showSSHTerminal(instanceId, instanceName, privateIp, username, password
         fontSize: 14,
         fontFamily: 'Menlo, Monaco, "Courier New", monospace',
         theme: {
-            background: '#000000',
-            foreground: '#ffffff'
+            background: '#0B1220',
+            foreground: '#E5E7EB',
+            cursor: '#38BDF8',
+            selection: 'rgba(56, 189, 248, 0.3)'
         }
     });
     

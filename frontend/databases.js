@@ -616,11 +616,11 @@ async function loadDbRequests() {
                     <p><strong>${eng}</strong> • ${db?.host || '-'}:${db?.port || '-'}</p>
                     <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | ${req.justification?.slice(0, 50) || ''}...</p>
                 </div>
-                <div class="db-request-actions">
+                <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
                     ${canEdit ? `
-                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id}')"><i class="fas fa-check"></i> Approve</button>
-                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${req.request_id}')"><i class="fas fa-times"></i> Reject</button>
-                    <button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id}')"><i class="fas fa-edit"></i> Edit Duration</button>
+                    <button class="btn-primary" onclick="approveDbRequest('${req.request_id || ''}')"><i class="fas fa-check"></i> Approve</button>
+                    <button class="btn-danger" onclick="denyDbRequest('${req.request_id || ''}')"><i class="fas fa-times"></i> Reject</button>
+                    <button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id || ''}')"><i class="fas fa-edit"></i> Edit Duration</button>
                     ` : ''}
                 </div>
             </div>`;
