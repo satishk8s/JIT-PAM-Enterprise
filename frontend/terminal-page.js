@@ -145,7 +145,7 @@ function connectTerminalDb(host, port, engine, requestId, dbName) {
     const entry = { id, conn, tabEl: tabBtn, contentEl, outputEl: contentEl.querySelector('.term-query-output'), inputEl: contentEl.querySelector('input') };
     window.terminalTabs.push(entry);
 
-    appendTerminalOutputForTab(id, `✅ Connected to ${engine}\nHost: ${host}:${port}\nDatabase: ${dbName}\n\n`);
+    appendTerminalOutputForTab(id, `[OK] Connected to ${engine}\nHost: ${host}:${port}\nDatabase: ${dbName}\n\n`);
     switchTerminalTab(id);
 }
 
@@ -237,7 +237,7 @@ async function submitTerminalQueryForTab(id) {
     const query = t.inputEl.value.trim();
     if (!query) return;
 
-    appendTerminalOutputForTab(id, `\n🔹 ${query}\n`);
+    appendTerminalOutputForTab(id, `\n> ${query}\n`);
     t.inputEl.value = '';
 
     const userEmail = localStorage.getItem('userEmail') || '';
@@ -254,17 +254,17 @@ async function submitTerminalQueryForTab(id) {
         });
         const data = await res.json();
         if (data.error) {
-            const errMsg = data.error.startsWith('❌') ? data.error : `❌ ${data.error}`;
+            const errMsg = data.error.startsWith('❌') ? data.error.replace(/^❌\s*/, '[ERROR] ') : `[ERROR] ${data.error}`;
             appendTerminalOutputForTab(id, `${errMsg}\n`);
         } else if (data.results) {
             const rows = data.results;
             if (rows.length === 0) appendTerminalOutputForTab(id, '(0 rows)\n');
             else appendTerminalOutputForTab(id, JSON.stringify(rows, null, 2) + '\n');
         } else if (data.affected_rows !== undefined) {
-            appendTerminalOutputForTab(id, `✅ ${data.affected_rows} row(s) affected\n`);
+            appendTerminalOutputForTab(id, `[OK] ${data.affected_rows} row(s) affected\n`);
         }
     } catch (e) {
-        appendTerminalOutputForTab(id, `❌ ${e.message}\n`);
+        appendTerminalOutputForTab(id, `[ERROR] ${e.message}\n`);
     }
 }
 

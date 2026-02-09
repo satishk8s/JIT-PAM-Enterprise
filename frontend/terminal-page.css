@@ -347,7 +347,7 @@
     flex: 1;
     min-height: 200px;
     padding: 16px;
-    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace;
     font-size: 14px;
     line-height: 1.6;
     overflow-y: auto;

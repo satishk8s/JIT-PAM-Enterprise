@@ -140,7 +140,7 @@
 .db-terminal-output {
     background: var(--bg-main, #0B1220);
     color: var(--primary, #38BDF8);
-    font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', monospace;
     padding: 20px 24px;
     min-height: 320px;
     height: 420px;
@@ -777,6 +777,27 @@
 
 .db-request-actions {
     margin-top: 12px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.db-request-actions .btn-primary {
+    background: var(--primary, #38BDF8);
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
+}
+.db-request-actions .btn-danger {
+    background: #dc3545;
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    cursor: pointer;
+    font-weight: 500;
 }
 
 .db-requests-empty {

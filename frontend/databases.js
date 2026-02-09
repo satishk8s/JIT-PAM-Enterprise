@@ -774,7 +774,7 @@ function showDatabaseTerminal(dbName, host, port, engine, requestId) {
         </div>
     `;
     window.dbConn = { dbName, host, port, engine, requestId: requestId || '' };
-    appendOutput(`✅ Connected to ${engine}\nHost: ${host}:${port}\nDatabase: ${dbName}\n\n`);
+    appendOutput(`[OK] Connected to ${engine}\nHost: ${host}:${port}\nDatabase: ${dbName}\n\n`);
 }
 
 function toggleDbTerminalExpand() {
@@ -797,7 +797,7 @@ function appendOutput(text) {
 async function executeQuery() {
     const query = document.getElementById('dbQuery')?.value?.trim();
     if (!query || !window.dbConn) return;
-    appendOutput(`\n🔹 ${query}\n`);
+    appendOutput(`\n> ${query}\n`);
     document.getElementById('dbQuery').value = '';
     const userEmail = localStorage.getItem('userEmail') || '';
     try {
@@ -813,22 +813,22 @@ async function executeQuery() {
         });
         const data = await res.json();
         if (data.error) {
-            const errMsg = data.error.startsWith('❌') ? data.error : `❌ ${data.error}`;
+            const errMsg = data.error.startsWith('❌') ? data.error.replace(/^❌\s*/, '[ERROR] ') : `[ERROR] ${data.error}`;
             appendOutput(`\n${errMsg}\n\n`);
         }
         else if (data.results) appendOutput(formatResults(data.results) + '\n');
-        else appendOutput(`\n✅ ${data.affected_rows || 0} row(s)\n\n`);
+        else appendOutput(`\n[OK] ${data.affected_rows || 0} row(s)\n\n`);
     } catch (e) {
-        appendOutput(`\n❌ ${e.message}\n\n`);
+        appendOutput(`\n[ERROR] ${e.message}\n\n`);
     }
 }
 
 function formatResults(results) {
-    if (!results?.length) return '\n📭 Empty set\n';
+    if (!results?.length) return '\n(Empty set)\n';
     const keys = Object.keys(results[0]);
     let out = '\n' + keys.join(' | ') + '\n' + '-'.repeat(40) + '\n';
     results.forEach(r => out += keys.map(k => r[k]).join(' | ') + '\n');
-    return out + `\n✅ ${results.length} row(s)\n`;
+    return out + `\n[OK] ${results.length} row(s)\n`;
 }
 
 function disconnectDatabase() {
