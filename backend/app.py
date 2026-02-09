@@ -134,9 +134,37 @@ def initialize_aws_config():
         CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
         CONFIG['permission_sets'] = [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}]
 
-# In-memory storage
-requests_db = {}
-approvals_db = {}
+# Persistent storage (survives backend restart)
+REQUESTS_FILE = os.path.join(os.path.dirname(__file__), 'data', 'requests.json')
+
+def _load_requests():
+    global requests_db, approvals_db
+    requests_db = {}
+    approvals_db = {}
+    try:
+        os.makedirs(os.path.dirname(REQUESTS_FILE), exist_ok=True)
+        if os.path.exists(REQUESTS_FILE):
+            with open(REQUESTS_FILE, 'r') as f:
+                data = json.load(f)
+                requests_db = {k: v for k, v in (data.get('requests') or {}).items()}
+                approvals_db = {k: v for k, v in (data.get('approvals') or {}).items()}
+            print(f"Loaded {len(requests_db)} requests from {REQUESTS_FILE}")
+    except Exception as e:
+        print(f"Could not load requests: {e}")
+
+def _save_requests():
+    try:
+        os.makedirs(os.path.dirname(REQUESTS_FILE), exist_ok=True)
+        def _serialize(obj):
+            if hasattr(obj, 'isoformat'):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+        with open(REQUESTS_FILE, 'w') as f:
+            json.dump({'requests': requests_db, 'approvals': approvals_db}, f, indent=0, default=_serialize)
+    except Exception as e:
+        print(f"Could not save requests: {e}")
+
+_load_requests()
 
 def build_resource_arns(selected_resources, account_id, services):
     """Dynamically build resource ARNs from selected resources"""
@@ -1300,6 +1328,7 @@ def request_access():
         access_request['approval_required'] = ['self']
     
     requests_db[request_id] = access_request
+    _save_requests()
     return jsonify({'request_id': request_id, 'status': 'submitted'})
 
 @app.route('/api/requests', methods=['GET'])
@@ -1434,8 +1463,23 @@ def modify_request(request_id):
         del approvals_db[request_id]
     
     access_request['modified_at'] = datetime.now().isoformat()
-    
+    _save_requests()
     return jsonify({'status': 'modified', 'request': access_request})
+
+@app.route('/api/request/<request_id>/deny', methods=['POST'])
+def deny_request(request_id):
+    """Deny a pending request (works for cloud, database, instance)"""
+    if request_id not in requests_db:
+        return jsonify({'error': 'Request not found'}), 404
+    access_request = requests_db[request_id]
+    if access_request.get('status') != 'pending':
+        return jsonify({'error': 'Can only deny pending requests'}), 400
+    data = request.get_json(silent=True) or {}
+    access_request['status'] = 'denied'
+    access_request['denied_at'] = datetime.now().isoformat()
+    access_request['denial_reason'] = data.get('reason', 'Denied by approver')
+    _save_requests()
+    return jsonify({'status': 'denied', 'message': 'Request denied'})
 
 @app.route('/api/request/<request_id>/delete', methods=['DELETE'])
 def delete_request(request_id):
@@ -1447,11 +1491,9 @@ def delete_request(request_id):
     
     # Delete from database
     del requests_db[request_id]
-    
-    # Also remove approvals if they exist
     if request_id in approvals_db:
         del approvals_db[request_id]
-    
+    _save_requests()
     return jsonify({
         'status': 'deleted',
         'message': f'✅ Request {request_id[:8]}... deleted successfully',
@@ -1598,6 +1640,7 @@ def approve_request(request_id):
             if create_error:
                 access_request['status'] = 'failed'
                 return jsonify({'status': 'failed', 'error': f'DB user creation failed: {create_error}'})
+            _save_requests()
             return jsonify({
                 'status': 'approved',
                 'message': '✅ Database access approved! Go to Databases tab to connect.'
@@ -1621,6 +1664,7 @@ def approve_request(request_id):
             if result.get('success'):
                 print(f"✅ User {username} created on {instance['id']}")
         
+        _save_requests()
         return jsonify({
             'status': 'approved',
             'message': f"✅ Instance access approved! Go to Terminal tab to connect."
@@ -1667,6 +1711,7 @@ def approve_request(request_id):
         
         ps_name = access_request.get('permission_set_name') or access_request.get('permission_set', '')
         msg = f"✅ Access granted! Permission set '{ps_name}' created and assigned." if ps_name else "✅ Access granted! Login to AWS SSO to see the new access."
+        _save_requests()
         return jsonify({
             'status': 'approved', 
             'access_granted': True,
@@ -1865,7 +1910,7 @@ def request_for_others():
         }
         
         requests_db[request_id] = new_request
-        
+        _save_requests()
         return jsonify({
             'message': 'Request submitted successfully',
             'request_id': request_id,
@@ -2221,7 +2266,7 @@ def request_instance_access():
         }
         
         requests_db[request_id] = access_request
-        
+        _save_requests()
         print(f"📝 Instance access request: {request_id} - {len(instances)} instances - {status}")
         
         return jsonify({
@@ -3980,7 +4025,7 @@ def request_database_access():
                     print(f"❌ create_database_user failed: {result['error']}")
         
         requests_db[request_id] = db_request
-        
+        _save_requests()
         # MVP 2: Never return password to client
         msg = approval_message
         if create_error and status == 'approved':

@@ -6,7 +6,7 @@ let currentDbAccount = '';
 let dbConversationId = null;
 let selectedEngine = null;
 let dbRequestDraft = null;
-let dbStatusFilter = 'pending';
+let dbStatusFilter = 'all';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 
 // Tree structure: category -> engines
@@ -599,7 +599,7 @@ async function loadDbRequests() {
         const list = document.getElementById('dbRequestsList');
         if (!list) return;
         if (!data.requests || data.requests.length === 0) {
-            list.innerHTML = `<div class="db-requests-empty">No ${dbStatusFilter.replace('_', ' ')} requests</div>`;
+            list.innerHTML = `<div class="db-requests-empty">No ${dbStatusFilter === 'all' ? '' : dbStatusFilter.replace('_', ' ') + ' '}database requests</div>`;
             return;
         }
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin' })[r] || r;
@@ -618,7 +618,8 @@ async function loadDbRequests() {
                 </div>
                 <div class="db-request-actions">
                     ${canEdit ? `
-                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id}')"><i class="fas fa-check"></i> Self-Approve</button>
+                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id}')"><i class="fas fa-check"></i> Approve</button>
+                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${req.request_id}')"><i class="fas fa-times"></i> Reject</button>
                     <button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id}')"><i class="fas fa-edit"></i> Edit Duration</button>
                     ` : ''}
                 </div>
@@ -630,8 +631,30 @@ async function loadDbRequests() {
     }
 }
 
+async function denyDbRequest(requestId) {
+    const reason = prompt('Enter reason for rejection (required):');
+    if (!reason || reason.length < 3) {
+        alert('Please enter a reason (at least 3 characters).');
+        return;
+    }
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/request/${requestId}/deny`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: reason })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        alert('Request rejected');
+        loadDbRequests();
+        if (typeof loadRequests === 'function') loadRequests();
+    } catch (e) {
+        alert('Failed: ' + e.message);
+    }
+}
+
 async function approveDbRequest(requestId) {
-    if (!confirm('Self-approve this database access request?')) return;
+    if (!confirm('Approve this database access request?')) return;
     try {
         const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
             method: 'POST',

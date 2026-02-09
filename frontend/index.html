@@ -34,9 +34,9 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=2" rel="stylesheet">
+    <link href="databases.css?v=3" rel="stylesheet">
     <link href="terminal-page.css?v=2" rel="stylesheet">
-    <link href="performance.css?v=2" rel="stylesheet">
+    <link href="performance.css?v=3" rel="stylesheet">
 </head>
 <body>
     <!-- Login Page -->
@@ -465,7 +465,8 @@
                     <div class="requests-category-card">
                         <h3 class="requests-category-title"><i class="fas fa-database"></i> Databases</h3>
                         <div class="requests-status-buttons">
-                            <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="databases" data-status="pending" onclick="filterRequestsByCategory('databases', 'pending')"><i class="fas fa-clock"></i> Pending</button>
+                            <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="databases" data-status="all" onclick="filterRequestsByCategory('databases', 'all')"><i class="fas fa-list"></i> All</button>
+                            <button class="requests-status-btn requests-status-pending" data-category="databases" data-status="pending" onclick="filterRequestsByCategory('databases', 'pending')"><i class="fas fa-clock"></i> Pending</button>
                             <button class="requests-status-btn requests-status-inprogress" data-category="databases" data-status="in_progress" onclick="filterRequestsByCategory('databases', 'in_progress')"><i class="fas fa-spinner"></i> In Progress</button>
                             <button class="requests-status-btn requests-status-completed" data-category="databases" data-status="completed" onclick="filterRequestsByCategory('databases', 'completed')"><i class="fas fa-check-circle"></i> Completed</button>
                             <button class="requests-status-btn requests-status-rejected" data-category="databases" data-status="rejected" onclick="filterRequestsByCategory('databases', 'rejected')"><i class="fas fa-times-circle"></i> Rejected</button>

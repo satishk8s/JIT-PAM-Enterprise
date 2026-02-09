@@ -7,9 +7,16 @@ html {
     text-rendering: optimizeLegibility;
 }
 
+/* Sharper images (logos, etc) */
+img {
+    image-rendering: -webkit-optimize-contrast;
+}
+
 /* GPU layer for main scroll container - smoother scrolling */
 .page-content,
-.app-main {
+.app-main,
+.requests-category-card,
+.jit-requests-grid {
     contain: paint;
     transform: translateZ(0);
 }
@@ -30,5 +37,13 @@ input, textarea, select {
 [data-theme="dark"] .kpi-card,
 [data-theme="dark"] .db-section.card {
     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+/* Reduce animation cost */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
 }
 

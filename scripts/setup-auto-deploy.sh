@@ -41,7 +41,13 @@ else
     exit 1
 fi
 
-# 2. Ensure backend script executable + install git post-merge hook
+# 2. Configure nginx for fast UI (gzip, cache) - REQUIRED for resolution/performance
+if [ -f "$REPO_DIR/scripts/configure-nginx-git.sh" ]; then
+    chmod +x "$REPO_DIR/scripts/configure-nginx-git.sh"
+    "$REPO_DIR/scripts/configure-nginx-git.sh" 2>/dev/null || echo "⚠️  Run manually: ./scripts/configure-nginx-git.sh"
+fi
+
+# 3. Ensure backend script executable + install git post-merge hook
 HOOK_SRC="$REPO_DIR/scripts/post-merge"
 HOOK_DST="$REPO_DIR/.git/hooks/post-merge"
 if [ -d "$REPO_DIR/.git" ] && [ -f "$HOOK_SRC" ]; then
@@ -52,7 +58,7 @@ else
     echo "⚠️  No .git dir - run 'git clone' first, then re-run this script"
 fi
 
-# 3. Start (or restart) the service
+# 4. Start (or restart) the service
 systemctl restart npam-backend 2>/dev/null || systemctl start npam-backend
 echo "✅ Backend service started"
 echo ""

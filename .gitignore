@@ -107,6 +107,9 @@ frontend/*.md
 !README.md
 !backend/README.md
 
+# Backend runtime data
+backend/data/
+
 # Root-level non-app files (logos, docs at repo root)
 /*.png
 /*.jpg
