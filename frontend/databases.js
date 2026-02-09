@@ -812,7 +812,10 @@ async function executeQuery() {
             })
         });
         const data = await res.json();
-        if (data.error) appendOutput(`\n❌ ${data.error}\n\n`);
+        if (data.error) {
+            const errMsg = data.error.startsWith('❌') ? data.error : `❌ ${data.error}`;
+            appendOutput(`\n${errMsg}\n\n`);
+        }
         else if (data.results) appendOutput(formatResults(data.results) + '\n');
         else appendOutput(`\n✅ ${data.affected_rows || 0} row(s)\n\n`);
     } catch (e) {

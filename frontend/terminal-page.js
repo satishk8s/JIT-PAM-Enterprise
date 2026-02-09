@@ -254,7 +254,8 @@ async function submitTerminalQueryForTab(id) {
         });
         const data = await res.json();
         if (data.error) {
-            appendTerminalOutputForTab(id, `❌ ${data.error}\n`);
+            const errMsg = data.error.startsWith('❌') ? data.error : `❌ ${data.error}`;
+            appendTerminalOutputForTab(id, `${errMsg}\n`);
         } else if (data.results) {
             const rows = data.results;
             if (rows.length === 0) appendTerminalOutputForTab(id, '(0 rows)\n');
