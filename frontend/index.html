@@ -40,7 +40,7 @@
     <link href="vendor-icons.css" rel="stylesheet">
     <link href="databases.css?v=4" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
-    <link href="performance.css?v=4" rel="stylesheet">
+    <link href="performance.css?v=5" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <!-- Login Page -->
@@ -111,7 +111,7 @@
                     <p>Enter the 6-digit code sent to <strong id="otpEmail"></strong></p>
                 </div>
                 
-                <form id="otpVerifyForm" class="login-form">
+                <form id="otpVerifyForm" class="login-form" onsubmit="return false;">
                     <div class="otp-inputs">
                         <input type="text" maxlength="1" class="otp-input" id="otp1">
                         <input type="text" maxlength="1" class="otp-input" id="otp2">

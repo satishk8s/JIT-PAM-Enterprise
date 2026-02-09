@@ -95,22 +95,29 @@ function setupEventListeners() {
                        document.getElementById('otp5').value +
                        document.getElementById('otp6').value;
             
-            if (otp.length === 6) {
-                // Simulate successful login
-                const email = document.getElementById('emailOTP').value;
-                isAdmin = ADMIN_USERS.includes(email.toLowerCase());
-                currentUser = {
-                    email: email,
-                    name: email.split('@')[0],
-                    isAdmin: isAdmin
-                };
-        localStorage.setItem('isLoggedIn', 'true');
-        localStorage.setItem('userEmail', email);
-        localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
-        localStorage.setItem('isAdmin', isAdmin.toString());
-        localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
-                showMainApp();
+            if (otp.length !== 6) {
+                alert('Please enter all 6 digits. Demo: use 123456');
+                return;
             }
+            // Get email from sessionStorage (set in showOTPVerification) or fallback to input
+            const email = (sessionStorage.getItem('otp_email') || (document.getElementById('emailOTP') && document.getElementById('emailOTP').value) || '').trim();
+            if (!email) {
+                alert('Session expired. Please go back and enter your email again.');
+                return;
+            }
+            sessionStorage.removeItem('otp_email');
+            isAdmin = ADMIN_USERS.includes(email.toLowerCase());
+            currentUser = {
+                email: email,
+                name: email.split('@')[0],
+                isAdmin: isAdmin
+            };
+            localStorage.setItem('isLoggedIn', 'true');
+            localStorage.setItem('userEmail', email);
+            localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
+            localStorage.setItem('isAdmin', isAdmin.toString());
+            localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+            showMainApp();
         });
     }
     
@@ -214,6 +221,7 @@ function quickLoginAsUser(email) {
 
 // Login Flow Functions
 function showDefaultLogin() {
+    sessionStorage.removeItem('otp_email');
     document.getElementById('emailOTPView').style.display = 'block';
     document.getElementById('passwordLoginView').style.display = 'none';
     document.getElementById('otpVerifyView').style.display = 'none';
@@ -242,7 +250,8 @@ function handleEmailOTPContinue() {
 }
 
 function showOTPVerification() {
-    const email = document.getElementById('emailOTP').value;
+    const email = document.getElementById('emailOTP').value.trim();
+    sessionStorage.setItem('otp_email', email); // Store so we have it when verifying (hidden input can be unreliable)
     const otpEmailEl = document.getElementById('otpEmail');
     if (otpEmailEl) otpEmailEl.textContent = email;
     document.getElementById('emailOTPView').style.display = 'none';
