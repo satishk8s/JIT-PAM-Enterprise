@@ -989,6 +989,7 @@ function loadRequestsPage() {
     const grid = document.getElementById('requestsGrid');
     
     // Cloud Access: exclude database_access (those show under Databases)
+    // Cloud Access only: exclude database_access (they show under Databases section)
     let filteredRequests = requests.filter(r => r.type !== 'database_access');
     if (currentFilter !== 'all') {
         filteredRequests = filteredRequests.filter(r => r.status === currentFilter);
@@ -1180,8 +1181,10 @@ function approveRequest(requestId) {
         if (result.error) {
             alert('Error: ' + result.error);
         } else {
-            alert(`✅ ${result.message}`);
+            alert(result.message != null ? `✅ ${result.message}` : '✅ Approved');
             loadRequests();
+            if (typeof loadRequestsPage === 'function') loadRequestsPage();
+            if (typeof loadDbRequests === 'function') loadDbRequests();
             updateDashboard();
         }
     })

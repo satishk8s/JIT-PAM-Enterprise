@@ -1602,7 +1602,7 @@ def approve_request(request_id):
                 'status': 'approved',
                 'message': '✅ Database access approved! Go to Databases tab to connect.'
             })
-        return jsonify({'status': 'partial_approval', 'pending': list(required - received)})
+        return jsonify({'status': 'partial_approval', 'message': 'More approvals needed', 'pending': list(required - received)})
     
     # Handle instance access requests differently
     if access_request.get('type') == 'instance_access':
@@ -1665,10 +1665,12 @@ def approve_request(request_id):
         access_request['status'] = 'approved'
         access_request['granted_at'] = datetime.now().isoformat()
         
+        ps_name = access_request.get('permission_set_name') or access_request.get('permission_set', '')
+        msg = f"✅ Access granted! Permission set '{ps_name}' created and assigned." if ps_name else "✅ Access granted! Login to AWS SSO to see the new access."
         return jsonify({
             'status': 'approved', 
             'access_granted': True,
-            'message': f"✅ Access granted! Permission set '{ps_name}' created and assigned.",
+            'message': msg,
             'permission_set_name': ps_name,
             'sso_start_url': CONFIG['sso_start_url']
         })

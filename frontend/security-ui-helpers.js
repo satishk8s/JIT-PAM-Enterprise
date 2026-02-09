@@ -7,6 +7,7 @@
  * Create a JIT Request Card HTML
  */
 function createJITRequestCard(request, account) {
+    if (request.type === 'database_access') return ''; // Show only in Databases section
     const riskScore = calculateAIRiskScore(request);
     const riskLevel = riskScore >= 70 ? 'HIGH' : riskScore >= 40 ? 'MEDIUM' : 'LOW';
     const riskColor = riskScore >= 70 ? 'danger' : riskScore >= 40 ? 'warning' : 'success';
