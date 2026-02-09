@@ -112,9 +112,13 @@ chmod +x scripts/configure-nginx-git.sh
 ```
 
 This configures nginx to serve from the Git frontend with:
-- **gzip** – smaller payloads, faster load
-- **cache** – static assets cached 1d, reduces latency on scroll
+- **Static from disk** – JS/CSS/images served by Nginx (not proxied to Flask); uses sendfile for zero-copy
+- **gzip** – CSS, JS, fonts compressed 60–80%; faster load
+- **cache** – static assets 7d, `immutable`; fewer requests on scroll
+- **open_file_cache** – cached file descriptors; less disk I/O
 - **keepalive** – lower API latency
+
+**Verify:** `curl -sI http://YOUR-IP/app.js | grep -E "Content-Encoding|Cache-Control"` → expect `gzip` and `public`
 
 **Option B:** Keep S3 for frontend – push via `./push-to-s3.sh`, use `setup-ec2.sh` (serves from `/root/frontend`).
 
