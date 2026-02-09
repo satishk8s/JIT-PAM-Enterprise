@@ -14,7 +14,6 @@
     <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
     <link href="calendar.css" rel="stylesheet">
     <link href="instances.css" rel="stylesheet">
-    <link href="terminal-page.css" rel="stylesheet">
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
     <link href="enterprise-theme.css" rel="stylesheet">
@@ -1409,60 +1408,45 @@
                 </div>
             </div>
 
-            <!-- Terminal Page - DB + VM Connections -->
+            <!-- Terminal Page - My Approved Instances (original working layout) -->
             <div id="terminalPage" class="page">
                 <div class="page-header">
                     <h2><i class="fas fa-terminal"></i> Terminal</h2>
-                    <button class="btn-secondary" onclick="refreshTerminalPage()">
-                        <i class="fas fa-sync-alt"></i> Refresh
+                    <button class="btn-secondary" onclick="refreshApprovedInstances()">
+                        <i class="fas fa-sync"></i> Refresh
                     </button>
                 </div>
-                <div class="terminal-page-layout">
-                    <aside class="terminal-sidebar">
-                        <div class="terminal-category open" id="dbCategory">
-                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('db')">
-                                <i class="fas fa-database"></i>
-                                <span>Databases</span>
-                                <i class="fas fa-chevron-down terminal-cat-chevron" id="dbCatChevron"></i>
-                            </div>
-                            <div class="terminal-category-list" id="dbConnectionsList">
-                                <div class="terminal-empty-state" id="dbEmptyState">
-                                    <i class="fas fa-database"></i>
-                                    <p>No database access</p>
-                                    <small>Request access from Databases page</small>
-                                </div>
-                                <div class="terminal-list-items" id="dbListItems" style="display: none;"></div>
-                            </div>
+                <div class="page-content">
+                    <div id="approvedInstancesList" style="margin-bottom: 20px;">
+                        <h3 style="font-size: 16px; margin-bottom: 15px;">My Approved Instances</h3>
+                        <table class="instances-table">
+                            <thead>
+                                <tr>
+                                    <th>Instance ID</th>
+                                    <th>Name</th>
+                                    <th>Private IP</th>
+                                    <th>Expires At</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="approvedInstancesTableBody">
+                                <tr>
+                                    <td colspan="5" style="text-align: center; padding: 40px; color: #999;">
+                                        No approved instances. Request access from Instances page.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div id="terminalContainer" style="margin-top: 20px; display: none;">
+                        <div style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px;">
+                            <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Session Manager</h4>
+                            <p id="terminalInstanceName" style="color: var(--text-secondary); margin-bottom: 15px;"></p>
+                            <button class="btn-primary" id="openSessionManagerBtn" onclick="openSessionManager()">
+                                <i class="fas fa-external-link-alt"></i> Open in AWS Session Manager
+                            </button>
                         </div>
-                        <div class="terminal-category open" id="vmCategory">
-                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('vm')">
-                                <i class="fas fa-server"></i>
-                                <span>Workloads</span>
-                                <i class="fas fa-chevron-down terminal-cat-chevron" id="vmCatChevron"></i>
-                            </div>
-                            <div class="terminal-category-list" id="vmConnectionsList">
-                                <div class="terminal-empty-state" id="vmEmptyState">
-                                    <i class="fas fa-server"></i>
-                                    <p>No VM access</p>
-                                    <small>Request access from EC2 Instances</small>
-                                </div>
-                                <div class="terminal-list-items" id="vmListItems" style="display: none;"></div>
-                            </div>
-                        </div>
-                    </aside>
-                    <main class="terminal-main">
-                        <div class="terminal-placeholder" id="terminalPlaceholder">
-                            <div class="terminal-placeholder-icon">
-                                <i class="fas fa-terminal"></i>
-                            </div>
-                            <h3>Select a connection</h3>
-                            <p>Choose a database or VM from the left panel and click <strong>Connect</strong>. You can open multiple connections in tabs.</p>
-                        </div>
-                        <div class="terminal-active" id="terminalActive" style="display: none;">
-                            <div class="terminal-tabs-bar" id="terminalTabsBar"></div>
-                            <div class="terminal-tabs-content" id="terminalTabsContent"></div>
-                        </div>
-                    </main>
+                    </div>
                 </div>
             </div>
 
@@ -3305,7 +3289,6 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js"></script>
-    <script src="terminal-page.js"></script>
     <script src="databases.js"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js"></script>

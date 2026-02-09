@@ -443,9 +443,7 @@ function showPage(pageId) {
     } else if (pageId === 'instances') {
         loadInstances();
     } else if (pageId === 'terminal') {
-        if (typeof initTerminalPage === 'function') {
-            initTerminalPage();
-        } else if (typeof refreshApprovedInstances === 'function') {
+        if (typeof refreshApprovedInstances === 'function') {
             refreshApprovedInstances();
         }
     } else if (pageId === 's3') {
