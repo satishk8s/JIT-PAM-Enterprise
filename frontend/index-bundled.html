@@ -1009,14 +1009,19 @@
                                     <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
                                 </div>
                                 <div id="dbAiChat" class="db-ai-chat"></div>
+                                <div id="dbAiThinking" class="db-ai-thinking" style="display: none;">
+                                    <div class="db-ai-thinking-dots"><span></span><span></span><span></span></div>
+                                    <span>NPAMX is thinking...</span>
+                                </div>
+                                <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
-                                    <input type="text" id="dbAiInput" placeholder="Type your response or ask a question..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
+                                    <input type="text" id="dbAiInput" placeholder="Type your message or describe custom permissions..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
                                     <button class="btn-primary" onclick="sendDbAiMessage()"><i class="fas fa-paper-plane"></i></button>
                                 </div>
                                 <div id="dbAiRequestSummary" class="db-ai-summary" style="display: none;"></div>
                                 <div id="dbAiActions" class="db-ai-actions" style="display: none;">
                                     <button class="btn-secondary" onclick="editDbRequestDuration()"><i class="fas fa-edit"></i> Edit Duration</button>
-                                    <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-paper-plane"></i> Submit for Approval</button>
+                                    <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-check-circle"></i> Submit for Approval</button>
                                 </div>
                             </div>
                         <!-- Approved + Query Terminal -->
@@ -1288,7 +1293,7 @@
                         <div class="terminal-category open" id="dbCategory">
                             <div class="terminal-category-header open" onclick="toggleTerminalCategory('db')">
                                 <i class="fas fa-database"></i>
-                                <span>DB Connections</span>
+                                <span>Databases</span>
                                 <i class="fas fa-chevron-down terminal-cat-chevron" id="dbCatChevron"></i>
                             </div>
                             <div class="terminal-category-list" id="dbConnectionsList">
@@ -1303,7 +1308,7 @@
                         <div class="terminal-category open" id="vmCategory">
                             <div class="terminal-category-header open" onclick="toggleTerminalCategory('vm')">
                                 <i class="fas fa-server"></i>
-                                <span>VM Connections</span>
+                                <span>Workloads</span>
                                 <i class="fas fa-chevron-down terminal-cat-chevron" id="vmCatChevron"></i>
                             </div>
                             <div class="terminal-category-list" id="vmConnectionsList">

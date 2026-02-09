@@ -589,6 +589,66 @@
     margin: 0;
 }
 
+.db-step-hint {
+    display: block;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 6px;
+}
+
+.db-step-instance-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.db-instance-card {
+    display: block;
+    cursor: pointer;
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px 14px;
+    transition: all 0.2s;
+}
+
+.db-instance-card:hover {
+    border-color: var(--primary-color);
+    background: rgba(56, 189, 248, 0.06);
+}
+
+.db-instance-card:has(input:checked) {
+    border-color: var(--primary-color);
+    background: rgba(56, 189, 248, 0.1);
+}
+
+.db-instance-card input {
+    display: none;
+}
+
+.db-instance-card-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.db-instance-card-inner i {
+    font-size: 20px;
+    color: var(--primary-color);
+}
+
+.db-instance-card-inner strong {
+    display: block;
+    font-size: 14px;
+}
+
+.db-instance-card-inner small {
+    display: block;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
 .db-step-actions {
     display: flex;
     justify-content: flex-end;
@@ -641,27 +701,143 @@
 .db-ai-chat {
     height: 280px;
     overflow-y: auto;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
     padding: 12px;
     background: var(--bg-secondary);
-    border-radius: 8px;
+    border-radius: 10px;
+}
+
+.db-ai-thinking {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    background: rgba(56, 189, 248, 0.08);
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.db-ai-thinking-dots {
+    display: flex;
+    gap: 4px;
+}
+
+.db-ai-thinking-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    animation: db-thinking-bounce 1.4s ease-in-out infinite both;
+}
+
+.db-ai-thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+.db-ai-thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes db-thinking-bounce {
+    0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
+    40% { transform: scale(1); opacity: 1; }
+}
+
+.db-ai-quick-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.db-ai-prompt-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid var(--primary-color);
+    border-radius: 10px;
+    color: var(--primary-color);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.db-ai-prompt-btn:hover {
+    background: rgba(56, 189, 248, 0.2);
+    transform: translateY(-1px);
+}
+
+.db-ai-prompt-btn i {
+    font-size: 16px;
+}
+
+.db-ai-prompt-custom {
+    background: rgba(139, 92, 246, 0.12);
+    border-color: #8B5CF6;
+    color: #8B5CF6;
+}
+
+.db-ai-prompt-custom:hover {
+    background: rgba(139, 92, 246, 0.2);
 }
 
 .db-ai-msg {
     margin-bottom: 12px;
     padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 14px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.db-ai-msg-avatar {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
     border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     font-size: 14px;
 }
 
+.db-ai-msg-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.db-ai-msg-content p {
+    margin: 0 0 6px 0;
+}
+
+.db-ai-msg-content p:last-child {
+    margin-bottom: 0;
+}
+
 .db-ai-user {
-    background: rgba(56, 189, 248, 0.2);
+    background: rgba(56, 189, 248, 0.15);
     margin-left: 24px;
+}
+
+.db-ai-user .db-ai-msg-avatar {
+    background: rgba(56, 189, 248, 0.3);
+    color: var(--primary-color);
 }
 
 .db-ai-bot {
     background: var(--bg-primary);
     border-left: 3px solid var(--primary-color);
+}
+
+.db-ai-bot .db-ai-msg-avatar {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.db-ai-welcome .db-ai-msg-avatar {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
 }
 
 .db-ai-error {

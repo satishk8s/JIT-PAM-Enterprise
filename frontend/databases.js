@@ -9,6 +9,9 @@ let dbRequestDraft = null;
 let dbStatusFilter = 'all';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 
+// AWS engines that use Account -> Instance -> DB name -> Chat flow (RDS, Redshift, DocumentDB)
+const AWS_CHAT_FLOW_ENGINES = ['mysql', 'postgres', 'aurora', 'maria', 'mssql', 'documentdb', 'redshift'];
+
 // Tree structure: category -> engines
 const DB_TREE = [
     {
@@ -76,8 +79,8 @@ function renderDbTree() {
     let html = '';
     DB_TREE.forEach((cat, i) => {
         const catId = `db-cat-${cat.id}`;
-        const openClass = i < 2 ? ' db-tree-open' : '';  // RDS and Managed open by default
-        const chevronOpen = i < 2 ? ' db-tree-chevron-open' : '';
+        const openClass = '';  // All collapsed by default - user clicks to expand
+        const chevronOpen = '';
         html += `<div class="db-tree-category">
             <div class="db-tree-node db-tree-parent" onclick="toggleDbTreeCategory('${catId}')">
                 <i class="fas fa-chevron-right db-tree-chevron${chevronOpen}"></i>
@@ -156,6 +159,7 @@ async function renderDbStepContent() {
     const { step, provider } = dbStepState;
 
     if (provider === 'aws') {
+        const useChatFlow = AWS_CHAT_FLOW_ENGINES.includes((selectedEngine.engine || '').toLowerCase());
         if (step === 1) {
             const accounts = await fetchAccounts();
             content.innerHTML = `
@@ -167,7 +171,45 @@ async function renderDbStepContent() {
                     </select>
                 </div>
             `;
-        } else if (step === 2) {
+        } else if (step === 2 && useChatFlow) {
+            const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
+            const instances = await fetchDatabasesForAccount(accountId);
+            content.innerHTML = `
+                <div class="db-step-field">
+                    <label>Select RDS Instance</label>
+                    <div id="dbStepInstanceList" class="db-step-instance-list">
+                        ${instances.length ? instances.map(inst => {
+                            const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
+                            const defaultDb = inst.name || 'default';
+                            return `<label class="db-instance-card">
+                                <input type="radio" name="dbInstance" value="${inst.id}" data-name="${defaultDb}" data-host="${inst.host}" data-port="${inst.port || 3306}" data-engine="${eng}" onchange="onDbStepInstanceSelect(this)">
+                                <div class="db-instance-card-inner">
+                                    <i class="fas fa-database"></i>
+                                    <div>
+                                        <strong>${inst.id}</strong>
+                                        <small>${inst.engine} @ ${inst.host}</small>
+                                    </div>
+                                </div>
+                            </label>`;
+                        }).join('') : '<p class="db-step-empty">No instances found. Enter host manually below.</p>'}
+                    </div>
+                </div>
+            `;
+            if (!instances.length) {
+                content.innerHTML += `<div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
+                    <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>`;
+            }
+        } else if (step === 3 && useChatFlow) {
+            const inst = dbRequestDraft._selectedInstance || {};
+            const defaultDb = inst.name || 'default';
+            content.innerHTML = `
+                <div class="db-step-field">
+                    <label>Database Name</label>
+                    <input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input" value="${(defaultDb || '').replace(/"/g, '&quot;')}">
+                    <small class="db-step-hint">Enter the database name inside the instance. Multiple databases: comma-separated.</small>
+                </div>
+            `;
+        } else if (step === 2 && !useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
             const dbs = await fetchDatabasesForAccount(accountId);
             content.innerHTML = `
@@ -319,6 +361,18 @@ function onDbStepAccountChange() {
     dbRequestDraft.account_id = document.getElementById('dbStepAccount')?.value || '';
 }
 
+function onDbStepInstanceSelect(radio) {
+    if (!radio) return;
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft._selectedInstance = {
+        id: radio.value,
+        name: radio.getAttribute('data-name'),
+        host: radio.getAttribute('data-host'),
+        port: radio.getAttribute('data-port') || 3306,
+        engine: radio.getAttribute('data-engine')
+    };
+}
+
 function toggleDbStepSelection() {
     const checkboxes = document.querySelectorAll('#dbStepDbList input:checked');
     selectedDatabases = Array.from(checkboxes).map(cb => ({
@@ -334,6 +388,7 @@ async function dbStepNext() {
     if (!dbStepState || !selectedEngine) return;
     const { step, provider } = dbStepState;
     dbRequestDraft = dbRequestDraft || {};
+    const useChatFlow = provider === 'aws' && AWS_CHAT_FLOW_ENGINES.includes((selectedEngine.engine || '').toLowerCase());
 
     if (provider === 'aws') {
         if (step === 1) {
@@ -347,7 +402,53 @@ async function dbStepNext() {
             renderDbStepContent();
             return;
         }
-        if (step === 2) {
+        if (step === 2 && useChatFlow) {
+            const instances = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const selectedRadio = document.querySelector('#dbStepInstanceList input[name="dbInstance"]:checked');
+            if (instances.length) {
+                if (!selectedRadio) {
+                    alert('Please select an RDS instance.');
+                    return;
+                }
+                dbRequestDraft._selectedInstance = {
+                    id: selectedRadio.value,
+                    name: selectedRadio.getAttribute('data-name'),
+                    host: selectedRadio.getAttribute('data-host'),
+                    port: selectedRadio.getAttribute('data-port') || 3306,
+                    engine: selectedRadio.getAttribute('data-engine')
+                };
+            } else {
+                const host = document.getElementById('dbStepHost')?.value?.trim();
+                const dbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
+                if (!host) {
+                    alert('Please enter the instance host.');
+                    return;
+                }
+                dbRequestDraft._selectedInstance = { id: 'manual', name: dbName, host, port: 3306, engine: selectedEngine.engine };
+            }
+            dbStepState.step = 3;
+            renderDbStepContent();
+            return;
+        }
+        if (step === 3 && useChatFlow) {
+            const inst = dbRequestDraft._selectedInstance || {};
+            const dbNameInput = document.getElementById('dbStepDbName')?.value?.trim() || inst.name || 'default';
+            const dbNames = dbNameInput.split(',').map(s => s.trim()).filter(Boolean);
+            selectedDatabases = dbNames.map(name => ({
+                id: inst.id || 'manual',
+                name,
+                host: inst.host,
+                port: parseInt(inst.port, 10) || 3306,
+                engine: inst.engine || selectedEngine.engine
+            }));
+            if (selectedDatabases.length === 0) {
+                alert('Please enter at least one database name.');
+                return;
+            }
+            transitionToDbChatUI();
+            return;
+        }
+        if (step === 2 && !useChatFlow) {
             const dbs = await fetchDatabasesForAccount(dbRequestDraft.account_id);
             if (dbs.length && selectedDatabases.length === 0) {
                 alert('Please select at least one database.');
@@ -414,6 +515,15 @@ async function dbStepNext() {
     initDbAiChat(selectedEngine.label, selectedEngine.engine);
 }
 
+function transitionToDbChatUI() {
+    const stepPanel = document.getElementById('dbStepPanel');
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (stepPanel) stepPanel.classList.add('db-step-hidden');
+    if (aiPanel) aiPanel.classList.remove('db-ai-panel-hidden');
+    document.getElementById('dbAiEngineLabel').textContent = selectedEngine?.label || 'Database';
+    initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
+}
+
 function initDbAiChat(label, engine) {
     const chat = document.getElementById('dbAiChat');
     chat.innerHTML = `<div class="db-ai-msg db-ai-bot">
@@ -429,13 +539,57 @@ function initDbAiChat(label, engine) {
     document.getElementById('dbAiActions').style.display = 'none';
 }
 
+function initDbChatWithPrompts(label, engine) {
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.duration_hours = dbRequestDraft.duration_hours || 2;
+    const chat = document.getElementById('dbAiChat');
+    const quickPrompts = document.getElementById('dbAiQuickPrompts');
+    const dbNames = selectedDatabases?.map(d => d.name).join(', ') || 'database';
+    chat.innerHTML = `
+        <div class="db-ai-msg db-ai-bot db-ai-welcome">
+            <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
+            <div class="db-ai-msg-content">
+                <p><strong>Your request is ready.</strong></p>
+                <p>Access to <strong>${dbNames}</strong> on ${label}.</p>
+                <p>Choose an option below:</p>
+            </div>
+        </div>`;
+    chat.scrollTop = chat.scrollHeight;
+    if (quickPrompts) {
+        quickPrompts.style.display = 'flex';
+        quickPrompts.innerHTML = `
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('I need read-only access (SELECT, EXPLAIN) for querying and analytics.')">
+                <i class="fas fa-eye"></i> Read-only access (SELECT, EXPLAIN)
+            </button>
+            <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
+                <i class="fas fa-comments"></i> Chat with NPAMX for custom permissions
+            </button>`;
+    }
+    document.getElementById('dbAiRequestSummary').style.display = 'none';
+    document.getElementById('dbAiActions').style.display = 'none';
+}
+
+function sendDbAiPrompt(message) {
+    document.getElementById('dbAiInput').value = message;
+    sendDbAiMessage();
+}
+
+function hideDbQuickPrompts() {
+    const el = document.getElementById('dbAiQuickPrompts');
+    if (el) el.style.display = 'none';
+}
+
 async function sendDbAiMessage() {
     const input = document.getElementById('dbAiInput');
     const message = input.value.trim();
     if (!message) return;
+    hideDbQuickPrompts();
     const chat = document.getElementById('dbAiChat');
-    chat.innerHTML += `<div class="db-ai-msg db-ai-user"><p>${escapeHtml(message)}</p></div>`;
+    const thinkingEl = document.getElementById('dbAiThinking');
+    chat.innerHTML += `<div class="db-ai-msg db-ai-user"><div class="db-ai-msg-avatar"><i class="fas fa-user"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(message)}</p></div></div>`;
     input.value = '';
+    chat.scrollTop = chat.scrollHeight;
+    if (thinkingEl) thinkingEl.style.display = 'flex';
     chat.scrollTop = chat.scrollHeight;
 
     try {
@@ -453,6 +607,7 @@ async function sendDbAiMessage() {
         try {
             data = JSON.parse(text);
         } catch (parseErr) {
+            if (thinkingEl) thinkingEl.style.display = 'none';
             if (!response.ok || text.trim().startsWith('<')) {
                 chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>Server returned an error (${response.status}). Ensure the backend is running and reachable.</p><small style="opacity:0.8">API: ${escapeHtml((typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '') + '/api/databases/ai-chat')}</small></div>`;
             } else {
@@ -461,24 +616,31 @@ async function sendDbAiMessage() {
             chat.scrollTop = chat.scrollHeight;
             return;
         }
+        if (thinkingEl) thinkingEl.style.display = 'none';
         if (data.conversation_id) dbConversationId = data.conversation_id;
         if (data.error) {
             chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>${escapeHtml(data.error)}</p></div>`;
         } else {
-            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><p>${(data.response || '').replace(/\n/g, '<br>')}</p></div>`;
+            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div><div class="db-ai-msg-content"><p>${(data.response || '').replace(/\n/g, '<br>')}</p></div></div>`;
             if (data.permissions || data.suggested_role) {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.permissions && data.permissions.length) {
-                    dbRequestDraft.permissions = data.permissions.join(',');
+                    dbRequestDraft.permissions = Array.isArray(data.permissions) ? data.permissions.join(',') : data.permissions;
                 }
                 if (data.suggested_role) {
                     dbRequestDraft.role = data.suggested_role;
                 }
             }
+            if (selectedDatabases && selectedDatabases.length && !dbRequestDraft.role && message.toLowerCase().includes('read-only')) {
+                dbRequestDraft.role = 'read_only';
+                dbRequestDraft.permissions = 'SELECT, EXPLAIN';
+            }
         }
         chat.scrollTop = chat.scrollHeight;
         showDbRequestSummaryIfReady();
     } catch (err) {
+        const thinkingEl = document.getElementById('dbAiThinking');
+        if (thinkingEl) thinkingEl.style.display = 'none';
         var apiUrl = (typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '?') + '/api/databases/ai-chat';
         chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>Error: ${escapeHtml(err.message)}</p><small style="opacity:0.8">API: ${escapeHtml(apiUrl)}</small></div>`;
         chat.scrollTop = chat.scrollHeight;
@@ -561,7 +723,7 @@ async function submitDbRequestViaAi() {
         closeDbAiPanel();
         loadDbRequests();
         refreshApprovedDatabases();
-        var msg = `Request submitted! Status: ${data.status}\n\n${data.message}`;
+        var msg = `Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nPlease check the approval status under My Requests tab in Databases.`;
         if (data.creation_error) msg += '\n\n' + data.creation_error;
         alert(msg);
     } catch (e) {
