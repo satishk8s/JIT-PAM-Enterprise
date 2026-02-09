@@ -277,9 +277,13 @@ code, .code, .session-id, .request-id {
     z-index: 100;
     transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
+/* Sidebar fully hidden when collapsed - main content fills 100% width */
 aside.sidebar.sidebar-collapsed {
-    transform: translateX(-100%);
-    box-shadow: none;
+    transform: translateX(-100%) !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    border: none !important;
 }
 
 .sidebar-header {

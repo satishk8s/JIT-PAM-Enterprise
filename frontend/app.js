@@ -312,9 +312,8 @@ function showMainApp() {
     if (loginPage) loginPage.style.display = 'none';
     if (mainApp) mainApp.style.display = 'block';
     
-    // Show AI assistant (was hidden on login page)
-    const copilotBtn = document.getElementById('securityCopilotButton');
-    if (copilotBtn) copilotBtn.style.display = '';
+    var active = document.querySelector('#mainApp .page.active');
+    document.body.setAttribute('data-page', active ? active.id.replace('Page','') : 'dashboard');
     
     // Load admin status from storage
     isAdmin = localStorage.getItem('isAdmin') === 'true';
@@ -428,7 +427,11 @@ function toggleSidebar(e) {
     sidebar.classList.toggle('sidebar-collapsed', collapsed);
     if (main) main.classList.toggle('main-expanded', collapsed);
     if (container) container.classList.toggle('sidebar-collapsed', collapsed);
-    toggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
+    toggle.title = collapsed ? 'Expand sidebar (>>)' : 'Collapse sidebar (<<)';
+    const icon = document.getElementById('sidebarToggleIcon');
+    const label = document.getElementById('sidebarToggleLabel');
+    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+    if (label) label.textContent = collapsed ? '>>' : '<<';
     if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
     localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 }
@@ -446,7 +449,7 @@ document.addEventListener('DOMContentLoaded', function() {
         sidebar.classList.add('sidebar-collapsed');
         main.classList.add('main-expanded');
         if (container) container.classList.add('sidebar-collapsed');
-        if (toggle) toggle.title = 'Show sidebar';
+        if (toggle) toggle.title = 'Expand sidebar (>>)';
         if (expandFab) expandFab.style.display = 'flex';
     }
 });
@@ -480,6 +483,7 @@ function setTheme(theme) {
 
 // Navigation
 function showPage(pageId) {
+    document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
@@ -551,11 +555,11 @@ function showPage(pageId) {
         if (popup) popup.remove();
     }
 
-    // Hide Security Copilot on requests page (unified assistant shown there) and databases page - avoid duplicate
+    // On requests: hide Security Copilot (Unified Assistant only). On databases: hide both.
     const copilotBtn = document.getElementById('securityCopilotButton');
     const copilotPopup = document.getElementById('securityCopilotPopup');
     const hideCopilot = pageId === 'databases' || pageId === 'requests';
-    if (copilotBtn) copilotBtn.style.display = hideCopilot ? 'none' : '';
+    if (copilotBtn) { copilotBtn.style.cssText = hideCopilot ? 'display: none !important' : ''; }
     if (copilotPopup) copilotPopup.classList.remove('show');
 }
 

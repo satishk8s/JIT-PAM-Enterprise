@@ -20,7 +20,6 @@ const DB_TREE = [
             { id: 'rds-mssql', label: 'MSSQL', engine: 'mssql', provider: 'aws' },
             { id: 'rds-postgres', label: 'PostgreSQL', engine: 'postgres', provider: 'aws' },
             { id: 'rds-aurora', label: 'Aurora', engine: 'aurora', provider: 'aws' },
-            { id: 'rds-oracle', label: 'Oracle', engine: 'oracle', provider: 'aws' },
             { id: 'rds-maria', label: 'MariaDB', engine: 'maria', provider: 'aws' },
         ]
     },

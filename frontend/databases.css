@@ -333,14 +333,14 @@
     gap: 16px;
 }
 
-.db-desc-card, .db-tree-card, .db-roles-card {
+.db-info-card, .db-desc-card, .db-tree-card, .db-roles-card {
     background: var(--bg-primary);
     border: 1px solid var(--border-color);
     border-radius: 12px;
     padding: 16px;
 }
 
-.db-desc-card h3, .db-tree-card h3, .db-roles-card h3 {
+.db-info-card h3, .db-desc-card h3, .db-tree-card h3, .db-roles-card h3 {
     font-size: 14px;
     margin-bottom: 10px;
     display: flex;
@@ -348,7 +348,7 @@
     gap: 8px;
 }
 
-.db-desc-card p {
+.db-info-card p, .db-desc-card p {
     font-size: 13px;
     color: var(--text-secondary);
     margin: 0 0 8px 0;

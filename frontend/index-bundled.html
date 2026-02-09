@@ -278,9 +278,9 @@
                     </div>
                     
                 </nav>
-                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Hide sidebar">
-                    <i class="fas fa-chevron-left"></i>
-                    <span class="sidebar-toggle-label">Hide</span>
+                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Collapse sidebar">
+                    <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
+                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">&lt;&lt;</span>
                 </div>
             </aside>
             <div class="sidebar-expand-fab" id="sidebarExpandFab" onclick="toggleSidebar(event)" title="Show sidebar" style="display: none;">
@@ -966,31 +966,20 @@
                     <h2><img src="assets/logos/rds.png" alt="" class="page-title-logo"> Database Access (JIT)</h2>
                 </div>
                 <div class="page-content db-page-layout">
-                    <!-- Left: Tree + Roles -->
+                    <!-- Left: Info + Tree -->
                     <div class="db-left-panel">
-                        <!-- Description -->
-                        <div class="db-desc-card">
-                            <h3><i class="fas fa-info-circle"></i> What We Provide</h3>
-                            <p>JIT (Just-in-Time) database access with time-based credentials. No permanent access — request when needed, access expires automatically.</p>
-                            <ul style="font-size: 13px; color: var(--text-secondary); margin-top: 8px;">
-                                <li><strong>Read-only:</strong> Auto-approve for non-prod; manager approval for prod</li>
-                                <li><strong>Write access:</strong> Chat with NPAMX to get custom roles</li>
-                                <li><strong>Prod DB changes:</strong> CISO + manager approval required</li>
-                                <li><strong>Non-prod changes:</strong> Manager approval; request goes to respective team</li>
-                            </ul>
+                        <!-- Single info box: instructions + predefined role -->
+                        <div class="db-info-card">
+                            <h3><i class="fas fa-info-circle"></i> Database Access (JIT)</h3>
+                            <p>JIT access with time-based credentials. No permanent access — request when needed, access expires automatically.</p>
+                            <p style="margin-top: 10px;"><strong>Predefined role:</strong> <strong>Read-only</strong> (SELECT, EXPLAIN) — Non-prod: auto-approve; Prod: manager approval.</p>
+                            <p style="margin-top: 6px; font-size: 12px; color: var(--text-secondary);">Other roles: Chat with NPAMX for AI-generated roles. Prod changes require CISO + manager approval. Non-prod: manager approval.</p>
+                            <p style="margin-top: 10px; font-size: 12px;"><strong>Select an engine below</strong> to start your request.</p>
                         </div>
                         <!-- Tree -->
                         <div class="db-tree-card">
                             <h3><i class="fas fa-sitemap"></i> Database Engines</h3>
                             <div id="dbTreeContainer" class="db-tree"></div>
-                        </div>
-                        <!-- Roles -->
-                        <div class="db-roles-card">
-                            <h3><i class="fas fa-user-shield"></i> Predefined Roles</h3>
-                            <div class="db-roles-grid">
-                                <div class="db-role-card"><strong>Read-only</strong><span>SELECT, EXPLAIN — Non-prod: auto-approve; Prod: manager approval</span></div>
-                            </div>
-                            <p class="db-roles-note" style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);">Other roles (write, DDL, admin): Chat with NPAMX to get AI-generated roles based on your requirements.</p>
                         </div>
                     </div>
                     <!-- Right: AI Panel + Requests -->
@@ -1022,14 +1011,8 @@
                             </div>
                         </div>
                         <div id="dbAiPlaceholder" class="db-ai-placeholder">
-                            <i class="fas fa-database" style="font-size: 2.5rem; color: var(--primary); margin-bottom: 12px;"></i>
-                            <h4>Select a database engine</h4>
-                            <p>Choose MySQL, PostgreSQL, or another engine from the left panel. NPAMX will guide you through the request flow.</p>
-                            <ul style="text-align: left; max-width: 320px; margin: 12px auto; color: var(--text-secondary); font-size: 13px;">
-                                <li>Read-only access: auto-approve for non-prod; manager approval for prod</li>
-                                <li>Write access: chat with NPAMX to get custom roles</li>
-                                <li>Manual prod changes require CISO + manager approval</li>
-                            </ul>
+                            <i class="fas fa-arrow-left" style="font-size: 2rem; color: var(--primary); margin-bottom: 12px;"></i>
+                            <p>Select a database engine from the left panel to configure your request.</p>
                         </div>
                         <!-- Approved + Query Terminal -->
                         <div class="db-section card">
