@@ -559,8 +559,13 @@ function showPage(pageId) {
     const copilotBtn = document.getElementById('securityCopilotButton');
     const copilotPopup = document.getElementById('securityCopilotPopup');
     const hideCopilot = pageId === 'databases' || pageId === 'requests';
-    if (copilotBtn) { copilotBtn.style.cssText = hideCopilot ? 'display: none !important' : ''; }
-    if (copilotPopup) copilotPopup.classList.remove('show');
+    if (copilotBtn) {
+        copilotBtn.style.cssText = hideCopilot ? 'display: none !important; visibility: hidden !important; pointer-events: none !important' : '';
+    }
+    if (copilotPopup) {
+        copilotPopup.classList.remove('show');
+        copilotPopup.style.cssText = hideCopilot ? 'display: none !important; visibility: hidden !important' : '';
+    }
 }
 
 // Admin Tab Navigation

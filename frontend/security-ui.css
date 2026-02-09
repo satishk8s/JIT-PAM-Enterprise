@@ -253,10 +253,19 @@ code, pre, .mono, .session-id, .request-id {
     padding: 12px 20px !important;
 }
 
-/* Ensure sidebar itself is visible */
-.sidebar {
+/* Ensure sidebar itself is visible - EXCEPT when explicitly collapsed */
+.sidebar:not(.sidebar-collapsed) {
     display: flex !important;
     visibility: visible !important;
+}
+/* When collapsed: fully hide sidebar off-screen; main content fills width */
+aside.sidebar.sidebar-collapsed {
+    transform: translateX(-100%) !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+    visibility: hidden !important;
 }
 
 /* Ensure nav items are visible */
@@ -2081,10 +2090,15 @@ body.login-page .unified-assistant-popup {
     display: none !important;
 }
 
-/* On requests page: hide Security Copilot (Unified Assistant only) - prevents duplicate */
-body[data-page="requests"] .security-copilot-button,
-body[data-page="requests"] .security-copilot-popup {
+/* On requests page: hide Security Copilot completely (Unified Assistant only) - prevents duplicate */
+body[data-page="requests"] #securityCopilotButton,
+body[data-page="requests"] #securityCopilotPopup {
     display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+    position: absolute !important;
+    left: -9999px !important;
+    opacity: 0 !important;
 }
 
 /* NPAMX button - same style as status buttons (Pending, In Progress) with purple glow */

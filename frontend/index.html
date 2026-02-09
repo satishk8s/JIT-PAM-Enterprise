@@ -38,7 +38,7 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=4" rel="stylesheet">
+    <link href="databases.css?v=7" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
     <link href="performance.css?v=5" rel="stylesheet">
 </head>
@@ -982,54 +982,59 @@
                     <h2><img src="assets/logos/rds.png" alt="" class="page-title-logo"> Database Access (JIT)</h2>
                 </div>
                 <div class="page-content db-page-layout">
-                    <!-- Left: Info + Tree -->
-                    <div class="db-left-panel">
-                        <!-- Single info box: instructions + predefined role -->
-                        <div class="db-info-card">
-                            <h3><i class="fas fa-info-circle"></i> Database Access (JIT)</h3>
-                            <p>JIT access with time-based credentials. No permanent access — request when needed, access expires automatically.</p>
-                            <p style="margin-top: 10px;"><strong>Predefined role:</strong> <strong>Read-only</strong> (SELECT, EXPLAIN) — Non-prod: auto-approve; Prod: manager approval.</p>
-                            <p style="margin-top: 6px; font-size: 12px; color: var(--text-secondary);">Other roles: Chat with NPAMX for AI-generated roles. Prod changes require CISO + manager approval. Non-prod: manager approval.</p>
-                            <p style="margin-top: 10px; font-size: 12px;"><strong>Select an engine below</strong> to start your request.</p>
+                    <!-- Top: Single info box with full description -->
+                    <div class="db-page-info-banner">
+                        <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
+                        <p>This platform provides temporary, time-bound access to databases using Just-In-Time (JIT) controls. There is no permanent database access — request access only when required, and it expires automatically.</p>
+                        <div class="db-info-sections">
+                            <div class="db-info-section">
+                                <h4>Default Access Role — Read-Only</h4>
+                                <p>Permissions include: <strong>SELECT</strong>, <strong>EXPLAIN</strong></p>
+                                <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Automatically approved — Production: Manager approval required</p>
+                            </div>
+                            <div class="db-info-section">
+                                <h4>Custom Access Roles</h4>
+                                <p>If you need permissions beyond read-only, use <strong>NPAMX AI</strong> to describe your requirement in plain language. The system will generate a least-privilege role for your task.</p>
+                                <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Manager approval — Production: Manager and CISO approval</p>
+                            </div>
                         </div>
-                        <!-- Tree -->
-                        <div class="db-tree-card">
-                            <h3><i class="fas fa-sitemap"></i> Database Engines</h3>
-                            <div id="dbTreeContainer" class="db-tree"></div>
-                        </div>
+                        <p class="db-info-footer">All access remains time-bound and is revoked automatically after expiry. <strong>Select the database engine below</strong> to begin your access request.</p>
                     </div>
-                    <!-- Right: AI Panel + Requests -->
-                    <div class="db-right-panel">
-                        <div id="dbStepPanel" class="db-step-panel db-step-hidden">
-                            <div class="db-step-header">
-                                <h3><i class="fas fa-cog"></i> <span id="dbStepTitle">Configure</span></h3>
-                                <button class="btn-icon" onclick="closeDbStepPanel()" title="Back"><i class="fas fa-times"></i></button>
-                            </div>
-                            <div id="dbStepContent" class="db-step-content"></div>
-                            <div class="db-step-actions">
-                                <button class="btn-primary" id="dbStepNextBtn" onclick="dbStepNext()"><i class="fas fa-arrow-right"></i> Next</button>
+                    <!-- Layout: Tree (left) + Config/AI (right) -->
+                    <div class="db-page-body">
+                        <div class="db-left-panel">
+                            <div class="db-tree-card">
+                                <h3><i class="fas fa-sitemap"></i> Database Engines</h3>
+                                <div id="dbTreeContainer" class="db-tree"></div>
                             </div>
                         </div>
-                        <div id="dbAiPanel" class="db-ai-panel db-ai-panel-hidden">
-                            <div class="db-ai-header">
-                                <h3><i class="fas fa-robot"></i> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
-                                <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
+                        <div class="db-right-panel">
+                            <div id="dbStepPanel" class="db-step-panel db-step-hidden">
+                                <div class="db-step-header">
+                                    <h3><i class="fas fa-cog"></i> <span id="dbStepTitle">Configure</span></h3>
+                                    <button class="btn-icon" onclick="closeDbStepPanel()" title="Back"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div id="dbStepContent" class="db-step-content"></div>
+                                <div class="db-step-actions">
+                                    <button class="btn-primary" id="dbStepNextBtn" onclick="dbStepNext()"><i class="fas fa-arrow-right"></i> Next</button>
+                                </div>
                             </div>
-                            <div id="dbAiChat" class="db-ai-chat"></div>
-                            <div class="db-ai-input-row">
-                                <input type="text" id="dbAiInput" placeholder="Type your response or ask a question..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
-                                <button class="btn-primary" onclick="sendDbAiMessage()"><i class="fas fa-paper-plane"></i></button>
+                            <div id="dbAiPanel" class="db-ai-panel db-ai-panel-hidden">
+                                <div class="db-ai-header">
+                                    <h3><i class="fas fa-robot"></i> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
+                                    <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div id="dbAiChat" class="db-ai-chat"></div>
+                                <div class="db-ai-input-row">
+                                    <input type="text" id="dbAiInput" placeholder="Type your response or ask a question..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
+                                    <button class="btn-primary" onclick="sendDbAiMessage()"><i class="fas fa-paper-plane"></i></button>
+                                </div>
+                                <div id="dbAiRequestSummary" class="db-ai-summary" style="display: none;"></div>
+                                <div id="dbAiActions" class="db-ai-actions" style="display: none;">
+                                    <button class="btn-secondary" onclick="editDbRequestDuration()"><i class="fas fa-edit"></i> Edit Duration</button>
+                                    <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-paper-plane"></i> Submit for Approval</button>
+                                </div>
                             </div>
-                            <div id="dbAiRequestSummary" class="db-ai-summary" style="display: none;"></div>
-                            <div id="dbAiActions" class="db-ai-actions" style="display: none;">
-                                <button class="btn-secondary" onclick="editDbRequestDuration()"><i class="fas fa-edit"></i> Edit Duration</button>
-                                <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-paper-plane"></i> Submit for Approval</button>
-                            </div>
-                        </div>
-                        <div id="dbAiPlaceholder" class="db-ai-placeholder">
-                            <i class="fas fa-arrow-left" style="font-size: 2rem; color: var(--primary); margin-bottom: 12px;"></i>
-                            <p>Select a database engine from the left panel to configure your request.</p>
-                        </div>
                         <!-- Approved + Query Terminal -->
                         <div class="db-section card">
                             <h3><i class="fas fa-check-circle"></i> My Approved Databases</h3>
@@ -3122,8 +3127,8 @@
         </div>
     </div>
 
-    <!-- Security Copilot (inside mainApp - hidden on login page) -->
-    <div id="securityCopilotButton" class="security-copilot-button" onclick="toggleSecurityCopilot()">
+    <!-- Security Copilot - hidden on requests page (Unified Assistant shown there) -->
+    <div id="securityCopilotButton" class="security-copilot-button" onclick="toggleSecurityCopilot()" data-hide-on="requests">
         <div class="copilot-icon">
             <i class="fas fa-robot"></i>
         </div>
@@ -3183,7 +3188,7 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=6"></script>
+    <script src="databases.js?v=7"></script>
     <script src="terminal-page.js?v=6"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js?v=2"></script>

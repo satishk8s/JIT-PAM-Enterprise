@@ -114,9 +114,9 @@ function selectDbEngine(engId, label, engine) {
     document.querySelectorAll('.db-tree-leaf').forEach(n => n.classList.remove('db-tree-leaf-active'));
     const leaf = document.querySelector(`.db-tree-leaf[onclick*="'${engId}'"]`);
     if (leaf) leaf.classList.add('db-tree-leaf-active');
-    // Show step panel, hide AI and placeholder
-    document.getElementById('dbAiPanel').classList.add('db-ai-panel-hidden');
-    document.getElementById('dbAiPlaceholder').style.display = 'none';
+    // Show step panel, hide AI panel
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
     dbRequestDraft = { engine, provider, databases: [] };
     dbStepState = { step: 1, provider };
     selectedDatabases = [];
@@ -135,16 +135,16 @@ function showDbStepPanel() {
 function closeDbStepPanel() {
     const panel = document.getElementById('dbStepPanel');
     if (panel) panel.classList.add('db-step-hidden');
-    document.getElementById('dbAiPlaceholder').style.display = 'flex';
     selectedEngine = null;
     dbStepState = null;
     dbConversationId = null;
 }
 
 function closeDbAiPanel() {
-    document.getElementById('dbAiPanel').classList.add('db-ai-panel-hidden');
-    document.getElementById('dbAiPlaceholder').style.display = 'flex';
-    document.getElementById('dbStepPanel').classList.add('db-step-hidden');
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+    const stepPanel = document.getElementById('dbStepPanel');
+    if (stepPanel) stepPanel.classList.add('db-step-hidden');
     selectedEngine = null;
     dbStepState = null;
     dbConversationId = null;
