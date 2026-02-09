@@ -11,6 +11,11 @@ if [ ! -f "$WEB_ROOT/index.html" ]; then
     exit 1
 fi
 
+# Build bundle for fast load (38+ requests → 4)
+if [ -x "$REPO_DIR/scripts/bundle-frontend.sh" ]; then
+    "$REPO_DIR/scripts/bundle-frontend.sh" || true
+fi
+
 chmod -R 755 "$WEB_ROOT" 2>/dev/null || true
 
 # Disable default nginx config to avoid "conflicting server name" (our config gets ignored)
@@ -57,7 +62,7 @@ server {
     listen [::]:80 default_server;
     server_name _;
     root $WEB_ROOT;
-    index index.html;
+    index index-bundled.html index.html;
     charset utf-8;
 
     # Zero-copy file send - bypasses userspace
@@ -83,7 +88,7 @@ server {
 
     # HTML - SPA fallback
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files \$uri \$uri/ /index-bundled.html /index.html;
         add_header Cache-Control "no-cache";
     }
 

@@ -110,6 +110,10 @@ frontend/*.md
 # Backend runtime data
 backend/data/
 
+# Generated frontend bundles (created by scripts/bundle-frontend.sh on deploy)
+frontend/bundle.css
+frontend/bundle.js
+
 # Root-level non-app files (logos, docs at repo root)
 /*.png
 /*.jpg

@@ -12,7 +12,7 @@ git checkout -- frontend/ 2>/dev/null || true
 echo "=== 2. Pull latest ==="
 git pull origin main
 
-echo "=== 3. Apply nginx config ==="
+echo "=== 3. Apply nginx config (includes bundle for fast load) ==="
 "$REPO_DIR/scripts/configure-nginx-git.sh"
 
 echo ""
