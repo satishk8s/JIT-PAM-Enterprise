@@ -53,17 +53,13 @@ function setupEventListeners() {
         });
     }
     
-    // Email/OTP form
+    // Email/OTP form - both submit and button click call handleEmailOTPContinue
     const emailOTPForm = document.getElementById('emailOTPForm');
     if (emailOTPForm) {
         emailOTPForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            const email = document.getElementById('emailOTP').value;
-            
-            if (email) {
-                alert('✅ OTP sent to ' + email);
-                showOTPVerification();
-            }
+            handleEmailOTPContinue();
+            return false;
         });
     }
     
@@ -212,9 +208,20 @@ function showUsernamePasswordLogin() {
     document.getElementById('mfaView').style.display = 'none';
 }
 
+function handleEmailOTPContinue() {
+    const emailInput = document.getElementById('emailOTP');
+    const email = emailInput ? emailInput.value.trim() : '';
+    if (email) {
+        showOTPVerification();
+    } else {
+        alert('Please enter your email address.');
+    }
+}
+
 function showOTPVerification() {
     const email = document.getElementById('emailOTP').value;
-    document.getElementById('otpEmail').textContent = email;
+    const otpEmailEl = document.getElementById('otpEmail');
+    if (otpEmailEl) otpEmailEl.textContent = email;
     document.getElementById('emailOTPView').style.display = 'none';
     document.getElementById('passwordLoginView').style.display = 'none';
     document.getElementById('otpVerifyView').style.display = 'block';
@@ -436,11 +443,10 @@ function showPage(pageId) {
     } else if (pageId === 'instances') {
         loadInstances();
     } else if (pageId === 'terminal') {
-        console.log('Loading terminal page...');
-        if (typeof refreshApprovedInstances === 'function') {
+        if (typeof initTerminalPage === 'function') {
+            initTerminalPage();
+        } else if (typeof refreshApprovedInstances === 'function') {
             refreshApprovedInstances();
-        } else {
-            console.error('refreshApprovedInstances function not found');
         }
     } else if (pageId === 's3') {
         loadS3Buckets();

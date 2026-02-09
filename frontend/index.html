@@ -14,6 +14,7 @@
     <link href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" rel="stylesheet">
     <link href="calendar.css" rel="stylesheet">
     <link href="instances.css" rel="stylesheet">
+    <link href="terminal-page.css" rel="stylesheet">
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
     <link href="enterprise-theme.css" rel="stylesheet">
@@ -37,13 +38,13 @@
                     <p>Sign in to access the admin dashboard and management.</p>
                 </div>
                 
-                <form id="emailOTPForm" class="login-form">
+                <form id="emailOTPForm" class="login-form" onsubmit="handleEmailOTPContinue(); return false;">
                     <div class="form-group">
                         <label>Email <span class="required">*</span></label>
                         <input type="email" id="emailOTP" placeholder="Enter Email" required>
                         <small class="input-hint">Please enter a username or email</small>
                     </div>
-                    <button type="submit" class="btn-primary">Continue</button>
+                    <button type="button" class="btn-primary" onclick="handleEmailOTPContinue()">Continue</button>
                 </form>
                 
                 <div class="divider">
@@ -1408,43 +1409,60 @@
                 </div>
             </div>
 
-            <!-- Terminal Page -->
+            <!-- Terminal Page - DB + VM Connections -->
             <div id="terminalPage" class="page">
                 <div class="page-header">
                     <h2><i class="fas fa-terminal"></i> Terminal</h2>
-                    <button class="btn-secondary" onclick="refreshApprovedInstances()">
-                        <i class="fas fa-sync"></i> Refresh
+                    <button class="btn-secondary" onclick="refreshTerminalPage()">
+                        <i class="fas fa-sync-alt"></i> Refresh
                     </button>
                 </div>
-                <div id="approvedInstancesList" style="margin-bottom: 20px;">
-                    <h3 style="font-size: 16px; margin-bottom: 15px;">My Approved Instances</h3>
-                    <table class="instances-table">
-                        <thead>
-                            <tr>
-                                <th>Instance ID</th>
-                                <th>Name</th>
-                                <th>Private IP</th>
-                                <th>Expires At</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="approvedInstancesTableBody">
-                            <tr>
-                                <td colspan="5" style="text-align: center; padding: 40px; color: #999;">
-                                    No approved instances. Request access from Instances page.
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div id="terminalContainer" style="margin-top: 20px; display: none;">
-                    <div style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px;">
-                        <h4 style="margin: 0 0 10px 0; color: var(--text-primary);">Session Manager</h4>
-                        <p id="terminalInstanceName" style="color: var(--text-secondary); margin-bottom: 15px;"></p>
-                        <button class="btn-primary" id="openSessionManagerBtn" onclick="openSessionManager()">
-                            <i class="fas fa-external-link-alt"></i> Open in AWS Session Manager
-                        </button>
-                    </div>
+                <div class="terminal-page-layout">
+                    <aside class="terminal-sidebar">
+                        <div class="terminal-category open" id="dbCategory">
+                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('db')">
+                                <i class="fas fa-database"></i>
+                                <span>Databases</span>
+                                <i class="fas fa-chevron-down terminal-cat-chevron" id="dbCatChevron"></i>
+                            </div>
+                            <div class="terminal-category-list" id="dbConnectionsList">
+                                <div class="terminal-empty-state" id="dbEmptyState">
+                                    <i class="fas fa-database"></i>
+                                    <p>No database access</p>
+                                    <small>Request access from Databases page</small>
+                                </div>
+                                <div class="terminal-list-items" id="dbListItems" style="display: none;"></div>
+                            </div>
+                        </div>
+                        <div class="terminal-category open" id="vmCategory">
+                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('vm')">
+                                <i class="fas fa-server"></i>
+                                <span>Workloads</span>
+                                <i class="fas fa-chevron-down terminal-cat-chevron" id="vmCatChevron"></i>
+                            </div>
+                            <div class="terminal-category-list" id="vmConnectionsList">
+                                <div class="terminal-empty-state" id="vmEmptyState">
+                                    <i class="fas fa-server"></i>
+                                    <p>No VM access</p>
+                                    <small>Request access from EC2 Instances</small>
+                                </div>
+                                <div class="terminal-list-items" id="vmListItems" style="display: none;"></div>
+                            </div>
+                        </div>
+                    </aside>
+                    <main class="terminal-main">
+                        <div class="terminal-placeholder" id="terminalPlaceholder">
+                            <div class="terminal-placeholder-icon">
+                                <i class="fas fa-terminal"></i>
+                            </div>
+                            <h3>Select a connection</h3>
+                            <p>Choose a database or VM from the left panel and click <strong>Connect</strong>. You can open multiple connections in tabs.</p>
+                        </div>
+                        <div class="terminal-active" id="terminalActive" style="display: none;">
+                            <div class="terminal-tabs-bar" id="terminalTabsBar"></div>
+                            <div class="terminal-tabs-content" id="terminalTabsContent"></div>
+                        </div>
+                    </main>
                 </div>
             </div>
 
@@ -3224,6 +3242,50 @@
         </div>
     </div>
 
+    <!-- Security Copilot Chatbot (inside mainApp - hidden on login page) -->
+    <div id="securityCopilotButton" class="security-copilot-button" onclick="toggleSecurityCopilot()">
+        <div class="copilot-icon">
+            <i class="fas fa-robot"></i>
+        </div>
+        <span class="copilot-label">GovernAIX</span>
+    </div>
+    <div id="securityCopilotPopup" class="security-copilot-popup">
+        <div class="copilot-header">
+            <div class="copilot-header-content">
+                <div class="copilot-avatar" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                    <i class="fas fa-shield-alt"></i>
+                </div>
+                <div class="copilot-header-text">
+                    <h4>GovernAIX</h4>
+                    <p>Your AI security assistant</p>
+                </div>
+            </div>
+            <button class="copilot-close" onclick="toggleSecurityCopilot()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="copilot-messages" id="copilotMessages">
+            <div class="copilot-message assistant">
+                <div class="message-content">
+                    <p>Hello! I'm GovernAIX. I can help you:</p>
+                    <ul>
+                        <li>Explain access decisions</li>
+                        <li>Understand risk scores</li>
+                        <li>Clarify policies</li>
+                        <li>Review audit logs</li>
+                    </ul>
+                    <p>What would you like to know?</p>
+                </div>
+            </div>
+        </div>
+        <div class="copilot-input-area">
+            <input type="text" id="copilotInput" class="copilot-input" placeholder="Ask about access decisions, policies, or risk scores..." onkeydown="if(event.key==='Enter') sendCopilotMessage()">
+            <button class="copilot-send" onclick="sendCopilotMessage()">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+        </div>
+    </div>
+
             <!-- Request for Others Page -->
             </div>
 
@@ -3243,12 +3305,13 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js"></script>
+    <script src="terminal-page.js"></script>
     <script src="databases.js"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js"></script>
     <script src="unified-assistant.js"></script>
     <script src="workflow-designer.js"></script>
-    <script src="app.js"></script>
+    <script src="App.js"></script>
     <script>
         // Initialize unified assistant when requests page loads
         document.addEventListener('DOMContentLoaded', function() {
@@ -3378,52 +3441,5 @@
             }, 500);
         }
     </script>
-    
-    <!-- Security Copilot Chatbot (docked bottom-right) -->
-    <div id="securityCopilotButton" class="security-copilot-button" onclick="toggleSecurityCopilot()">
-        <div class="copilot-icon">
-            <i class="fas fa-robot"></i>
-            </div>
-        <span class="copilot-label">GovernAIX</span>
-            </div>
-    
-    <div id="securityCopilotPopup" class="security-copilot-popup">
-        <div class="copilot-header">
-            <div class="copilot-header-content">
-                <div class="copilot-avatar" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <i class="fas fa-shield-alt"></i>
-                </div>
-                <div class="copilot-header-text">
-                    <h4>GovernAIX</h4>
-                    <p>Your AI security assistant</p>
-                </div>
-            </div>
-            <button class="copilot-close" onclick="toggleSecurityCopilot()">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <div class="copilot-messages" id="copilotMessages">
-            <div class="copilot-message assistant">
-                <div class="message-content">
-                    <p>Hello! I'm GovernAIX. I can help you:</p>
-                    <ul>
-                        <li>Explain access decisions</li>
-                        <li>Understand risk scores</li>
-                        <li>Clarify policies</li>
-                        <li>Review audit logs</li>
-                    </ul>
-                    <p>What would you like to know?</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="copilot-input-area">
-            <input type="text" id="copilotInput" class="copilot-input" placeholder="Ask about access decisions, policies, or risk scores..." onkeydown="if(event.key==='Enter') sendCopilotMessage()">
-            <button class="copilot-send" onclick="sendCopilotMessage()">
-                <i class="fas fa-paper-plane"></i>
-            </button>
-        </div>
-    </div>
 </body>
 </html>

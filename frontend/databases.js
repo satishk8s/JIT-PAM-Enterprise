@@ -710,7 +710,12 @@ async function refreshApprovedDatabases() {
 }
 
 function connectToDatabase(host, port, engine, requestId, dbName) {
-    showDatabaseTerminal(dbName || 'testdb', host, port, engine, requestId || '');
+    window.pendingTerminalConnection = { host, port, engine, requestId: requestId || '', dbName: dbName || 'default' };
+    if (typeof showPage === 'function') {
+        showPage('terminal');
+    } else {
+        showDatabaseTerminal(dbName || 'testdb', host, port, engine, requestId || '');
+    }
 }
 
 function showDatabaseTerminal(dbName, host, port, engine, requestId) {
