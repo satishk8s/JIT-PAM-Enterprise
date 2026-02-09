@@ -7,6 +7,9 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 echo "=== NPAMX Auto-Deploy Setup ==="
 echo "Repo: $REPO_DIR"
 
+# 1. Ensure backend script is executable (fixes 203/EXEC)
+chmod +x "$REPO_DIR/backend/run-backend-on-ec2.sh" 2>/dev/null || true
+
 # 1. Install systemd service (path is set from repo location)
 SVC_FILE="$REPO_DIR/scripts/npam-backend.service"
 BACKEND_DIR="$REPO_DIR/backend"
@@ -38,7 +41,7 @@ else
     exit 1
 fi
 
-# 2. Install git post-merge hook (runs after every git pull)
+# 2. Ensure backend script executable + install git post-merge hook
 HOOK_SRC="$REPO_DIR/scripts/post-merge"
 HOOK_DST="$REPO_DIR/.git/hooks/post-merge"
 if [ -d "$REPO_DIR/.git" ] && [ -f "$HOOK_SRC" ]; then
