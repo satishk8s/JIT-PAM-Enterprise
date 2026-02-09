@@ -173,8 +173,15 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2 && useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            const instances = await fetchDatabasesForAccount(accountId);
+            const result = await fetchDatabasesForAccount(accountId);
+            const instances = result.databases || [];
+            if (result.error) {
+                showDbErrorPopup(result.error, result.instructions);
+            } else {
+                dbLastFetchError = null;
+            }
             content.innerHTML = `
+                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span></div>` : ''}
                 <div class="db-step-field">
                     <label>Select RDS Instance</label>
                     <div id="dbStepInstanceList" class="db-step-instance-list">
@@ -211,8 +218,15 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2 && !useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            const dbs = await fetchDatabasesForAccount(accountId);
+            const result = await fetchDatabasesForAccount(accountId);
+            const dbs = result.databases || [];
+            if (result.error) {
+                showDbErrorPopup(result.error, result.instructions);
+            } else {
+                dbLastFetchError = null;
+            }
             content.innerHTML = `
+                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list databases — Click to see instructions</span></div>` : ''}
                 <div class="db-step-field">
                     <label>Select Database(s)</label>
                     <div id="dbStepDbList" class="db-step-db-list">
@@ -306,13 +320,47 @@ async function fetchAccounts() {
 }
 
 async function fetchDatabasesForAccount(accountId) {
-    if (!accountId) return [];
+    if (!accountId) return { databases: [], error: null, instructions: [] };
     try {
         const r = await fetch(`${DB_API_BASE}/api/databases?account_id=${accountId}`);
         const data = await r.json();
-        return data.databases || [];
+        return {
+            databases: data.databases || [],
+            error: data.error || null,
+            instructions: data.instructions || []
+        };
     } catch (e) {
-        return [];
+        return {
+            databases: [],
+            error: e.message || 'Failed to fetch RDS instances',
+            instructions: [
+                'Check that the backend server is running and reachable.',
+                'Ensure CORS is configured if frontend and backend are on different origins.'
+            ]
+        };
+    }
+}
+
+let dbLastFetchError = null;
+
+function showDbErrorPopup(error, instructions) {
+    dbLastFetchError = { error, instructions };
+    const popup = document.getElementById('dbErrorPopup');
+    if (!popup) return;
+    popup.querySelector('.db-error-msg').textContent = error || 'Unable to list RDS instances';
+    const list = popup.querySelector('.db-error-instructions');
+    list.innerHTML = (instructions || []).map(i => `<li>${escapeHtml(i)}</li>`).join('');
+    popup.classList.add('db-error-popup-show');
+}
+
+function hideDbErrorPopup() {
+    const popup = document.getElementById('dbErrorPopup');
+    if (popup) popup.classList.remove('db-error-popup-show');
+}
+
+function reopenDbErrorPopup() {
+    if (dbLastFetchError) {
+        showDbErrorPopup(dbLastFetchError.error, dbLastFetchError.instructions);
     }
 }
 
@@ -403,7 +451,8 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && useChatFlow) {
-            const instances = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const instances = result.databases || [];
             const selectedRadio = document.querySelector('#dbStepInstanceList input[name="dbInstance"]:checked');
             if (instances.length) {
                 if (!selectedRadio) {
@@ -449,7 +498,8 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && !useChatFlow) {
-            const dbs = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id);
+            const dbs = result.databases || [];
             if (dbs.length && selectedDatabases.length === 0) {
                 alert('Please select at least one database.');
                 return;

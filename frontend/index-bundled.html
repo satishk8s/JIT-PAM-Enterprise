@@ -1048,6 +1048,23 @@
                 </div>
             </div>
 
+            <!-- DB Error Popup (RDS list failures) -->
+            <div id="dbErrorPopup" class="db-error-popup">
+                <div class="db-error-popup-backdrop" onclick="hideDbErrorPopup()"></div>
+                <div class="db-error-popup-box">
+                    <div class="db-error-popup-header">
+                        <span class="db-error-emoji">&#128577;</span>
+                        <h3>Unable to List RDS Instances</h3>
+                        <button class="btn-icon" onclick="hideDbErrorPopup()" title="Close"><i class="fas fa-times"></i></button>
+                    </div>
+                    <div class="db-error-popup-body">
+                        <p class="db-error-msg">—</p>
+                        <h4>How to fix:</h4>
+                        <ol class="db-error-instructions"></ol>
+                    </div>
+                </div>
+            </div>
+
             <!-- S3 Explorer Page -->
             <div id="s3Page" class="page">
                 <div class="page-header">

@@ -3902,18 +3902,30 @@ def get_databases():
                         })
                 return jsonify({'databases': databases})
             except Exception as e:
-                print(f"RDS fetch failed, using fallback: {e}")
+                print(f"RDS fetch failed: {e}")
+                return jsonify({
+                    'databases': [],
+                    'error': str(e),
+                    'error_type': 'rds_fetch_failed',
+                    'instructions': [
+                        'Ensure AWS credentials are configured on the server (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or IAM role).',
+                        'The IAM user/role must have rds:DescribeDBInstances permission.',
+                        'Verify the RDS instances exist in the selected region (default: ap-south-1).',
+                        'If using cross-account: ensure the backend can assume a role in the target account.'
+                    ]
+                })
         
-        # Fallback: mock data for when AWS not configured
-        databases = [{
-            'id': 'mysql-test',
-            'name': 'testdb',
-            'engine': 'MySQL',
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'port': int(os.getenv('DB_PORT', '3306')),
-            'status': 'available'
-        }]
-        return jsonify({'databases': databases})
+        # No account selected or account not in config
+        err_msg = 'Please select an AWS account.' if not account_id else 'Account not configured or invalid.'
+        return jsonify({
+            'databases': [],
+            'error': err_msg,
+            'error_type': 'account_invalid',
+            'instructions': [
+                'Select a valid AWS account from the dropdown.',
+                'If accounts are empty, ensure AWS Organizations/SSO is configured.'
+            ]
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

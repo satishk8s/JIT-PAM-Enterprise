@@ -649,6 +649,114 @@
     color: var(--text-secondary);
 }
 
+/* Error bar - click to reopen popup */
+.db-step-error-bar {
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    border-radius: 8px;
+}
+
+.db-error-reopen {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--danger, #EF4444);
+    text-decoration: underline;
+}
+
+.db-error-reopen:hover {
+    opacity: 0.9;
+}
+
+/* Error popup overlay */
+.db-error-popup {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+}
+
+.db-error-popup.db-error-popup-show {
+    display: flex;
+}
+
+.db-error-popup-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+}
+
+.db-error-popup-box {
+    position: relative;
+    background: var(--bg-panel, #111827);
+    border: 1px solid var(--border-subtle, #374151);
+    border-radius: 12px;
+    max-width: 480px;
+    width: 90%;
+    max-height: 80vh;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.db-error-popup-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border-subtle, #374151);
+}
+
+.db-error-emoji {
+    font-size: 28px;
+    line-height: 1;
+    opacity: 0.9;
+}
+
+.db-error-popup-header h3 {
+    flex: 1;
+    margin: 0;
+    font-size: 18px;
+    color: var(--text-primary);
+}
+
+.db-error-popup-body {
+    padding: 20px 24px;
+    overflow-y: auto;
+    max-height: 400px;
+}
+
+.db-error-popup-body .db-error-msg {
+    color: var(--text-secondary);
+    margin: 0 0 16px 0;
+    font-size: 14px;
+}
+
+.db-error-popup-body h4 {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.db-error-instructions {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.db-error-instructions li {
+    margin-bottom: 8px;
+}
+
+.db-error-instructions li:last-child {
+    margin-bottom: 0;
+}
+
 .db-step-actions {
     display: flex;
     justify-content: flex-end;
