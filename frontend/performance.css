@@ -7,18 +7,23 @@ html {
     text-rendering: optimizeLegibility;
 }
 
-/* Sharper images (logos, etc) */
-img {
+/* Sharper images - avoid scaling blur on logos */
+img.page-title-logo,
+img.card-logo,
+img.nav-logo {
     image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
 }
-
-/* GPU layer for main scroll container - smoother scrolling */
+/* GPU layer + crisp transforms (prevents subpixel blur) */
 .page-content,
 .app-main,
 .requests-category-card,
-.jit-requests-grid {
+.jit-requests-grid,
+.terminal-page-layout,
+.term-query-terminal {
     contain: paint;
     transform: translateZ(0);
+    backface-visibility: hidden;
 }
 
 /* Isolate scroll areas to reduce repaints */
@@ -26,6 +31,17 @@ img {
 .sidebar-nav,
 .page {
     contain: paint;
+}
+
+/* content-visibility: skip off-screen work (biggest scroll win) */
+.jit-requests-grid,
+.terminal-category-list {
+    content-visibility: auto;
+}
+.jit-requests-grid .requests-category-card,
+.terminal-connection-card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 72px;
 }
 
 /* Avoid layout thrash on inputs */
@@ -39,7 +55,21 @@ input, textarea, select {
     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
 }
 
-/* Reduce animation cost */
+/* Reduce decorative animations (bulb glow, tab pulse) - less CPU */
+.kpi-trend,
+.requests-status-btn,
+.terminal-connection-card {
+    animation: none !important;
+}
+.requests-status-btn.requests-status-glow {
+    animation: requests-status-glow-subtle 2s ease-in-out infinite;
+}
+@keyframes requests-status-glow-subtle {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(56,189,248,0.3); }
+    50% { box-shadow: 0 0 0 2px rgba(56,189,248,0.5); }
+}
+
+/* Respect reduced-motion preference */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         animation-duration: 0.01ms !important;
