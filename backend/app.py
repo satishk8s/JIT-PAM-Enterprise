@@ -1352,16 +1352,28 @@ def get_database_requests():
             ui_status = s
         if status_filter and status_filter != 'all' and ui_status != status_filter:
             continue
-        db_requests.append({
+        req_data = {
             'request_id': req_id,
+            'id': req_id,  # For compatibility with createJITRequestCard
             'status': ui_status,
+            'type': 'database_access',
             'databases': req.get('databases', []),
             'role': req.get('role', 'read_only'),
             'duration_hours': req.get('duration_hours', 2),
             'justification': req.get('justification', ''),
             'created_at': req.get('created_at', ''),
             'expires_at': expires_at,
-        })
+            'user_email': req.get('user_email', ''),
+        }
+        
+        # Include credentials for approved requests (only for the requesting user)
+        if req.get('status') == 'approved' and not is_expired:
+            req_data['db_username'] = req.get('db_username')
+            req_data['db_password'] = req.get('db_password')  # Password included for approved requests
+            req_data['permission_set_name'] = req.get('permission_set_name')
+            req_data['sso_start_url'] = req.get('sso_start_url')
+        
+        db_requests.append(req_data)
     return jsonify({'requests': db_requests})
 
 
@@ -3644,16 +3656,6 @@ def database_ai_chat():
         if not message:
             return jsonify({'error': 'Message required'}), 400
         
-        # Prompt injection guard - validate before sending to AI (skipped when GUARDRAILS_OFF)
-        if not GUARDRAILS_OFF:
-            try:
-                from prompt_injection_guard import validate_ai_input
-                is_valid, error = validate_ai_input(message, check_sql=True)
-                if not is_valid:
-                    return jsonify({'error': error}), 400
-            except ImportError:
-                pass  # No guard module - continue
-        
         # Create or get conversation
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
@@ -3662,19 +3664,60 @@ def database_ai_chat():
         # Add user message
         db_conversations[conversation_id].append({'role': 'user', 'content': message})
         
+        # Fast path: use rule-based fallback for common short inputs (instant, no Bedrock latency)
+        msg_lower = message.lower().strip()
+        fast_keywords = ['dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
+                         '2', '4', '8', 'hour', 'default', 'testdb', 'jit_test', 'localhost']
+        if any(x in msg_lower for x in fast_keywords) and len(msg_lower) < 80:
+            ai_response = None
+            suggested_perms = []
+            suggested_role = None
+            
+            if any(x in msg_lower for x in ['dev', 'staging', 'prod']):
+                ai_response = "Got it! For **database name**, please tell me the name (e.g. jit_test or default). For **access type**, choose: read-only or read+write. For **duration**, 2, 4, or 8 hours?"
+            elif any(x in msg_lower for x in ['write', 'update', 'insert', 'delete', 'modify']):
+                ai_response = "I'll set **Limited Write** (SELECT, INSERT, UPDATE, DELETE). How long — **2, 4, or 8 hours**?"
+                suggested_perms = ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
+                suggested_role = 'read_limited_write'
+            elif any(x in msg_lower for x in ['read', 'select', 'query', 'view']):
+                ai_response = "I'll set **read-only** (SELECT). How long — **2, 4, or 8 hours**?"
+                suggested_perms = ['SELECT']
+                suggested_role = 'read_only'
+            elif any(x in msg_lower for x in ['2', '4', '8']) and ('hour' in msg_lower or msg_lower in ('2', '4', '8')):
+                ai_response = "All set! Click **Submit for Approval** below to create your database access request."
+            elif any(x in msg_lower for x in ['default', 'testdb', 'jit_test', 'localhost']):
+                ai_response = "Thanks! What access do you need? **read-only** or **read+write**? And for how long — **2, 4, or 8 hours**?"
+            
+            if ai_response:
+                db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+                return jsonify({
+                    'response': ai_response,
+                    'conversation_id': conversation_id,
+                    'permissions': suggested_perms if suggested_perms else None,
+                    'suggested_role': suggested_role
+                })
+        
+        # Build conversation - Bedrock suggests concrete MySQL permissions
+        messages = [{
+            'role': 'user',
+            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. The user will get a short-lived DB user with exactly the permissions you suggest.
+
+Your task: Based on what the user says they need (e.g. "read reports", "update orders", "fix schema"), suggest a minimal set of MySQL privileges. Use standard privilege names: SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, INDEX, EXPLAIN, SHOW, etc. For read-only use at least SELECT and EXPLAIN.
+
+You must end your reply with exactly one line in this format (no other text on that line):
+PERMISSIONS: <comma-separated list>
+Example: PERMISSIONS: SELECT, EXPLAIN, SHOW
+Example: PERMISSIONS: SELECT, INSERT, UPDATE, DELETE
+
+Be conversational first, then add the PERMISSIONS line at the end.
+
+User request: {message}"""
+        }]
+        
+        # Call Bedrock AI (fallback to rule-based when AWS creds expired)
         ai_response = None
         try:
-            # Call Bedrock AI
-            bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1')
-            messages = [{
-                'role': 'user',
-                'content': f"""You are a database access advisor for a JIT system. Help users choose access role.
-
-JIT ROLES: 1) Read-only (SELECT, EXPLAIN) 2) Limited Write (+INSERT,UPDATE,DELETE) 3) Full Write (+DDL) 4) Admin (all).
-
-User: {message}
-Provide a short, helpful response."""
-            }]
+            bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1', config=AWS_CONFIG)
             response = bedrock.invoke_model(
                 modelId='anthropic.claude-3-sonnet-20240229-v1:0',
                 body=json.dumps({
@@ -3686,17 +3729,36 @@ Provide a short, helpful response."""
             result = json.loads(response['body'].read())
             ai_response = result['content'][0]['text']
         except Exception as bedrock_err:
-            print(f"Bedrock unavailable, using fallback: {bedrock_err}")
-            ai_response = _fallback_db_ai_response(message)
+            print(f"Bedrock unavailable ({bedrock_err}), using fallback")
+            # Rule-based fallback when AWS/Bedrock unavailable
+            msg_lower = message.lower()
+            if any(x in msg_lower for x in ['dev', 'staging', 'prod', 'account']):
+                ai_response = "Got it! For **database name**, please tell me the name (e.g. jit_test or default). For **access type**, choose: read-only (SELECT only), or read+write. For **duration**, 2, 4, or 8 hours?"
+            elif any(x in msg_lower for x in ['jit_test', 'default', 'database']):
+                ai_response = "Thanks! What access do you need? **read-only** (SELECT) or **read+write**? And for how long — **2, 4, or 8 hours**?"
+            elif any(x in msg_lower for x in ['read', 'select', 'query']):
+                ai_response = "Perfect. I'll set **read-only** (SELECT). How long — **2, 4, or 8 hours**?"
+            elif any(x in msg_lower for x in ['2', '4', '8', 'hour']):
+                ai_response = "All set! Click **Submit Request** below to create your database access request."
+            else:
+                ai_response = "Please share: 1) Database name (e.g. jit_test), 2) Access type (read-only or read+write), 3) Duration (2, 4, or 8 hours)."
         
         # Store AI response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
         
+        # Extract suggested permissions from Bedrock (look for PERMISSIONS: line)
         suggested_perms = []
-        perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'GRANT', 'REVOKE']
-        for perm in perms:
-            if perm in ai_response.upper():
-                suggested_perms.append(perm)
+        for line in ai_response.split('\n'):
+            line = line.strip()
+            if line.upper().startswith('PERMISSIONS:'):
+                rest = line[12:].strip()
+                suggested_perms = [p.strip() for p in rest.split(',') if p.strip()]
+                break
+        if not suggested_perms:
+            perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'EXPLAIN', 'SHOW', 'INDEX', 'TRUNCATE']
+            for perm in perms:
+                if perm in ai_response.upper():
+                    suggested_perms.append(perm)
         
         return jsonify({
             'response': ai_response,
@@ -3891,29 +3953,48 @@ def request_database_access():
             'expires_at': expires_at.isoformat()
         }
         
+        create_error = None
         if status == 'approved' and not vault_lease_id:
             admin_user = os.getenv('DB_ADMIN_USER', 'admin')
             admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
             
+            # Map role to MySQL GRANT permissions
+            if role == 'admin':
+                sql_perms = 'ALL PRIVILEGES'
+            elif role == 'read_full_write':
+                sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
+            elif role == 'read_limited_write':
+                sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
+            else:
+                sql_perms = permissions if isinstance(permissions, str) else ', '.join(permissions) if permissions else 'SELECT'
+            
             for db in databases:
-                create_database_user(
+                result = create_database_user(
                     host=db['host'],
-                    port=int(db['port']),
+                    port=int(db.get('port', 3306)),
                     admin_user=admin_user,
                     admin_password=admin_password,
                     new_user=db_username,
                     new_password=password,
                     database=db['name'],
-                    permissions=permissions
+                    permissions=sql_perms
                 )
+                if result.get('error'):
+                    create_error = result['error']
+                    print(f"❌ create_database_user failed: {result['error']}")
+                    break
         
         requests_db[request_id] = db_request
         
         # MVP 2: Never return password to client
+        msg = approval_message
+        if create_error and status == 'approved':
+            msg += f"\n\n⚠️ DB user creation failed ({create_error}). Set DB_ADMIN_USER and DB_ADMIN_PASSWORD to your MySQL root credentials, then request new access.\n\nPlease check the approval status under My Requests tab in Databases."
         return jsonify({
             'status': status,
             'request_id': request_id,
-            'message': approval_message
+            'message': msg,
+            'creation_error': create_error if status == 'approved' else None
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500

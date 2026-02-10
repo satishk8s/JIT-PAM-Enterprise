@@ -906,12 +906,36 @@ function filterRequests(filter) {
     loadRequestsPage();
 }
 
-function loadRequestsPage() {
+async function loadRequestsPage() {
     const grid = document.getElementById('requestsGrid');
     
-    let filteredRequests = requests;
+    // Load database requests and merge with main requests
+    let allRequests = [...requests];
+    try {
+        const userEmail = localStorage.getItem('userEmail') || 'user@example.com';
+        const dbApiBase = API_BASE.replace('/api', '') || 'http://localhost:5000';
+        const dbRes = await fetch(`${dbApiBase}/api/databases/requests?user_email=${encodeURIComponent(userEmail)}&status=all`);
+        if (dbRes.ok) {
+            const dbData = await dbRes.json();
+            if (dbData.requests && dbData.requests.length > 0) {
+                // Merge database requests into allRequests
+                allRequests = [...allRequests, ...dbData.requests];
+            }
+        }
+    } catch (e) {
+        console.error('Error loading database requests:', e);
+    }
+    
+    let filteredRequests = allRequests;
     if (currentFilter !== 'all') {
-        filteredRequests = requests.filter(r => r.status === currentFilter);
+        filteredRequests = allRequests.filter(r => {
+            const status = r.status || '';
+            if (currentFilter === 'pending') return status === 'pending';
+            if (currentFilter === 'in_progress') return status === 'approved' || status === 'in_progress';
+            if (currentFilter === 'completed') return status === 'completed' || (status === 'approved' && r.expires_at && new Date(r.expires_at) < new Date());
+            if (currentFilter === 'denied') return status === 'denied' || status === 'rejected';
+            return true;
+        });
     }
     
     if (filteredRequests.length === 0) {
@@ -922,7 +946,7 @@ function loadRequestsPage() {
     // Use security-grade JIT request card helper if available
     if (typeof createJITRequestCard === 'function') {
         grid.innerHTML = filteredRequests.map(request => {
-            const account = accounts[request.account_id];
+            const account = request.account_id ? accounts[request.account_id] : null;
             return createJITRequestCard(request, account);
         }).join('');
     } else {

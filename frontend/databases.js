@@ -505,10 +505,19 @@ async function sendDbAiMessage() {
         if (data.error) {
             chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>${escapeHtml(data.error)}</p></div>`;
         } else {
-            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><p>${(data.response || '').replace(/\n/g, '<br>')}</p></div>`;
+            // Format markdown-style text (convert **text** to <strong>text</strong>)
+            let formattedResponse = (data.response || '').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            formattedResponse = formattedResponse.replace(/\n/g, '<br>');
+            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><p>${formattedResponse}</p></div>`;
+            
+            // Update draft with permissions and role
             if (data.permissions && data.permissions.length) {
                 dbRequestDraft = dbRequestDraft || {};
                 dbRequestDraft.permissions = data.permissions.join(',');
+            }
+            if (data.suggested_role) {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft.role = data.suggested_role;
             }
         }
         chat.scrollTop = chat.scrollHeight;

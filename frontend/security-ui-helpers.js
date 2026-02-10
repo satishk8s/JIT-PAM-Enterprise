@@ -82,6 +82,53 @@ function createJITRequestCard(request, account) {
             </div>
             ` : ''}
             
+            ${(request.status === 'approved' || request.status === 'completed') && (request.db_username || request.permission_set_name || request.sso_start_url) ? `
+            <div class="jit-credentials-section" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border-color, #e0e0e0);">
+                <div style="font-weight: 600; margin-bottom: 10px; color: var(--text-primary, #333);">
+                    <i class="fas fa-key"></i> Access Credentials
+                </div>
+                ${request.type === 'database_access' && request.db_username ? `
+                <div class="jit-cred-item" style="margin-bottom: 8px;">
+                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-bottom: 4px;">Database Username</div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <code style="background: var(--bg-secondary, #f5f5f5); padding: 4px 8px; border-radius: 4px; font-family: monospace; flex: 1;">${escapeHtml(request.db_username)}</code>
+                        <button class="btn-link btn-sm" onclick="copyToClipboard('${escapeHtml(request.db_username)}', 'Username')" style="font-size: 12px;">
+                            <i class="fas fa-copy"></i> Copy
+                        </button>
+                    </div>
+                </div>
+                ${request.db_password ? `
+                <div class="jit-cred-item" style="margin-bottom: 8px;">
+                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-bottom: 4px;">Password</div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <code id="pwd-${request.id}" style="background: var(--bg-secondary, #f5f5f5); padding: 4px 8px; border-radius: 4px; font-family: monospace; flex: 1;">••••••••</code>
+                        <button class="btn-link btn-sm" onclick="togglePassword('${request.id}', '${escapeHtml(request.db_password)}')" style="font-size: 12px;">
+                            <i class="fas fa-eye" id="eye-${request.id}"></i> Show
+                        </button>
+                        <button class="btn-link btn-sm" onclick="copyToClipboard('${escapeHtml(request.db_password)}', 'Password')" style="font-size: 12px;">
+                            <i class="fas fa-copy"></i> Copy
+                        </button>
+                    </div>
+                </div>
+                ` : ''}
+                ` : ''}
+                ${request.permission_set_name ? `
+                <div class="jit-cred-item" style="margin-bottom: 8px;">
+                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-bottom: 4px;">Permission Set</div>
+                    <div style="font-weight: 500; color: var(--text-primary, #333);">${escapeHtml(request.permission_set_name)}</div>
+                </div>
+                ` : ''}
+                ${request.sso_start_url ? `
+                <div class="jit-cred-item" style="margin-bottom: 8px;">
+                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-bottom: 4px;">AWS SSO Portal</div>
+                    <a href="${escapeHtml(request.sso_start_url)}" target="_blank" style="color: var(--primary-color, #667eea); text-decoration: none;">
+                        <i class="fas fa-external-link-alt"></i> Open AWS SSO Portal
+                    </a>
+                </div>
+                ` : ''}
+            </div>
+            ` : ''}
+            
             <div class="jit-request-actions" style="margin-top: 10px; border-top: 1px solid var(--border-color); padding-top: 10px;">
                 <button class="btn-secondary" onclick="showRequestDetailWithFlow('${request.id}')" style="width: 100%;">
                     <i class="fas fa-route"></i> View Approval Flow
@@ -429,6 +476,51 @@ function updateAIDecisionsFeed() {
     }).join('');
 }
 
+/**
+ * Helper function to escape HTML
+ */
+function escapeHtml(text) {
+    if (!text) return '';
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Copy text to clipboard
+ */
+function copyToClipboard(text, label) {
+    navigator.clipboard.writeText(text).then(() => {
+        if (typeof showToast === 'function') {
+            showToast(`${label} copied to clipboard`);
+        } else {
+            alert(`${label} copied to clipboard`);
+        }
+    }).catch(err => {
+        console.error('Failed to copy:', err);
+        alert('Failed to copy to clipboard');
+    });
+}
+
+/**
+ * Toggle password visibility
+ */
+function togglePassword(requestId, password) {
+    const pwdEl = document.getElementById(`pwd-${requestId}`);
+    const eyeEl = document.getElementById(`eye-${requestId}`);
+    if (!pwdEl || !eyeEl) return;
+    
+    if (pwdEl.textContent === '••••••••') {
+        pwdEl.textContent = password;
+        eyeEl.className = 'fas fa-eye-slash';
+        eyeEl.parentElement.textContent = ' Hide';
+    } else {
+        pwdEl.textContent = '••••••••';
+        eyeEl.className = 'fas fa-eye';
+        eyeEl.parentElement.innerHTML = '<i class="fas fa-eye"></i> Show';
+    }
+}
+
 // Export functions to global scope
 if (typeof window !== 'undefined') {
     window.createJITRequestCard = createJITRequestCard;
@@ -441,4 +533,7 @@ if (typeof window !== 'undefined') {
     window.updateRecentJITRequests = updateRecentJITRequests;
     window.updateLiveSessions = updateLiveSessions;
     window.updateAIDecisionsFeed = updateAIDecisionsFeed;
+    window.copyToClipboard = copyToClipboard;
+    window.togglePassword = togglePassword;
+    window.escapeHtml = escapeHtml;
 }
