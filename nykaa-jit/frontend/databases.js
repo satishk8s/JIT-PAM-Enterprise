@@ -8,6 +8,8 @@ let selectedEngine = null;
 let dbRequestDraft = null;
 let dbStatusFilter = 'all';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
+/** Approved DB credentials in memory only (not in DOM) for Show/Copy. Index = row index. */
+let approvedDbCreds = [];
 
 // AWS engines that use Account -> Instance -> DB name -> Chat flow (RDS, Redshift, DocumentDB)
 const AWS_CHAT_FLOW_ENGINES = ['mysql', 'postgres', 'aurora', 'maria', 'mssql', 'documentdb', 'redshift'];
@@ -646,18 +648,15 @@ function initDbChatWithPrompts(label, engine) {
             <div class="db-ai-msg-content">
                 <p><strong>Your request is ready.</strong></p>
                 <p>Access to <strong>${dbNames}</strong> on ${label}.</p>
-                <p>Choose an option below:</p>
+                <p>Describe what you need (e.g. read data, run reports, update rows, schema changes). NPAMX will suggest permissions and we will create access with your username in the DB.</p>
             </div>
         </div>`;
     chat.scrollTop = chat.scrollHeight;
     if (quickPrompts) {
         quickPrompts.style.display = 'flex';
         quickPrompts.innerHTML = `
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('I need read-only access (SELECT, EXPLAIN) for querying and analytics.')">
-                <i class="fas fa-eye"></i> Read-only access (SELECT, EXPLAIN)
-            </button>
-            <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
-                <i class="fas fa-comments"></i> Chat with NPAMX for custom permissions
+            <button class="db-ai-prompt-btn" onclick="document.getElementById('dbAiInput').focus();">
+                <i class="fas fa-comments"></i> Describe what you need — NPAMX will suggest permissions
             </button>`;
     }
     document.getElementById('dbAiRequestSummary').style.display = 'none';
@@ -717,18 +716,13 @@ async function sendDbAiMessage() {
             chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>${escapeHtml(data.error)}</p></div>`;
         } else {
             chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div><div class="db-ai-msg-content"><p>${(data.response || '').replace(/\n/g, '<br>')}</p></div></div>`;
-            if (data.permissions || data.suggested_role) {
+            if (data.permissions || data.suggested_permissions) {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.permissions && data.permissions.length) {
-                    dbRequestDraft.permissions = Array.isArray(data.permissions) ? data.permissions.join(',') : data.permissions;
+                    dbRequestDraft.permissions = Array.isArray(data.permissions) ? data.permissions.join(', ') : data.permissions;
+                } else if (data.suggested_permissions) {
+                    dbRequestDraft.permissions = Array.isArray(data.suggested_permissions) ? data.suggested_permissions.join(', ') : data.suggested_permissions;
                 }
-                if (data.suggested_role) {
-                    dbRequestDraft.role = data.suggested_role;
-                }
-            }
-            if (selectedDatabases && selectedDatabases.length && !dbRequestDraft.role && message.toLowerCase().includes('read-only')) {
-                dbRequestDraft.role = 'read_only';
-                dbRequestDraft.permissions = 'SELECT, EXPLAIN';
             }
         }
         chat.scrollTop = chat.scrollHeight;
@@ -752,9 +746,16 @@ function showDbRequestSummaryIfReady() {
     if (!dbRequestDraft || !selectedEngine) return;
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
-    summary.innerHTML = `<p><strong>Draft:</strong> ${selectedEngine.label} | Role: ${dbRequestDraft.role || 'read_only'} | Duration: ${dbRequestDraft.duration_hours || 2}h</p>`;
+    const perms = (dbRequestDraft.permissions || 'SELECT').toString().replace(/,/g, ', ');
+    const authType = dbRequestDraft.auth_type || 'password';
+    summary.innerHTML = '<p><strong>Draft:</strong> ' + selectedEngine.label + ' | Permissions: ' + escapeHtml(perms) + ' | Duration: ' + (dbRequestDraft.duration_hours || 2) + 'h | Auth: <span id="dbDraftAuthLabel">' + (authType === 'iam' ? 'IAM (token)' : 'Password (Vault)') + '</span> <button type="button" class="btn-link btn-sm" onclick="toggleDbDraftAuthType()">Change</button></p>';
     summary.style.display = 'block';
     actions.style.display = 'flex';
+}
+function toggleDbDraftAuthType() {
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.auth_type = (dbRequestDraft.auth_type === 'iam') ? 'password' : 'iam';
+    showDbRequestSummaryIfReady();
 }
 
 function editDbRequestDuration() {
@@ -800,15 +801,16 @@ async function submitDbRequestViaAi() {
         const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
+                body: JSON.stringify({
                 databases,
                 account_id: accountId,
                 user_email: userEmail,
                 user_full_name: fullName,
                 db_username: userEmail.split('@')[0],
                 permissions: dbRequestDraft.permissions || 'SELECT',
-                role: dbRequestDraft.role || 'read_only',
+                role: dbRequestDraft.role || 'custom',
                 duration_hours: dbRequestDraft.duration_hours || 2,
+                auth_type: (dbRequestDraft.auth_type || 'password'),
                 justification,
                 conversation_id: dbConversationId
             })
@@ -842,7 +844,7 @@ async function loadDbRequests() {
             list.innerHTML = `<div class="db-requests-empty">No ${dbStatusFilter === 'all' ? '' : dbStatusFilter.replace('_', ' ') + ' '}database requests</div>`;
             return;
         }
-        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin' })[r] || r;
+        const roleLabel = r => (r && typeof r === 'string' && r.length > 20) ? (r.slice(0, 20) + '…') : (r || 'custom');
         list.innerHTML = data.requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = db?.engine || 'db';
@@ -854,7 +856,7 @@ async function loadDbRequests() {
                 </div>
                 <div class="db-request-body">
                     <p><strong>${eng}</strong> • ${db?.host || '-'}:${db?.port || '-'}</p>
-                    <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | ${req.justification?.slice(0, 50) || ''}...</p>
+                    <p>${req.permissions ? 'Permissions: ' + (typeof req.permissions === 'string' ? req.permissions : (req.permissions || []).join(', ')) : 'Role: ' + roleLabel(req.role)} | ${req.duration_hours}h | ${req.justification?.slice(0, 50) || ''}...</p>
                 </div>
                 <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
                     ${canEdit ? `
@@ -946,6 +948,88 @@ async function loadDatabases() {
     }
 }
 
+function showHideDbCred(index, field) {
+    const c = approvedDbCreds[index];
+    if (!c) return;
+    const val = field === 'username' ? (c.username || '') : (field === 'token' ? (c.token || '') : (c.password || ''));
+    const cell = document.querySelector(`[data-creds-index="${index}"]`);
+    if (!cell) return;
+    const span = cell.querySelector(`.db-creds-value[data-field="${field}"]`);
+    const btn = cell.querySelector(`.db-creds-show[data-field="${field}"]`);
+    if (!span || !btn) return;
+    const isHidden = span.getAttribute('data-hidden') !== 'false';
+    if (isHidden) {
+        span.textContent = val || '(empty)';
+        span.setAttribute('data-hidden', 'false');
+        btn.innerHTML = '<i class="fas fa-eye-slash"></i> Hide';
+        setTimeout(function() {
+            if (span.getAttribute('data-hidden') === 'false') {
+                span.textContent = '••••••••';
+                span.setAttribute('data-hidden', 'true');
+                btn.innerHTML = '<i class="fas fa-eye"></i> Show';
+            }
+        }, 15000);
+    } else {
+        span.textContent = '••••••••';
+        span.setAttribute('data-hidden', 'true');
+        btn.innerHTML = '<i class="fas fa-eye"></i> Show';
+    }
+}
+
+function copyDbCred(index, field) {
+    const c = approvedDbCreds[index];
+    if (!c) return;
+    const val = field === 'username' ? (c.username || '') : (field === 'token' ? (c.token || '') : (c.password || ''));
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(val).then(function() {
+            if (typeof showToast === 'function') showToast('Copied to clipboard');
+            else alert('Copied to clipboard');
+        }).catch(function() { alert('Copy failed'); });
+    } else {
+        var ta = document.createElement('textarea');
+        ta.value = val;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (typeof showToast === 'function') showToast('Copied to clipboard');
+        else alert('Copied to clipboard');
+    }
+}
+
+async function generateDbIamToken(index) {
+    const userEmail = localStorage.getItem('userEmail') || '';
+    if (!userEmail) { alert('Please log in.'); return; }
+    const cell = document.querySelector('[data-creds-index="' + index + '"]');
+    const requestId = cell ? (cell.getAttribute('data-request-id') || '') : '';
+    if (!requestId) { alert('Request ID not found.'); return; }
+    const btnRow = document.getElementById('db-token-row-' + index);
+    const valueRow = document.getElementById('db-token-value-row-' + index);
+    if (btnRow) btnRow.innerHTML = '<span class="db-token-loading"><i class="fas fa-spinner fa-spin"></i> Generating...</span>';
+    try {
+        const res = await fetch(DB_API_BASE + '/api/databases/generate-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: requestId, user_email: userEmail })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (!approvedDbCreds[index]) approvedDbCreds[index] = { username: '', password: '', token: null };
+        approvedDbCreds[index].token = data.token;
+        if (btnRow) btnRow.innerHTML = '';
+        if (valueRow) {
+            valueRow.style.display = 'flex';
+            var span = valueRow.querySelector('.db-creds-value[data-field="token"]');
+            if (span) { span.textContent = '••••••••'; span.setAttribute('data-hidden', 'true'); }
+        }
+        if (typeof showToast === 'function') showToast('Token generated. Valid 15 min. Use Show/Copy below.');
+        else alert('Token generated. Valid 15 min. Use Show/Copy to paste into DBeaver/Workbench.');
+    } catch (e) {
+        if (btnRow) btnRow.innerHTML = '<button type="button" class="btn-primary btn-sm" onclick="generateDbIamToken(' + index + ')"><i class="fas fa-key"></i> Generate token</button> <span class="db-token-hint">(valid 15 min)</span>';
+        alert('Failed: ' + (e.message || e));
+    }
+}
+
 async function refreshApprovedDatabases() {
     const tbody = document.getElementById('approvedDatabasesTableBody');
     if (!tbody) return;
@@ -954,27 +1038,54 @@ async function refreshApprovedDatabases() {
         const res = await fetch(`${DB_API_BASE}/api/databases/approved?user_email=${encodeURIComponent(userEmail)}`);
         const data = await res.json();
         if (!data.databases?.length) {
+            approvedDbCreds = [];
             tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">No approved databases</td></tr>';
             return;
         }
+        approvedDbCreds = data.databases.map(function(d) { return { username: d.db_username || '', password: d.db_password || '', token: null }; });
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin' })[r || 'read_only'] || (r || 'Read-only');
-        tbody.innerHTML = data.databases.map(db => {
+        tbody.innerHTML = data.databases.map(function(db, i) {
             const requestId = (db.request_id || '').replace(/'/g, "\\'");
             const dbName = (db.db_name || db.engine || '').replace(/'/g, "\\'");
-            return `<tr>
-                <td>${db.engine}</td>
-                <td><strong>${db.host}:${db.port}</strong></td>
-                <td><code>${db.db_username}</code></td>
-                <td><span class="badge">${roleLabel(db.role)}</span></td>
-                <td>${new Date(db.expires_at).toLocaleString()}</td>
-                <td>
-                    <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')">
-                        <i class="fas fa-terminal"></i> Connect & Run Queries
-                    </button>
-                </td>
-            </tr>`;
+            const idx = i;
+            const isIam = db.auth_type === 'iam';
+            var credsCell;
+            if (isIam) {
+                credsCell = '<td class="db-creds-cell" data-creds-index="' + idx + '" data-request-id="' + escapeHtml(String(db.request_id || '')) + '">' +
+                    '<div class="db-creds-block">' +
+                    '<div class="db-creds-row"><span class="db-creds-label">Username</span> <code>' + escapeHtml(db.db_username || '') + '</code></div>' +
+                    '<div class="db-creds-row db-token-row" id="db-token-row-' + idx + '">' +
+                    '<button type="button" class="btn-primary btn-sm" onclick="generateDbIamToken(' + idx + ')"><i class="fas fa-key"></i> Generate token</button>' +
+                    ' <span class="db-token-hint">(valid 15 min)</span></div>' +
+                    '<div class="db-creds-row db-token-value-row" id="db-token-value-row-' + idx + '" style="display:none">' +
+                    '<span class="db-creds-label">Token</span> <span class="db-creds-value" data-field="token" data-hidden="true">••••••••</span> ' +
+                    '<button type="button" class="btn-link btn-sm" onclick="showHideDbCred(' + idx + ',\'token\')"><i class="fas fa-eye"></i> Show</button> ' +
+                    '<button type="button" class="btn-link btn-sm" onclick="copyDbCred(' + idx + ',\'token\')"><i class="fas fa-copy"></i> Copy</button></div>' +
+                    '</div></td>';
+            } else {
+                credsCell = '<td class="db-creds-cell" data-creds-index="' + idx + '">' +
+                    '<div class="db-creds-block">' +
+                    '<div class="db-creds-row"><span class="db-creds-label">Username</span> <span class="db-creds-value" data-field="username" data-hidden="true">••••••••</span> ' +
+                    '<button type="button" class="btn-link btn-sm db-creds-show" data-field="username" onclick="showHideDbCred(' + idx + ',\'username\')"><i class="fas fa-eye"></i> Show</button> ' +
+                    '<button type="button" class="btn-link btn-sm db-creds-copy" onclick="copyDbCred(' + idx + ',\'username\')"><i class="fas fa-copy"></i> Copy</button></div>' +
+                    '<div class="db-creds-row"><span class="db-creds-label">Password</span> <span class="db-creds-value" data-field="password" data-hidden="true">••••••••</span> ' +
+                    '<button type="button" class="btn-link btn-sm db-creds-show" data-field="password" onclick="showHideDbCred(' + idx + ',\'password\')"><i class="fas fa-eye"></i> Show</button> ' +
+                    '<button type="button" class="btn-link btn-sm db-creds-copy" onclick="copyDbCred(' + idx + ',\'password\')"><i class="fas fa-copy"></i> Copy</button></div>' +
+                    '</div></td>';
+            }
+            return '<tr>' +
+                '<td>' + escapeHtml(db.engine) + '</td>' +
+                '<td><strong>' + escapeHtml(db.host + ':' + db.port) + '</strong></td>' +
+                credsCell +
+                '<td><span class="badge">' + roleLabel(db.role) + '</span></td>' +
+                '<td>' + (db.expires_at ? new Date(db.expires_at).toLocaleString() : '') + '</td>' +
+                '<td>' +
+                '<button class="btn-primary btn-sm" onclick="connectToDatabase(\'' + db.host + '\', \'' + db.port + '\', \'' + (db.engine || '').replace(/'/g, "\\'") + '\', \'' + requestId + '\', \'' + dbName + '\')">' +
+                '<i class="fas fa-terminal"></i> Connect & Run Queries</button>' +
+                '</td></tr>';
         }).join('');
     } catch (e) {
+        approvedDbCreds = [];
         tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">Error loading</td></tr>';
     }
 }

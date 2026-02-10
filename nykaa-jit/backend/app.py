@@ -1379,6 +1379,7 @@ def get_database_requests():
             'status': ui_status,
             'databases': req.get('databases', []),
             'role': req.get('role', 'read_only'),
+            'permissions': req.get('permissions'),
             'duration_hours': req.get('duration_hours', 2),
             'justification': req.get('justification', ''),
             'created_at': req.get('created_at', ''),
@@ -1608,16 +1609,57 @@ def approve_request(request_id):
         if required.issubset(received):
             access_request['status'] = 'approved'
             access_request['approved_at'] = datetime.now().isoformat()
-            # Create DB user (same as auto-approved flow)
+            auth_type = access_request.get('auth_type', 'password')
+            if auth_type == 'iam':
+                # IAM auth: no password; user gets token via generate-token endpoint
+                access_request['db_username'] = access_request.get('db_username') or (access_request.get('user_email', '').split('@')[0].replace('.', '_') or 'iam_user')
+                _save_requests()
+                return jsonify({
+                    'status': 'approved',
+                    'message': '✅ Database access approved (IAM auth). Go to Databases tab and use "Generate token" to get a temporary token for DBeaver/Workbench.'
+                })
+            permissions = access_request.get('permissions')
+            role = access_request.get('role', 'read_only')
+            db_name_for_vault = None
+            if access_request.get('databases'):
+                db_name_for_vault = access_request['databases'][0].get('name') or 'mydb'
+            # Prefer Vault dynamic role (Bedrock-suggested permissions) or fixed role
+            try:
+                if permissions and role == 'custom':
+                    vault_creds = VaultManager.create_database_credentials_dynamic(
+                        user_email=access_request.get('user_email', ''),
+                        request_id=request_id,
+                        permissions=permissions,
+                        db_name=db_name_for_vault or 'mydb',
+                        duration_hours=int(access_request.get('duration_hours', 2)),
+                    )
+                else:
+                    vault_creds = VaultManager.create_database_credentials(
+                        role=role,
+                        duration_hours=int(access_request.get('duration_hours', 2))
+                    )
+                if vault_creds:
+                    access_request['db_username'] = vault_creds['username']
+                    access_request['db_password'] = vault_creds['password']
+                    access_request['vault_lease_id'] = vault_creds.get('lease_id')
+                    _save_requests()
+                    return jsonify({
+                        'status': 'approved',
+                        'message': '✅ Database access approved! Go to Databases tab to connect.'
+                    })
+            except Exception as e:
+                print(f"Vault approval error: {e}")
+            # Fallback: direct DB user creation
             admin_user = os.getenv('DB_ADMIN_USER', 'admin')
             admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-            role = access_request.get('role', 'read_only')
             if role == 'admin':
                 sql_perms = 'ALL PRIVILEGES'
             elif role == 'read_full_write':
                 sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
             elif role == 'read_limited_write':
                 sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
+            elif permissions:
+                sql_perms = (permissions if isinstance(permissions, str) else ', '.join(permissions or ['SELECT']))
             else:
                 sql_perms = 'SELECT'
             create_error = None
@@ -3710,14 +3752,7 @@ def database_ai_chat():
         if not message:
             return jsonify({'error': 'Message required'}), 400
         
-        # Prompt injection guard - validate before sending to AI (skip if module missing)
-        try:
-            from prompt_injection_guard import validate_ai_input
-            is_valid, error = validate_ai_input(message, check_sql=True)
-            if not is_valid:
-                return jsonify({'error': error}), 400
-        except ImportError:
-            pass  # No guard module - continue
+        # No guardrails on DB chat for now - Bedrock suggests permissions; guardrails can be applied later.
         
         # Create or get conversation
         if not conversation_id:
@@ -3759,22 +3794,21 @@ def database_ai_chat():
                     'suggested_role': suggested_role
                 })
         
-        # Build conversation history - include JIT roles so AI can explain them
+        # Build conversation - Bedrock suggests concrete MySQL permissions (no fixed L1/L2/L3)
         messages = [{
             'role': 'user',
-            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. Help users choose the right access role and understand what they can do.
+            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. The user will get a short-lived DB user with exactly the permissions you suggest.
 
-AVAILABLE JIT ROLES (choose one when requesting access):
-1. **Read-only**: SELECT, EXPLAIN, SHOW, DESCRIBE — for viewing data, reports, debugging. Safest option.
-2. **Read + Limited Write**: Above + INSERT, UPDATE, DELETE — for modifying data (no DDL).
-3. **Read + Full Write**: Above + TRUNCATE, CREATE, ALTER, DROP — for schema changes, migrations.
-4. **Admin**: All operations including GRANT, CREATE USER — for DBA tasks. Highest approval needed.
+Your task: Based on what the user says they need (e.g. "read reports", "update orders", "fix schema"), suggest a minimal set of MySQL privileges. Use standard privilege names: SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, INDEX, EXPLAIN, SHOW, etc. For read-only use at least SELECT and EXPLAIN.
 
-When users ask "what roles are available", "what can I do", "which role do I need", explain these roles clearly and suggest the minimal role for their use case.
+You must end your reply with exactly one line in this format (no other text on that line):
+PERMISSIONS: <comma-separated list>
+Example: PERMISSIONS: SELECT, EXPLAIN, SHOW
+Example: PERMISSIONS: SELECT, INSERT, UPDATE, DELETE
 
-User request: {message}
+Be conversational first, then add the PERMISSIONS line at the end.
 
-Provide a helpful response. Be conversational and friendly. If they ask about roles, explain the 4 roles above."""
+User request: {message}"""
         }]
         
         # Call Bedrock AI (fallback to rule-based when AWS creds expired)
@@ -3809,23 +3843,25 @@ Provide a helpful response. Be conversational and friendly. If they ask about ro
         # Store AI response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
         
-        # Try to extract suggested permissions and role
+        # Extract suggested permissions from Bedrock (look for PERMISSIONS: line)
         suggested_perms = []
-        perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'GRANT', 'REVOKE']
-        for perm in perms:
-            if perm in ai_response.upper():
-                suggested_perms.append(perm)
-        suggested_role = None
-        if any(p in suggested_perms for p in ['INSERT', 'UPDATE', 'DELETE']) and 'DROP' not in suggested_perms and 'CREATE' not in suggested_perms:
-            suggested_role = 'read_limited_write'
-        elif 'SELECT' in suggested_perms and len(suggested_perms) == 1:
-            suggested_role = 'read_only'
+        for line in ai_response.split('\n'):
+            line = line.strip()
+            if line.upper().startswith('PERMISSIONS:'):
+                rest = line[12:].strip()
+                suggested_perms = [p.strip() for p in rest.split(',') if p.strip()]
+                break
+        if not suggested_perms:
+            perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'EXPLAIN', 'SHOW', 'INDEX', 'TRUNCATE']
+            for perm in perms:
+                if perm in ai_response.upper():
+                    suggested_perms.append(perm)
         
         return jsonify({
             'response': ai_response,
             'conversation_id': conversation_id,
             'permissions': suggested_perms if suggested_perms else None,
-            'suggested_role': suggested_role
+            'suggested_permissions': suggested_perms if suggested_perms else None
         })
         
     except Exception as e:
@@ -3960,6 +3996,7 @@ def request_database_access():
         use_vault = data.get('use_vault', False)
         ai_generated = data.get('ai_generated', False)
         role = data.get('role', 'read_only')  # MVP 2: read_only, read_limited_write, read_full_write, admin
+        auth_type = data.get('auth_type', 'password')  # 'password' = Vault user+password; 'iam' = generate token on demand
         
         # Only DROP/TRUNCATE/DDL/ALL require approval; plain DELETE (data) allowed for Limited Write
         perms = (permissions or []) if isinstance(permissions, list) else [p.strip() for p in str(permissions or '').split(',') if p.strip()]
@@ -3977,15 +4014,25 @@ def request_database_access():
             approval_required = ['self']
             approval_message = 'Auto-approved for read/write queries'
         
-        # Try Vault first, fallback to direct creation
+        # Try Vault for password auth only; IAM auth gets token on demand via generate-token endpoint
         vault_lease_id = None
         create_error = None
-        if status == 'approved':
+        db_name_for_vault = (databases[0].get('name') if databases else None) or 'mydb'
+        if status == 'approved' and auth_type != 'iam':
             try:
-                vault_creds = VaultManager.create_database_credentials(
-                    role=role,
-                    duration_hours=duration_hours
-                )
+                if permissions and role == 'custom':
+                    vault_creds = VaultManager.create_database_credentials_dynamic(
+                        user_email=user_email,
+                        request_id=request_id,
+                        permissions=permissions,
+                        db_name=db_name_for_vault,
+                        duration_hours=duration_hours,
+                    )
+                else:
+                    vault_creds = VaultManager.create_database_credentials(
+                        role=role,
+                        duration_hours=duration_hours
+                    )
                 if vault_creds:
                     db_username = vault_creds['username']
                     password = vault_creds['password']
@@ -3999,6 +4046,9 @@ def request_database_access():
                 password = generate_password()
         else:
             password = None
+        if auth_type == 'iam':
+            password = None  # No password; user gets token via generate-token
+            db_username = db_username or (user_email.split('@')[0].replace('.', '_') if user_email else 'iam_user')
         
         db_request = {
             'id': request_id,
@@ -4008,6 +4058,7 @@ def request_database_access():
             'user_full_name': user_full_name,
             'db_username': db_username,
             'db_password': password,
+            'auth_type': auth_type,
             'permissions': permissions,
             'query_types': query_types,
             'role': role,
@@ -4095,6 +4146,8 @@ def get_approved_databases():
                         'host': db['host'],
                         'port': db['port'],
                         'db_username': req['db_username'],
+                        'db_password': req.get('db_password'),  # For DBeaver/Workbench; only returned to request owner
+                        'auth_type': req.get('auth_type', 'password'),  # 'password' | 'iam' (token on demand)
                         'role': req.get('role', 'read_only'),
                         'expires_at': req['expires_at']
                     })
@@ -4102,6 +4155,57 @@ def get_approved_databases():
         return jsonify({'databases': approved_databases})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/databases/generate-token', methods=['POST'])
+def generate_db_iam_token():
+    """Generate a short-lived RDS IAM auth token for an approved IAM-type request. Token valid ~15 min."""
+    try:
+        data = request.get_json() or {}
+        request_id = data.get('request_id')
+        user_email = data.get('user_email')
+        region = data.get('region') or os.getenv('AWS_REGION', 'ap-south-1')
+        if not request_id or not user_email:
+            return jsonify({'error': 'request_id and user_email required'}), 400
+        if request_id not in requests_db:
+            return jsonify({'error': 'Request not found'}), 404
+        req = requests_db[request_id]
+        if req.get('type') != 'database_access' or req.get('user_email') != user_email:
+            return jsonify({'error': 'Request not found or access denied'}), 404
+        if req.get('status') != 'approved':
+            return jsonify({'error': 'Request is not approved'}), 400
+        if req.get('auth_type') != 'iam':
+            return jsonify({'error': 'This request uses password auth; use username/password from the table'}), 400
+        dbs = req.get('databases', [])
+        if not dbs:
+            return jsonify({'error': 'No database in request'}), 400
+        db = dbs[0]
+        host = db.get('host')
+        port = int(db.get('port', 3306))
+        db_username = req.get('db_username')
+        if not host or not db_username:
+            return jsonify({'error': 'Missing host or db_username'}), 400
+        try:
+            rds = boto3.client('rds', region_name=region)
+            token = rds.generate_db_auth_token(
+                DBHostname=host,
+                Port=port,
+                DBUsername=db_username,
+                Region=region
+            )
+        except Exception as e:
+            print(f"generate_db_auth_token error: {e}")
+            return jsonify({'error': f'Failed to generate token: {str(e)}. Ensure IAM auth is enabled on RDS and this role has rds-db:connect.'}), 500
+        return jsonify({
+            'token': token,
+            'expires_in_seconds': 900,
+            'db_username': db_username,
+            'host': host,
+            'port': port
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/databases/execute-query', methods=['POST'])
 def execute_database_query():

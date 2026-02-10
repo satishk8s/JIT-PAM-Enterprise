@@ -1064,7 +1064,7 @@
                                 </div>
                                 <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
-                                    <input type="text" id="dbAiInput" placeholder="Type your message or describe custom permissions..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
+                                    <input type="text" id="dbAiInput" placeholder="Or type a message (L1/L2/L3 above for quick choice)..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
                                     <button class="btn-primary" onclick="sendDbAiMessage()"><i class="fas fa-paper-plane"></i></button>
                                 </div>
                                 <div id="dbAiRequestSummary" class="db-ai-summary" style="display: none;"></div>
@@ -1081,7 +1081,7 @@
                                     <tr>
                                         <th>Engine</th>
                                         <th>Endpoint</th>
-                                        <th>Username</th>
+                                        <th>Credentials (for DBeaver / Workbench)</th>
                                         <th>Role</th>
                                         <th>Expires</th>
                                         <th>Actions</th>

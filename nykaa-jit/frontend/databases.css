@@ -95,6 +95,58 @@
     color: var(--text-secondary);
 }
 
+/* Approved DB credentials (masked, Show/Copy for DBeaver/Workbench) */
+.db-creds-cell {
+    max-width: 320px;
+    vertical-align: top;
+}
+.db-creds-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.db-creds-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+}
+.db-creds-label {
+    font-weight: 600;
+    color: var(--text-secondary);
+    min-width: 64px;
+}
+.db-creds-value {
+    font-family: monospace;
+    background: var(--bg-secondary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    min-width: 80px;
+}
+.db-creds-show,
+.db-creds-copy {
+    font-size: 12px;
+    padding: 2px 6px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: var(--primary-color);
+}
+.db-creds-show:hover,
+.db-creds-copy:hover {
+    text-decoration: underline;
+}
+.db-token-hint {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-left: 6px;
+}
+.db-token-loading {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
 /* Query Terminal - Full-width, spacious layout */
 .db-query-terminal {
     background: var(--bg-secondary);
