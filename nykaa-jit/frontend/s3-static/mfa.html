@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>S3 File Explorer – Setup MFA</title>
+  <link href="https://fonts.googleapis.com/css2?family=Josefin+Sans&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg">
+  <div class="card">
+    <h2>Setup MFA</h2>
+    <div id="qr" class="qr"></div>
+    <div id="note" class="note"></div>
+
+    <input id="code" placeholder="Enter 6-digit code" inputmode="numeric" />
+    <button class="btn-primary" onclick="verify()">Verify</button>
+
+    <div id="msg2" class="note"></div>
+
+    <div class="note" style="text-align:center; margin-top:12px;">
+      Already set up? <a href="login.html">Back to Login</a>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    loadQR();
+  </script>
+</body>
+</html>

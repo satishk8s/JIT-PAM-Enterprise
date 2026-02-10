@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - JIT Access Portal</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .login-container {
+            width: 100%;
+            max-width: 450px;
+            padding: 2rem;
+        }
+
+        .login-card {
+            background: white;
+            border-radius: 12px;
+            padding: 3rem 2.5rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        }
+
+        .login-header {
+            margin-bottom: 2rem;
+        }
+
+        .login-header h2 {
+            font-size: 1.75rem;
+            color: #1a1a1a;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+
+        .login-header p {
+            color: #666;
+            font-size: 0.95rem;
+            line-height: 1.5;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #333;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .required {
+            color: #e74c3c;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 0.875rem 1rem;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: all 0.3s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #4A90E2;
+            box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+        }
+
+        .input-hint {
+            display: block;
+            margin-top: 0.5rem;
+            color: #999;
+            font-size: 0.85rem;
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 0.875rem;
+            background: #4A90E2;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary:hover {
+            background: #357ABD;
+            transform: translateY(-1px);
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            margin: 2rem 0;
+            color: #999;
+            font-size: 0.9rem;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: #e0e0e0;
+        }
+
+        .divider span {
+            padding: 0 1rem;
+        }
+
+        .alt-login-options {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .alt-login-btn {
+            width: 100%;
+            padding: 0.875rem;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            color: #333;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+
+        .alt-login-btn:hover {
+            border-color: #4A90E2;
+            color: #4A90E2;
+            background: rgba(74, 144, 226, 0.02);
+        }
+
+        .back-btn {
+            background: none;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            padding: 0.5rem 0;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            transition: color 0.3s;
+        }
+
+        .back-btn:hover {
+            color: #4A90E2;
+        }
+
+        .login-links {
+            text-align: center;
+            margin-top: 1.5rem;
+        }
+
+        .login-links a {
+            color: #4A90E2;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+
+        .login-links a:hover {
+            text-decoration: underline;
+        }
+
+        .otp-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .otp-header i {
+            font-size: 3rem;
+            color: #4A90E2;
+            margin-bottom: 1rem;
+        }
+
+        .otp-header h3 {
+            font-size: 1.5rem;
+            color: #1a1a1a;
+            margin-bottom: 0.5rem;
+        }
+
+        .otp-header p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .otp-inputs {
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+            margin-bottom: 2rem;
+        }
+
+        .otp-input {
+            width: 50px;
+            height: 50px;
+            text-align: center;
+            font-size: 1.5rem;
+            font-weight: 600;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+        }
+
+        .otp-input:focus {
+            border-color: #4A90E2;
+            box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+        }
+
+        .mfa-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .mfa-header i {
+            font-size: 3rem;
+            color: #4A90E2;
+            margin-bottom: 1rem;
+        }
+
+        .mfa-header h3 {
+            font-size: 1.5rem;
+            color: #1a1a1a;
+            margin-bottom: 0.5rem;
+        }
+
+        .mfa-header p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .mfa-input {
+            text-align: center;
+            font-size: 1.3rem;
+            letter-spacing: 0.3rem;
+            font-weight: 600;
+        }
+
+        .login-footer {
+            text-align: center;
+            margin-top: 2rem;
+            color: #999;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <!-- Default: Email/OTP Login -->
+            <div id="emailOTPView">
+                <div class="login-header">
+                    <h2>Login to your Account</h2>
+                    <p>Please enter your email to receive a one-time passcode.</p>
+                </div>
+                
+                <form id="emailOTPForm">
+                    <div class="form-group">
+                        <label>Email <span class="required">*</span></label>
+                        <input type="email" id="emailOTP" placeholder="Enter Email" required>
+                        <small class="input-hint">Please enter a username or email</small>
+                    </div>
+                    <button type="submit" class="btn-primary">Continue</button>
+                </form>
+                
+                <div class="divider">
+                    <span>Or</span>
+                </div>
+                
+                <div class="alt-login-options">
+                    <button class="alt-login-btn" onclick="showSSOLogin()">Login with SSO</button>
+                    <button class="alt-login-btn" onclick="showPasswordLogin()">Login with Password</button>
+                </div>
+            </div>
+
+            <!-- Password Login -->
+            <div id="passwordLoginView" style="display: none;">
+                <button class="back-btn" onclick="showDefaultLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="login-header">
+                    <h2>Login with Password</h2>
+                    <p>Enter your credentials to access your account.</p>
+                </div>
+                
+                <form id="passwordLoginForm">
+                    <div class="form-group">
+                        <label>Email or Username <span class="required">*</span></label>
+                        <input type="text" id="username" placeholder="Enter Email or Username" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Password <span class="required">*</span></label>
+                        <input type="password" id="password" placeholder="Enter Password" required>
+                    </div>
+                    <button type="submit" class="btn-primary">Continue</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('Password reset coming soon')">Forgot Password?</a>
+                </div>
+            </div>
+
+            <!-- OTP Verification -->
+            <div id="otpVerifyView" style="display: none;">
+                <button class="back-btn" onclick="showDefaultLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="otp-header">
+                    <i class="fas fa-mobile-alt"></i>
+                    <h3>Verify One-Time Passcode</h3>
+                    <p>Enter the 6-digit code sent to <strong id="otpEmail"></strong></p>
+                </div>
+                
+                <form id="otpVerifyForm">
+                    <div class="otp-inputs">
+                        <input type="text" maxlength="1" class="otp-input" id="otp1">
+                        <input type="text" maxlength="1" class="otp-input" id="otp2">
+                        <input type="text" maxlength="1" class="otp-input" id="otp3">
+                        <input type="text" maxlength="1" class="otp-input" id="otp4">
+                        <input type="text" maxlength="1" class="otp-input" id="otp5">
+                        <input type="text" maxlength="1" class="otp-input" id="otp6">
+                    </div>
+                    <button type="submit" class="btn-primary">Verify & Continue</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('✅ OTP resent')">Resend Code</a>
+                </div>
+            </div>
+
+            <!-- MFA Verification -->
+            <div id="mfaView" style="display: none;">
+                <button class="back-btn" onclick="showPasswordLogin()">
+                    <i class="fas fa-arrow-left"></i> Back
+                </button>
+                <div class="mfa-header">
+                    <i class="fas fa-shield-alt"></i>
+                    <h3>Two-Factor Authentication</h3>
+                    <p>Open your authenticator app to get your verification code</p>
+                </div>
+                
+                <form id="mfaForm">
+                    <div class="form-group">
+                        <label>Authentication Code <span class="required">*</span></label>
+                        <input type="text" id="mfaCode" placeholder="Enter 6-digit code" maxlength="6" required class="mfa-input">
+                    </div>
+                    <button type="submit" class="btn-primary">Verify & Sign In</button>
+                </form>
+                
+                <div class="login-links">
+                    <a href="#" onclick="alert('MFA help coming soon')">Having trouble?</a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="login-footer">
+            <p>&copy; 2025 Nykaa JIT Access Portal. All rights reserved.</p>
+        </div>
+    </div>
+
+    <script>
+        // View Management
+        function showDefaultLogin() {
+            document.getElementById('emailOTPView').style.display = 'block';
+            document.getElementById('passwordLoginView').style.display = 'none';
+            document.getElementById('otpVerifyView').style.display = 'none';
+            document.getElementById('mfaView').style.display = 'none';
+        }
+
+        function showPasswordLogin() {
+            document.getElementById('emailOTPView').style.display = 'none';
+            document.getElementById('passwordLoginView').style.display = 'block';
+            document.getElementById('otpVerifyView').style.display = 'none';
+            document.getElementById('mfaView').style.display = 'none';
+        }
+
+        function showOTPVerify() {
+            document.getElementById('emailOTPView').style.display = 'none';
+            document.getElementById('passwordLoginView').style.display = 'none';
+            document.getElementById('otpVerifyView').style.display = 'block';
+            document.getElementById('mfaView').style.display = 'none';
+        }
+
+        function showMFA() {
+            document.getElementById('emailOTPView').style.display = 'none';
+            document.getElementById('passwordLoginView').style.display = 'none';
+            document.getElementById('otpVerifyView').style.display = 'none';
+            document.getElementById('mfaView').style.display = 'block';
+        }
+
+        function showSSOLogin() {
+            alert('Google SSO integration coming soon');
+        }
+
+        // Email/OTP Form
+        document.getElementById('emailOTPForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const email = document.getElementById('emailOTP').value;
+            document.getElementById('otpEmail').textContent = email;
+            alert('✅ OTP sent to ' + email);
+            showOTPVerify();
+        });
+
+        // Password Login Form
+        document.getElementById('passwordLoginForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            showMFA();
+        });
+
+        // OTP Verify Form
+        document.getElementById('otpVerifyForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const otp = document.getElementById('otp1').value +
+                       document.getElementById('otp2').value +
+                       document.getElementById('otp3').value +
+                       document.getElementById('otp4').value +
+                       document.getElementById('otp5').value +
+                       document.getElementById('otp6').value;
+            
+            if (otp.length === 6) {
+                alert('✅ Login successful!');
+                // Redirect to main app
+                window.location.href = 'index.html';
+            }
+        });
+
+        // MFA Form
+        document.getElementById('mfaForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const mfaCode = document.getElementById('mfaCode').value;
+            
+            if (mfaCode.length === 6) {
+                alert('✅ Login successful!');
+                // Redirect to main app
+                window.location.href = 'index.html';
+            }
+        });
+
+        // OTP Input Auto-Focus
+        const otpInputs = document.querySelectorAll('.otp-input');
+        otpInputs.forEach((input, index) => {
+            input.addEventListener('input', function() {
+                if (this.value.length === 1 && index < otpInputs.length - 1) {
+                    otpInputs[index + 1].focus();
+                }
+            });
+            
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Backspace' && this.value === '' && index > 0) {
+                    otpInputs[index - 1].focus();
+                }
+            });
+        });
+    </script>
+</body>
+</html>

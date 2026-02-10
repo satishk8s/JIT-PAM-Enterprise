@@ -36,3 +36,4 @@ This folder holds logo images used in the JIT Access Portal.
 - Vendor docs (e.g. AWS, Azure, GCP brand guidelines)
 
 Keep filenames lowercase and use `.png` for compatibility.
+

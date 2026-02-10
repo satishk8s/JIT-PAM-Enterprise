@@ -71,3 +71,4 @@ The credentials must have:
 - **"AI chat error"** or no response: Check credentials and IAM permissions
 - **Region**: Database AI uses `ap-south-1`. Ensure Bedrock is available in that region
 - **Fallback**: The app will show an error; users can still request access and select roles manually
+

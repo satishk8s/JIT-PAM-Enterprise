@@ -337,11 +337,15 @@ async function refreshApprovedInstances() {
         
     } catch (error) {
         console.error('❌ Error loading approved instances:', error);
+        const isNetworkError = error.message === 'Failed to fetch' || error.name === 'TypeError';
+        const msg = isNetworkError
+            ? 'Backend not running. Start the backend (e.g. python app.py) and refresh.'
+            : `Error: ${error.message}`;
         const tbodies = document.querySelectorAll('#approvedInstancesTableBody');
         tbodies.forEach(tbody => {
             tbody.innerHTML = `
                 <tr><td colspan="5" style="text-align: center; padding: 40px; color: #f44336;">
-                    Error: ${error.message}
+                    ${msg}
                 </td></tr>`;
         });
     }

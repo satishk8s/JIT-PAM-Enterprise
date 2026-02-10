@@ -138,3 +138,4 @@ def validate_sql_query(query, role='read_only'):
         return False, f"❌ SECURITY: {keyword} is not allowed for role '{role}'. Allowed: {', '.join(allowed)}"
     
     return True, None
+

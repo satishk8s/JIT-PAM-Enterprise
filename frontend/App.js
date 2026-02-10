@@ -409,7 +409,8 @@ function showPage(pageId) {
     });
     
     // Show selected page
-    document.getElementById(pageId + 'Page').classList.add('active');
+    const pageEl = document.getElementById(pageId + 'Page');
+    if (pageEl) pageEl.classList.add('active');
     
     // Update sidebar nav items
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {

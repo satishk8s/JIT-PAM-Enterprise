@@ -1,0 +1,2 @@
+# Ensure shell scripts use LF (fixes 203/EXEC on EC2 with CRLF)
+*.sh text eol=lf

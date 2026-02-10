@@ -1,0 +1,4 @@
+# Database Access Proxy - minimal deps (no Vault, no boto3)
+Flask==2.3.3
+Flask-CORS==4.0.0
+PyMySQL>=1.1.0

@@ -1,0 +1,220 @@
+/* ============================================
+   OFFICIAL VENDOR ICONS
+   AWS, Azure, GCP, Databases, Security
+   ============================================ */
+
+/* AWS Icons */
+.icon-aws {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 304 182'%3E%3Cpath fill='%23FF9900' d='M86.66 0l-1.78 4.34-19.24 46.86-20.57-50.2H0l30.15 73.59-30.15 73.59h45.07l19.24-46.86 20.57 50.2h45.07L75.88 73.59 106.03 0H86.66zm125.78 0h-17.13l-53.3 129.75h19.09l7.6-18.84h51.12l7.95 18.84h21.29L212.44 0zm-50.27 88.4l19.41-48.17 19.41 48.17h-38.82z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Azure Icons */
+.icon-azure {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 161.2 161.2'%3E%3Cpath fill='%230078D4' d='M88.2 0L40.5 78.5 0 78.5 65.3 161.2 161.2 161.2 161.2 0z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* GCP Icons */
+.icon-gcp {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234285F4' d='M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z'/%3E%3Cpath fill='%2334A853' d='M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z'/%3E%3Cpath fill='%23FBBC05' d='M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z'/%3E%3Cpath fill='%23EA4335' d='M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Oracle Cloud */
+.icon-oracle {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23F80000' d='M22.45 0H1.55C.7 0 0 .69 0 1.55v20.9C0 23.31.69 24 1.55 24h20.9c.85 0 1.55-.69 1.55-1.55V1.55C24 .69 23.31 0 22.45 0zM6.68 20.09H3.91V8.73h2.77v11.36zm-1.39-12.5c-.89 0-1.61-.72-1.61-1.61s.72-1.61 1.61-1.61 1.61.72 1.61 1.61-.72 1.61-1.61 1.61zm14.5 12.5h-2.77v-5.57c0-1.11-.02-2.53-1.54-2.53-1.54 0-1.78 1.2-1.78 2.45v5.65H9.85V8.73h2.66v1.56h.04c.38-.72 1.3-1.47 2.67-1.47 2.85 0 3.38 1.88 3.38 4.32v7.95z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* PostgreSQL */
+.icon-postgresql {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23336791' d='M23.559 14.406a2.123 2.123 0 0 1-2.12 2.122H2.56a2.123 2.123 0 0 1-2.12-2.122V9.594a2.123 2.123 0 0 1 2.12-2.122h18.88a2.123 2.123 0 0 1 2.12 2.122v4.812zm-8.52-2.662a.26.26 0 0 0-.26.26v.873c0 .143.117.26.26.26h.524a.26.26 0 0 0 .26-.26v-.874a.26.26 0 0 0-.26-.26h-.524zm-4.85 0a.26.26 0 0 0-.26.26v.873c0 .143.117.26.26.26h.524a.26.26 0 0 0 .26-.26v-.874a.26.26 0 0 0-.26-.26h-.524zm-4.85 0a.26.26 0 0 0-.26.26v.873c0 .143.117.26.26.26h.524a.26.26 0 0 0 .26-.26v-.874a.26.26 0 0 0-.26-.26h-.524z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* MySQL */
+.icon-mysql {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234479A1' d='M16.405 5.501c-.169 0-.311.14-.311.311v.621c0 .172.142.311.311.311h1.956c.17 0 .312-.139.312-.311v-.621a.313.313 0 0 0-.312-.311h-1.956zm-4.003 0c-.17 0-.312.14-.312.311v.621c0 .172.142.311.312.311h1.955c.169 0 .311-.139.311-.311v-.621a.31.31 0 0 0-.311-.311h-1.955zm-3.994 0c-.169 0-.311.14-.311.311v.621c0 .172.142.311.311.311h1.956c.17 0 .311-.139.311-.311v-.621a.313.313 0 0 0-.311-.311H8.408z'/%3E%3Cpath fill='%234479A1' d='M16.405 5.501c-.169 0-.311.14-.311.311v.621c0 .172.142.311.311.311h1.956c.17 0 .312-.139.312-.311v-.621a.313.313 0 0 0-.312-.311h-1.956zm-4.003 0c-.17 0-.312.14-.312.311v.621c0 .172.142.311.312.311h1.955c.169 0 .311-.139.311-.311v-.621a.31.31 0 0 0-.311-.311h-1.955zm-3.994 0c-.169 0-.311.14-.311.311v.621c0 .172.142.311.311.311h1.956c.17 0 .311-.139.311-.311v-.621a.313.313 0 0 0-.311-.311H8.408z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* MongoDB */
+.icon-mongodb {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2347A248' d='M17.193 9.555c-1.264-5.58-4.252-7.414-4.573-8.115-.28-.394-.53-.954-.735-1.44-.036.495-.055.685-.523 1.184-.723.566-4.438 2.682-4.74 8.07-.282 5.092 3.767 8.045 4.537 8.665.548.45.867.6 1.272.6.4 0 .735-.15 1.272-.6.77-.62 4.82-3.573 4.54-8.665zm-1.537 5.442c-.1.146-.224.278-.366.384-1.188 1.015-2.852 1.188-4.007.188-1.155-1-1.54-2.65-1.54-3.9 0-1.25.385-2.9 1.54-3.9 1.155-1 2.82-.827 4.007.188.142.106.266.238.366.384-.1-.146-.224-.278-.366-.384-1.188-1.015-2.852-1.188-4.007-.188-1.155 1-1.54 2.65-1.54 3.9 0 1.25-.385 2.9-1.54 3.9-1.155 1-2.82.827-4.007-.188-.142-.106-.266-.238-.366-.384z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Kubernetes */
+.icon-kubernetes {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23326CE5' d='M10.52 3.43c.78-1.3 2.74-1.3 3.52 0l7.35 12.23c.78 1.3-.19 2.93-1.76 2.93H4.93c-1.57 0-2.54-1.63-1.76-2.93L10.52 3.43z'/%3E%3Cpath fill='%23326CE5' d='M12 1.5c-.55 0-1 .45-1 1v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1zm0 15c-.55 0-1 .45-1 1v2c0 .55.45 1 1 1s1-.45 1-1v-2c0-.55-.45-1-1-1zm-8.5-6c-.55 0-1 .45-1 1s.45 1 1 1h2c.55 0 1-.45 1-1s-.45-1-1-1h-2zm15 0c-.55 0-1 .45-1 1s.45 1 1 1h2c.55 0 1-.45 1-1s-.45-1-1-1h-2z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Docker */
+.icon-docker {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232496ED' d='M13.983 11.103h2.119a.186.186 0 0 0 .186-.186V8.798a.186.186 0 0 0-.186-.186h-2.119a.186.186 0 0 0-.186.186v2.119a.186.186 0 0 0 .186.186zm-4.632 0h2.119a.186.186 0 0 0 .186-.186V8.798a.186.186 0 0 0-.186-.186H9.351a.186.186 0 0 0-.186.186v2.119a.186.186 0 0 0 .186.186zm-4.633 0h2.119a.186.186 0 0 0 .186-.186V8.798a.186.186 0 0 0-.186-.186H4.718a.186.186 0 0 0-.186.186v2.119a.186.186 0 0 0 .186.186z'/%3E%3Cpath fill='%232496ED' d='M20.188 9.988h-1.59v1.59a.53.53 0 0 1-.53.53h-1.59a.53.53 0 0 1-.53-.53v-1.59h-1.59a.53.53 0 0 1-.53-.53V7.868a.53.53 0 0 1 .53-.53h1.59V5.748a.53.53 0 0 1 .53-.53h1.59a.53.53 0 0 1 .53.53v1.59h1.59a.53.53 0 0 1 .53.53v1.59a.53.53 0 0 1-.53.53z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* EC2 / Compute */
+.icon-ec2 {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23FF9900' d='M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z'/%3E%3Cpath fill='%23FFFFFF' d='M12 7l-6 3v6c0 3.31 2.69 6 6 6s6-2.69 6-6v-6l-6-3z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* S3 / Storage */
+.icon-s3 {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23569A31' d='M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5zm0 2.18L20 7v9.82c0 4.12-2.85 7.97-8 9.18-5.15-1.21-8-5.06-8-9.18V7l8-2.82z'/%3E%3Cpath fill='%23569A31' d='M12 6L6 8.5v5c0 2.76 1.9 5.35 6 6.5 4.1-1.15 6-3.74 6-6.5v-5L12 6zm0 2.36L18 10v3.64c0 1.9-1.32 3.68-6 4.64-4.68-.96-6-2.74-6-4.64V10l6-1.64z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Security / Shield */
+.icon-shield {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23EF4444' d='M12 2L2 7v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z'/%3E%3Cpath fill='%23FFFFFF' d='M12 7l-5 2.5v4.5c0 3.31 2.24 6.4 5 7.5 2.76-1.1 5-4.19 5-7.5V9.5L12 7z'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Database Generic */
+.icon-database {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cellipse fill='%2338BDF8' cx='12' cy='6' rx='8' ry='3'/%3E%3Cpath fill='%2338BDF8' d='M4 9v6c0 1.66 3.58 3 8 3s8-1.34 8-3V9'/%3E%3Cellipse fill='%2338BDF8' cx='12' cy='18' rx='8' ry='3'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Server / VM */
+.icon-server {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='%231F2937' x='2' y='3' width='20' height='4' rx='1'/%3E%3Crect fill='%231F2937' x='2' y='10' width='20' height='4' rx='1'/%3E%3Crect fill='%231F2937' x='2' y='17' width='20' height='4' rx='1'/%3E%3Ccircle fill='%2338BDF8' cx='6' cy='5' r='1'/%3E%3Ccircle fill='%2338BDF8' cx='6' cy='12' r='1'/%3E%3Ccircle fill='%2338BDF8' cx='6' cy='19' r='1'/%3E%3C/svg%3E");
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+}
+
+/* Icon sizes */
+.icon-aws,
+.icon-azure,
+.icon-gcp,
+.icon-oracle,
+.icon-postgresql,
+.icon-mysql,
+.icon-mongodb,
+.icon-kubernetes,
+.icon-docker,
+.icon-ec2,
+.icon-s3,
+.icon-shield,
+.icon-database,
+.icon-server {
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    min-height: 24px;
+    flex-shrink: 0;
+    vertical-align: middle;
+}
+
+.icon-aws.icon-sm,
+.icon-azure.icon-sm,
+.icon-gcp.icon-sm,
+.icon-oracle.icon-sm,
+.icon-postgresql.icon-sm,
+.icon-mysql.icon-sm,
+.icon-mongodb.icon-sm,
+.icon-kubernetes.icon-sm,
+.icon-docker.icon-sm,
+.icon-ec2.icon-sm,
+.icon-s3.icon-sm,
+.icon-shield.icon-sm,
+.icon-database.icon-sm,
+.icon-server.icon-sm {
+    width: 20px;
+    height: 20px;
+}
+
+.icon-aws.icon-lg,
+.icon-azure.icon-lg,
+.icon-gcp.icon-lg,
+.icon-oracle.icon-lg,
+.icon-postgresql.icon-lg,
+.icon-mysql.icon-lg,
+.icon-mongodb.icon-lg,
+.icon-kubernetes.icon-lg,
+.icon-docker.icon-lg,
+.icon-ec2.icon-lg,
+.icon-s3.icon-lg,
+.icon-shield.icon-lg,
+.icon-database.icon-lg,
+.icon-server.icon-lg {
+    width: 48px;
+    height: 48px;
+}
+
+
+

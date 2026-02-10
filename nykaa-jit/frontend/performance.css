@@ -1,0 +1,85 @@
+/* Performance: faster render, sharper text, less jank on scroll */
+
+/* Crisp text on high-DPI (fixes blurry/low-res look) */
+html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+}
+
+/* Sharper images - avoid scaling blur on logos */
+img.page-title-logo,
+img.card-logo,
+img.nav-logo {
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+/* GPU layer + crisp transforms (prevents subpixel blur) */
+.page-content,
+.app-main,
+.requests-category-card,
+.jit-requests-grid,
+.terminal-page-layout,
+.term-query-terminal {
+    contain: paint;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+}
+
+/* Isolate scroll areas to reduce repaints */
+.terminal-page-layout .terminal-sidebar,
+.sidebar-nav,
+.page {
+    contain: paint;
+}
+/* content-visibility: skip off-screen work (biggest scroll win) */
+.jit-requests-grid {
+    content-visibility: auto;
+}
+.jit-requests-grid .requests-category-card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 72px;
+}
+/* Do NOT use content-visibility on terminal page - causes blank rendering when switching to Terminal */
+
+/* Avoid layout thrash on inputs */
+input, textarea, select {
+    will-change: auto;
+}
+
+/* Lighter shadows for faster paint */
+[data-theme="dark"] .kpi-card,
+[data-theme="dark"] .db-section.card {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+/* Reduce decorative animations (bulb glow, tab pulse) - less CPU */
+.kpi-trend,
+.requests-status-btn,
+.terminal-connection-card {
+    animation: none !important;
+}
+.requests-status-btn.requests-status-glow {
+    animation: requests-status-glow-subtle 2s ease-in-out infinite;
+}
+@keyframes requests-status-glow-subtle {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(56,189,248,0.3); }
+    50% { box-shadow: 0 0 0 2px rgba(56,189,248,0.5); }
+}
+
+/* Respect reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* Lag fix: disable decorative animations (bulb glow, pulse) - saves CPU on scroll */
+body.performance-mode *,
+body.performance-mode *::before,
+body.performance-mode *::after {
+    animation: none !important;
+    transition-duration: 0.06s !important;
+}
+

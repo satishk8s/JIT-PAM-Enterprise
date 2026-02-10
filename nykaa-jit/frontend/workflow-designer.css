@@ -1,0 +1,352 @@
+/* ============================================
+   VISUAL WORKFLOW DESIGNER STYLES
+   ============================================ */
+
+.workflow-designer-container {
+    display: grid;
+    grid-template-columns: 250px 1fr 300px;
+    gap: 20px;
+    height: calc(100vh - 200px);
+    margin-top: 20px;
+}
+
+/* Left Panel: Component Palette */
+.workflow-palette {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.palette-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.palette-header h3 {
+    margin: 0;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.palette-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+}
+
+.palette-category {
+    margin-bottom: 16px;
+}
+
+.palette-category-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-main);
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    transition: background 0.2s;
+}
+
+.palette-category-header:hover {
+    background: rgba(56, 189, 248, 0.1);
+}
+
+.palette-category-header i {
+    font-size: 12px;
+    transition: transform 0.2s;
+}
+
+.palette-category-items {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.palette-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-main);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    cursor: grab;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-primary);
+    transition: all 0.2s;
+}
+
+.palette-item:hover {
+    border-color: var(--primary);
+    background: rgba(56, 189, 248, 0.05);
+}
+
+.palette-item:active {
+    cursor: grabbing;
+}
+
+.palette-item i {
+    width: 18px;
+    text-align: center;
+    color: var(--primary);
+}
+
+/* Center Canvas */
+.workflow-canvas-container {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.canvas-toolbar {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-subtle);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg-main);
+}
+
+.canvas-info {
+    margin-left: auto;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.workflow-canvas {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: var(--bg-main);
+    cursor: default;
+}
+
+.canvas-grid {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image: 
+        linear-gradient(var(--border-subtle) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px);
+    background-size: 20px 20px;
+    opacity: 0.3;
+}
+
+.canvas-connections {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.canvas-nodes {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 2;
+}
+
+.workflow-node {
+    position: absolute;
+    background: var(--bg-panel);
+    border: 2px solid var(--border-subtle);
+    border-radius: 8px;
+    cursor: grab;
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.workflow-node:hover {
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.2);
+    transform: scale(1.02);
+}
+
+.workflow-node.selected {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+}
+
+.workflow-node:active {
+    cursor: grabbing;
+}
+
+.node-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    height: 100%;
+}
+
+.node-icon {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary);
+    font-size: 16px;
+}
+
+.node-label {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    flex: 1;
+}
+
+.node-handles {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+.node-handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    background: var(--primary);
+    border: 2px solid var(--bg-panel);
+    border-radius: 50%;
+    pointer-events: all;
+    cursor: crosshair;
+}
+
+.node-handle-input {
+    left: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.node-handle-output {
+    right: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.workflow-canvas.drag-over {
+    background: rgba(56, 189, 248, 0.05);
+}
+
+/* Right Panel: Properties */
+.workflow-properties {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.properties-header {
+    padding: 16px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.properties-header h3 {
+    margin: 0;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.properties-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+}
+
+.properties-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--text-muted);
+}
+
+.properties-empty i {
+    font-size: 48px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+.properties-empty p {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 14px;
+    margin: 0;
+}
+
+.property-group {
+    margin-bottom: 16px;
+}
+
+.property-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.property-group input[type="text"],
+.property-group select {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg-main);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-primary);
+    outline: none;
+}
+
+.property-group input[type="text"]:focus,
+.property-group select:focus {
+    border-color: var(--primary);
+}
+
+.property-group input[type="checkbox"] {
+    margin-right: 8px;
+}
+
+.property-group input[type="text"][readonly] {
+    background: var(--bg-panel);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+
+

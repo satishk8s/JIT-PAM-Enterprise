@@ -23,3 +23,4 @@ def log_db_query(user_email, request_id, role, query, allowed, rows_returned=Non
     line = f"{ts}\t{user_email}\t{request_id}\t{role}\t{allowed}\t{rows}\t{err}\t{query[:500]}\n"
     with open(AUDIT_FILE, 'a', encoding='utf-8') as f:
         f.write(line)
+

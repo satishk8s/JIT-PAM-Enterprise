@@ -361,3 +361,4 @@ timestamp | user_email | request_id | role | query_hash | allowed | rows_returne
 ---
 
 *End of Document 3*
+

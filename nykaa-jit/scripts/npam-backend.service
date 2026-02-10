@@ -1,0 +1,18 @@
+[Unit]
+Description=NPAMX Backend (Flask + Database Proxy)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# WorkingDirectory and ExecStart are set by setup-auto-deploy.sh to match clone path
+WorkingDirectory=/root/JIT-PAM-Enterprise/backend
+ExecStart=/root/JIT-PAM-Enterprise/backend/run-backend-on-ec2.sh
+Environment="DB_ADMIN_USER=admin"
+Environment="DB_ADMIN_PASSWORD=admin123"
+Environment="USE_DB_PROXY=true"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

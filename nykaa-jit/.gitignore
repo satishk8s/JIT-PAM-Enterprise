@@ -1,0 +1,133 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# AWS
+.aws/
+credentials
+
+# Local overrides
+.env.local
+*.local
+
+# Backup files
+*.bak
+*.backup
+
+# Plans, docs, discussions (not needed for app runtime)
+docs/
+*.docx
+*.pdf
+*.rtf
+*_PLAN*.md
+*_PLAN.md
+*PLAN*.md
+*_FIXES*.md
+*_STEPS*.md
+*_SUMMARY*.md
+*_GUIDE*.md
+*_ANALYSIS*.md
+*_CHECKLIST*.md
+*_STRUCTURE*.md
+*_TESTS*.md
+*_DEBUG*.md
+*_REFERENCE*.md
+*_FLOW*.md
+*_ROADMAP*.md
+*_LEARNING*.md
+*_REDESIGN*.md
+*_IMPLEMENTATION*.md
+*_AUDIT*.md
+*_STANDARDS*.md
+*_PARITY*.md
+*_OFFICIAL*.md
+*_THEME*.md
+AI_SECURITY_SUMMARY.md
+ARCHITECTURE_PRINCIPLES.md
+bedrock_setup_guide.md
+CODE_LOCK.md
+CODE_REVIEW_AND_ENHANCEMENT_PLAN.md
+DEBUG_STEPS.md
+DEMO_READY.md
+DEPLOY_INSTRUCTIONS.md
+EC2_DEPLOYMENT_STEPS.md
+FIXES_APPLIED.md
+FLOW_UPDATE_REQUIRED.md
+future-enhancements.md
+GUARDRAILS_AND_POLICIES.txt
+GUARDRAILS_FIX.md
+GUARDRAILS_REDESIGN_PLAN.md
+IMPLEMENTATION_SUMMARY.md
+JIT_Access_System*.docx
+JIT_Access_System*.md
+JIT_PAM_DATABASE_ACCESS_PLAN.md
+minimal_services_comparison.md
+MVP2_PLAN.md
+PRODUCTION_READINESS_ANALYSIS.md
+PROJECT_CHECKLIST.md
+PROJECT_DOCUMENTATION.md
+PROMPT_INJECTION_TESTS*.md
+PROJECT_STRUCTURE.md
+QUICK_REFERENCE.md
+QUICK_TEST.md
+SCP_FEATURE.md
+SECURITY_HARDENING.md
+STRICT_RULES.md
+TEST_PROMPT_INJECTION_NOW.md
+test-flow.md
+TESTING_GUIDE.md
+UI_REDESIGN_PROJECT_PROJECT.md
+UNIFIED_ASSISTANT_IMPLEMENTATION.md
+backend/*.md
+frontend/*.md
+!README.md
+!backend/README.md
+
+# Backend runtime data
+backend/data/
+
+# Generated frontend bundles (created by scripts/bundle-frontend.sh on deploy)
+frontend/bundle.css
+frontend/bundle.js
+
+# Root-level non-app files (logos, docs at repo root)
+/*.png
+/*.jpg
+/*.docx
+/*.pdf
+/*.rtf
+/ai_permission_generator.py
+aws-infrastructure-setup.py
+create_bedrock_role_mumbai.py
+setup_bedrock_role.py
+update_bedrock_config.py
+dynamodb_setup.py
+serverless_architecture.py
+test_bedrock_poc.py
+test_prompt_injection.py
+test_sso.py
+db_endpoints.txt

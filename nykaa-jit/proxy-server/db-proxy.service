@@ -1,0 +1,18 @@
+[Unit]
+Description=Database Access Proxy (L1/L2/L3)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/opt/db-proxy
+Environment="PATH=/opt/db-proxy/venv/bin"
+Environment="DB_PROXY_HOST=0.0.0.0"
+Environment="DB_PROXY_PORT=5002"
+ExecStart=/opt/db-proxy/venv/bin/python3 /opt/db-proxy/database_proxy.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

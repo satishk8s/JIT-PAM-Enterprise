@@ -442,20 +442,3 @@ if (typeof window !== 'undefined') {
     window.updateLiveSessions = updateLiveSessions;
     window.updateAIDecisionsFeed = updateAIDecisionsFeed;
 }
-        const account = accounts[request.account_id];
-        return `
-            <div style="padding: 12px; border-bottom: 1px solid var(--border-subtle);">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <div style="font-weight: 500; color: var(--text-primary);">${request.user_email}</div>
-                        <div style="font-size: 12px; color: var(--text-muted);">${account ? account.name : 'Unknown'} • ${formatDate(request.created_at)}</div>
-                    </div>
-                    <div class="approval-state ${getApprovalState(request.status).class}">
-                        ${getApprovalState(request.status).text}
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-

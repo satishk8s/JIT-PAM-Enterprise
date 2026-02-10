@@ -52,3 +52,4 @@ document.addEventListener('click', function(e) {
         if (menu) menu.style.display = 'none';
     }
 });
+
