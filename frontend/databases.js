@@ -961,12 +961,12 @@ async function refreshApprovedDatabases() {
 }
 
 function connectToDatabase(host, port, engine, requestId, dbName) {
-    // Always navigate to Terminal page - initTerminalPage will open the connection
+    // Always navigate to Database Terminal page - initDatabaseTerminalPage will open the connection
     window.pendingTerminalConnection = { host, port, engine, requestId: requestId || '', dbName: dbName || 'default' };
     if (typeof showPage === 'function') {
-        showPage('terminal');
+        showPage('databaseTerminal');
     } else {
-        alert('Go to Terminal page from the sidebar to connect.');
+        alert('Go to Database Terminal page from the sidebar to connect.');
     }
 }
 

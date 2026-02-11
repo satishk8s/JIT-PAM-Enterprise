@@ -491,6 +491,11 @@ function getEventTarget(evt) {
 
 // Navigation
 function showPage(pageId, evt) {
+    // Backward compatibility: legacy "terminal" route now maps to VM Terminal.
+    if (pageId === 'terminal') {
+        pageId = 'vmTerminal';
+    }
+
     document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
@@ -539,8 +544,16 @@ function showPage(pageId, evt) {
         loadAdminPage();
     } else if (pageId === 'instances') {
         loadInstances();
-    } else if (pageId === 'terminal') {
-        if (typeof initTerminalPage === 'function') {
+    } else if (pageId === 'databaseTerminal') {
+        if (typeof initDatabaseTerminalPage === 'function') {
+            initDatabaseTerminalPage();
+        } else if (typeof loadTerminalDbConnections === 'function') {
+            loadTerminalDbConnections('database');
+        }
+    } else if (pageId === 'vmTerminal') {
+        if (typeof initVmTerminalPage === 'function') {
+            initVmTerminalPage();
+        } else if (typeof initTerminalPage === 'function') {
             initTerminalPage();
         } else if (typeof refreshApprovedInstances === 'function') {
             refreshApprovedInstances();

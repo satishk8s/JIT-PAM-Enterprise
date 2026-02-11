@@ -2054,11 +2054,17 @@ td {
     visibility: visible !important;
 }
 
-/* Terminal page: ensure content visible when active */
-#terminalPage.page.active,
-#terminalPage.page.active .terminal-page-layout,
-#terminalPage.page.active .terminal-main {
+/* Terminal pages: ensure content visible when active */
+#databaseTerminalPage.page.active,
+#vmTerminalPage.page.active {
     display: block !important;
+    visibility: visible !important;
+}
+#databaseTerminalPage.page.active .terminal-page-layout,
+#vmTerminalPage.page.active .terminal-page-layout,
+#databaseTerminalPage.page.active .terminal-main,
+#vmTerminalPage.page.active .terminal-main {
+    display: flex !important;
     visibility: visible !important;
 }
 

@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=14" as="style">
+    <link rel="preload" href="bundle.css?v=15" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=14" rel="stylesheet">
+    <link href="bundle.css?v=15" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -274,9 +274,13 @@
                     </div>
                     
                     <div class="nav-category">Terminal</div>
-                    <div class="nav-item" onclick="showPage('terminal')">
-                        <i class="fas fa-terminal"></i>
-                        <span>Terminal</span>
+                    <div class="nav-item" onclick="showPage('databaseTerminal')">
+                        <i class="fas fa-database"></i>
+                        <span>Database Terminal</span>
+                    </div>
+                    <div class="nav-item" onclick="showPage('vmTerminal')">
+                        <i class="fas fa-server"></i>
+                        <span>VM Terminal</span>
                     </div>
                     
                 </nav>
@@ -1300,58 +1304,85 @@
                 </div>
             </div>
 
-            <!-- Terminal Page - DB + VM Connections -->
-            <div id="terminalPage" class="page">
+            <!-- Database Terminal Page -->
+            <div id="databaseTerminalPage" class="page">
                 <div class="page-header">
-                    <h2><i class="fas fa-terminal"></i> Terminal</h2>
-                    <button class="btn-secondary" onclick="refreshTerminalPage()">
+                    <h2><i class="fas fa-database"></i> Database Terminal</h2>
+                    <button class="btn-secondary" onclick="refreshDatabaseTerminalPage()">
                         <i class="fas fa-sync-alt"></i> Refresh
                     </button>
                 </div>
                 <div class="terminal-page-layout">
                     <aside class="terminal-sidebar">
-                        <div class="terminal-category open" id="dbCategory">
-                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('db')">
+                        <div class="terminal-category open" id="databaseTerminalDbCategory">
+                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('db', 'database')">
                                 <i class="fas fa-database"></i>
-                                <span>Databases</span>
-                                <i class="fas fa-chevron-down terminal-cat-chevron" id="dbCatChevron"></i>
+                                <span>Approved Database Connections</span>
+                                <i class="fas fa-chevron-down terminal-cat-chevron"></i>
                             </div>
-                            <div class="terminal-category-list" id="dbConnectionsList">
-                                <div class="terminal-empty-state" id="dbEmptyState">
+                            <div class="terminal-category-list" id="databaseTerminalDbConnectionsList">
+                                <div class="terminal-empty-state" id="databaseTerminalDbEmptyState">
                                     <i class="fas fa-database"></i>
                                     <p>No database access</p>
                                     <small>Request access from Databases page</small>
                                 </div>
-                                <div class="terminal-list-items" id="dbListItems" style="display: none;"></div>
-                            </div>
-                        </div>
-                        <div class="terminal-category open" id="vmCategory">
-                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('vm')">
-                                <i class="fas fa-server"></i>
-                                <span>Workloads</span>
-                                <i class="fas fa-chevron-down terminal-cat-chevron" id="vmCatChevron"></i>
-                            </div>
-                            <div class="terminal-category-list" id="vmConnectionsList">
-                                <div class="terminal-empty-state" id="vmEmptyState">
-                                    <i class="fas fa-server"></i>
-                                    <p>No VM access</p>
-                                    <small>Request access from EC2 Instances</small>
-                                </div>
-                                <div class="terminal-list-items" id="vmListItems" style="display: none;"></div>
+                                <div class="terminal-list-items" id="databaseTerminalDbListItems" style="display: none;"></div>
                             </div>
                         </div>
                     </aside>
                     <main class="terminal-main">
-                        <div class="terminal-placeholder" id="terminalPlaceholder">
+                        <div class="terminal-placeholder" id="databaseTerminalPlaceholder">
                             <div class="terminal-placeholder-icon">
-                                <i class="fas fa-terminal"></i>
+                                <i class="fas fa-database"></i>
                             </div>
-                            <h3>Select a connection</h3>
-                            <p>Choose a database or VM from the left panel and click <strong>Connect</strong>. You can open multiple connections in tabs.</p>
+                            <h3>Select a database connection</h3>
+                            <p>Choose a database from the left panel and click <strong>Connect</strong>. You can open multiple SQL tabs.</p>
                         </div>
-                        <div class="terminal-active" id="terminalActive" style="display: none;">
-                            <div class="terminal-tabs-bar" id="terminalTabsBar"></div>
-                            <div class="terminal-tabs-content" id="terminalTabsContent"></div>
+                        <div class="terminal-active" id="databaseTerminalActive" style="display: none;">
+                            <div class="terminal-tabs-bar" id="databaseTerminalTabsBar"></div>
+                            <div class="terminal-tabs-content" id="databaseTerminalTabsContent"></div>
+                        </div>
+                    </main>
+                </div>
+            </div>
+
+            <!-- VM Terminal Page -->
+            <div id="vmTerminalPage" class="page">
+                <div class="page-header">
+                    <h2><i class="fas fa-server"></i> VM Terminal</h2>
+                    <button class="btn-secondary" onclick="refreshVmTerminalPage()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                </div>
+                <div class="terminal-page-layout">
+                    <aside class="terminal-sidebar">
+                        <div class="terminal-category open" id="vmTerminalVmCategory">
+                            <div class="terminal-category-header open" onclick="toggleTerminalCategory('vm', 'vm')">
+                                <i class="fas fa-server"></i>
+                                <span>Approved VM Connections</span>
+                                <i class="fas fa-chevron-down terminal-cat-chevron"></i>
+                            </div>
+                            <div class="terminal-category-list" id="vmTerminalVmConnectionsList">
+                                <div class="terminal-empty-state" id="vmTerminalVmEmptyState">
+                                    <i class="fas fa-server"></i>
+                                    <p>No VM access</p>
+                                    <small>Request access from EC2 Instances</small>
+                                </div>
+                                <div class="terminal-list-items" id="vmTerminalVmListItems" style="display: none;"></div>
+                            </div>
+                        </div>
+                    </aside>
+                    <main class="terminal-main">
+                        <div class="terminal-placeholder" id="vmTerminalPlaceholder">
+                            <div class="terminal-placeholder-icon">
+                                <i class="fas fa-server"></i>
+                            </div>
+                            <h3>Select a VM connection</h3>
+                            <p>Choose a VM from the left panel and click <strong>Connect</strong> for Session Manager or SSH terminal options.</p>
+                        </div>
+                        <div class="terminal-active" id="vmTerminalActive" style="display: none;">
+                            <div class="terminal-tabs-bar" id="vmTerminalTabsBar"></div>
+                            <div class="terminal-tabs-content" id="vmTerminalTabsContent"></div>
                         </div>
                     </main>
                 </div>
@@ -3184,7 +3215,7 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=14"></script>
+    <script src="bundle.js?v=15"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
