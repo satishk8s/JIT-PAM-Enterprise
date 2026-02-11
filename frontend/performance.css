@@ -2,15 +2,16 @@
 
 /* Crisp text on high-DPI (fixes blurry/low-res look) */
 html {
-    -webkit-font-smoothing: auto;
+    -webkit-font-smoothing: subpixel-antialiased;
     -moz-osx-font-smoothing: auto;
-    text-rendering: auto;
+    text-rendering: optimizeLegibility;
 }
 
 /* Keep browser default high-quality image scaling (prevents pixelated logos) */
 img.page-title-logo,
 img.card-logo,
 img.nav-logo {
+    image-rendering: -webkit-optimize-contrast;
     image-rendering: auto;
 }
 
@@ -69,4 +70,12 @@ body.performance-mode .ai-chat-popup,
 body.performance-mode .security-copilot-popup {
     animation: none !important;
     transition-duration: 0.12s !important;
+}
+
+/* Keep existing theme typography; only tune text rasterization in perf mode */
+body.performance-mode {
+    -webkit-font-smoothing: subpixel-antialiased;
+    -moz-osx-font-smoothing: auto;
+    text-rendering: optimizeLegibility;
+    font-kerning: normal;
 }
