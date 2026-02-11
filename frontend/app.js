@@ -586,10 +586,11 @@ function showAdminTab(tabId, event) {
         'integrations': 'adminIntegrationsTab'
     };
     
-    // Show selected tab
+    // Show selected tab (use setProperty important to override design-system.css !important)
     const targetTab = document.getElementById(tabMap[tabId]);
     if (targetTab) {
-        targetTab.style.display = 'block';
+        targetTab.style.setProperty('display', 'block', 'important');
+        targetTab.style.setProperty('visibility', 'visible', 'important');
         targetTab.classList.add('active');
         console.log('✅ Showing admin tab:', tabId, targetTab);
     } else {
@@ -2012,7 +2013,19 @@ async function testConnection() {
 
 // Admin Functions - from sso_backup_20260203_173529 (Dashboard first)
 function loadAdminPage() {
+    var adminPage = document.getElementById('adminPage');
+    var dashboardTab = document.getElementById('adminDashboardTab');
+    if (adminPage) {
+        adminPage.classList.add('active');
+        adminPage.style.setProperty('display', 'block', 'important');
+        adminPage.style.setProperty('visibility', 'visible', 'important');
+    }
     showAdminTab('dashboard');
+    if (dashboardTab) {
+        dashboardTab.style.setProperty('display', 'block', 'important');
+        dashboardTab.style.setProperty('visibility', 'visible', 'important');
+        dashboardTab.classList.add('active');
+    }
     if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
     setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
 }

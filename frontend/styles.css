@@ -2038,6 +2038,17 @@ td {
     color: var(--text-primary);
 }
 
+/* Force admin panel and its active tab visible (fix blank panel) */
+#adminPage.page.active {
+    display: block !important;
+    visibility: visible !important;
+    min-height: 400px;
+}
+#adminPage .admin-tab.active {
+    display: block !important;
+    visibility: visible !important;
+}
+
 /* Charts Container */
 .charts-container {
     display: grid;
