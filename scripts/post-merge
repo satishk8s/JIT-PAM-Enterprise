@@ -1,12 +1,36 @@
 #!/bin/bash
 # Git post-merge hook: runs after 'git pull'
-# Restarts NPAMX backend so new code takes effect (no manual intervention)
+# Applies backend + frontend runtime updates on EC2.
 
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+NGINX_SCRIPT="$REPO_DIR/scripts/configure-nginx-git.sh"
+
+echo "[post-merge] Repo: $REPO_DIR"
 chmod +x "$REPO_DIR/backend/run-backend-on-ec2.sh" 2>/dev/null || true
 
-if systemctl is-active --quiet npam-backend 2>/dev/null; then
-    echo "[post-merge] Restarting npam-backend..."
-    systemctl restart npam-backend
-    echo "[post-merge] Backend restarted."
+# Backend refresh
+if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files | grep -q '^npam-backend\.service'; then
+        echo "[post-merge] Restarting npam-backend..."
+        if systemctl restart npam-backend; then
+            echo "[post-merge] Backend restarted."
+        else
+            echo "[post-merge] WARN: backend restart failed."
+        fi
+    fi
+fi
+
+# Frontend/nginx refresh (only when running as root)
+if [ -x "$NGINX_SCRIPT" ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "[post-merge] Rebuilding frontend bundle and reloading nginx..."
+        if "$NGINX_SCRIPT"; then
+            echo "[post-merge] Nginx/frontend refresh applied."
+        else
+            echo "[post-merge] WARN: nginx/frontend refresh failed."
+        fi
+    else
+        echo "[post-merge] Skipping nginx refresh (not root user)."
+        echo "[post-merge] Run manually as root: $NGINX_SCRIPT"
+    fi
 fi

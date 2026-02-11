@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-time setup on EC2: systemd service + git hook for auto-restart on pull
+# One-time setup on EC2: systemd service + git hook for backend+nginx refresh on pull
 # Run as root: ./scripts/setup-auto-deploy.sh
 
 set -e
@@ -64,5 +64,5 @@ echo "✅ Backend service started"
 echo ""
 echo "Done! From now on:"
 echo "  - Backend runs automatically (survives reboot)"
-echo "  - 'git pull' will auto-restart the backend"
+echo "  - 'git pull' will auto-restart backend and re-apply nginx/frontend bundle"
 echo "  - No manual intervention needed"

@@ -1,10 +1,10 @@
-# NPAMX – Git Deployment (Auto-Restart on Pull)
+# NPAMX – Git Deployment (Auto-Refresh on Pull)
 
 **Repo:** `git@github-verityx:satishk8s/JIT-PAM-Enterprise.git`
 
 (Use `github-verityx` host for SSH – same key as vijenex/sso repos.)
 
-Backend runs as a systemd service. After `git pull`, the backend restarts automatically. No manual steps.
+Backend runs as a systemd service. After `git pull`, backend restarts and nginx/frontend bundle are refreshed automatically (when pull is run as root). No manual steps.
 
 ---
 
@@ -58,13 +58,24 @@ git commit -m "Your changes"
 git push origin main
 ```
 
-### On EC2 (pull – backend auto-restarts)
+### On EC2 (pull – backend + nginx/frontend auto-refresh)
 ```bash
 cd /root/JIT-PAM-Enterprise   # or your clone path
 git pull origin main
 ```
 
-After `git pull`, the post-merge hook runs and restarts the backend. No other commands needed.
+After `git pull`, the post-merge hook runs:
+- restarts backend service
+- rebuilds frontend bundle
+- reloads nginx config
+
+No other commands needed.
+
+If this repo was set up before this change, run once to refresh hooks:
+```bash
+cd /root/JIT-PAM-Enterprise
+./scripts/setup-auto-deploy.sh
+```
 
 ---
 
