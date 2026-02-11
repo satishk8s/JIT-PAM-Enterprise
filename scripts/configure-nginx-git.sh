@@ -23,13 +23,18 @@ for f in /etc/nginx/conf.d/default.conf /etc/nginx/sites-enabled/default; do
     [ -f "$f" ] && mv "$f" "${f}.disabled" 2>/dev/null && echo "Disabled $f (was conflicting)"
 done
 
+# Remove legacy NPAM config filename if present (we now use 00-npam.conf for load-order priority)
+if [ -f /etc/nginx/conf.d/npam.conf ]; then
+    mv /etc/nginx/conf.d/npam.conf /etc/nginx/conf.d/npam.conf.disabled 2>/dev/null || true
+fi
+
 # Verify mime.types has font entries (prevents blurry fonts from wrong Content-Type)
 if [ -f /etc/nginx/mime.types ] && ! grep -q 'font/woff2' /etc/nginx/mime.types 2>/dev/null; then
     echo "⚠️  Add to /etc/nginx/mime.types: font/woff2 woff2; font/woff woff;"
 fi
 
 echo "Configuring nginx to serve from $WEB_ROOT..."
-cat > /etc/nginx/conf.d/npam.conf << NGINX
+cat > /etc/nginx/conf.d/00-npam.conf << NGINX
 # === GZIP: Reduces payload 60–80% for text assets ===
 # WHY: Smaller transfers = faster load, less bandwidth
 gzip on;
@@ -58,9 +63,10 @@ gzip_types
 # Correct Content-Type for fonts (font/woff2) prevents blurry rendering
 
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
+    listen 80;
+    listen [::]:80;
+    # Catch all hostnames (including raw IP) without clashing with stock server_name "_"
+    server_name ~^.+$;
     root $WEB_ROOT;
     # Default to original entry for best visual fidelity.
     # Bundled entry is still available explicitly at /index-bundled.html.
