@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=15" as="style">
+    <link rel="preload" href="bundle.css?v=16" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=15" rel="stylesheet">
+    <link href="bundle.css?v=16" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -284,10 +284,10 @@
                     </div>
                     
                 </nav>
-                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Collapse sidebar">
+                <button type="button" class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Hide sidebar" aria-expanded="true">
                     <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
-                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">&lt;&lt;</span>
-                </div>
+                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">Hide</span>
+                </button>
             </aside>
             <div class="sidebar-expand-fab" id="sidebarExpandFab" onclick="toggleSidebar(event)" title="Show sidebar" style="display: none;">
                 <i class="fas fa-bars"></i>
@@ -3215,7 +3215,7 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=15"></script>
+    <script src="bundle.js?v=16"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

@@ -24,7 +24,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="enterprise-theme.css?v=9" as="style">
+    <link rel="preload" href="enterprise-theme.css?v=10" as="style">
     <link rel="preload" href="styles.css?v=11" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
@@ -32,7 +32,7 @@
     <link href="instances.css" rel="stylesheet">
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
-    <link href="enterprise-theme.css?v=9" rel="stylesheet">
+    <link href="enterprise-theme.css?v=10" rel="stylesheet">
     <link href="styles.css?v=11" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
@@ -300,10 +300,10 @@
                     </div>
                     
                 </nav>
-                <div class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Collapse sidebar">
+                <button type="button" class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Hide sidebar" aria-expanded="true">
                     <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
-                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">&lt;&lt;</span>
-                </div>
+                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">Hide</span>
+                </button>
             </aside>
             <div class="sidebar-expand-fab" id="sidebarExpandFab" onclick="toggleSidebar(event)" title="Show sidebar" style="display: none;">
                 <i class="fas fa-bars"></i>
@@ -2678,7 +2678,7 @@
     <script src="security-ui-helpers.js?v=2"></script>
     <script src="unified-assistant.js"></script>
     <script src="workflow-designer.js"></script>
-    <script src="app.js?v=10"></script>
+    <script src="app.js?v=11"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

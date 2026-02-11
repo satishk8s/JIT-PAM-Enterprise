@@ -413,6 +413,20 @@ function addAdminNavigation() {
     }
 }
 
+function updateSidebarToggleState(collapsed) {
+    const toggle = document.getElementById('sidebarToggle');
+    if (!toggle) return;
+
+    const icon = document.getElementById('sidebarToggleIcon');
+    const label = document.getElementById('sidebarToggleLabel');
+    toggle.dataset.state = collapsed ? 'collapsed' : 'expanded';
+    toggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+    if (label) label.textContent = collapsed ? 'Show' : 'Hide';
+}
+
 function toggleSidebar(e) {
     if (e) e.stopPropagation();
     const layout = document.querySelector('.app-layout');
@@ -421,17 +435,13 @@ function toggleSidebar(e) {
     const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
-    if (!sidebar || !toggle) return;
+    if (!layout || !sidebar || !toggle) return;
     const collapsed = !layout.classList.contains('sidebar-collapsed');
     layout.classList.toggle('sidebar-collapsed', collapsed);
     sidebar.classList.toggle('sidebar-collapsed', collapsed);
     if (main) main.classList.toggle('main-expanded', collapsed);
     if (container) container.classList.toggle('sidebar-collapsed', collapsed);
-    toggle.title = collapsed ? 'Expand sidebar (>>)' : 'Collapse sidebar (<<)';
-    const icon = document.getElementById('sidebarToggleIcon');
-    const label = document.getElementById('sidebarToggleLabel');
-    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
-    if (label) label.textContent = collapsed ? '>>' : '<<';
+    updateSidebarToggleState(collapsed);
     if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
     localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 }
@@ -440,7 +450,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const collapsed = localStorage.getItem('sidebarCollapsed') === '1';
     const layout = document.querySelector('.app-layout');
     const sidebar = document.getElementById('mainSidebar');
-    const toggle = document.getElementById('sidebarToggle');
     const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
@@ -449,9 +458,9 @@ document.addEventListener('DOMContentLoaded', function() {
         sidebar.classList.add('sidebar-collapsed');
         main.classList.add('main-expanded');
         if (container) container.classList.add('sidebar-collapsed');
-        if (toggle) toggle.title = 'Expand sidebar (>>)';
-        if (expandFab) expandFab.style.display = 'flex';
     }
+    updateSidebarToggleState(collapsed);
+    if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
 });
 
 // Theme Management
