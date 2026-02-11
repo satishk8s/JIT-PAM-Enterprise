@@ -576,14 +576,13 @@ function showAdminTab(tabId, event) {
         tab.classList.remove('active');
     });
     
-    // Map tab IDs (Dashboard moved to main page)
+    // Map tab IDs (Dashboard moved to main page) - 5 tabs from 87a181a (no Reports)
     const tabMap = {
         'users': 'adminUsersTab',
         'policies': 'adminPoliciesTab',
         'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
-        'integrations': 'adminIntegrationsTab',
-        'reports': 'adminReportsTab'
+        'integrations': 'adminIntegrationsTab'
     };
     
     // Show selected tab
