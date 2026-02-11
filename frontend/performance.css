@@ -34,42 +34,12 @@ input, textarea, select {
     will-change: auto;
 }
 
-/* Lighter shadows for faster paint */
-[data-theme="dark"] .kpi-card,
-[data-theme="dark"] .db-section.card {
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-}
-
-/* Reduce decorative animations (lightweight tuning) */
-.kpi-trend,
-.terminal-connection-card,
-.requests-status-btn:not(.requests-status-glow) {
-    animation: none !important;
-}
-.requests-status-btn.requests-status-glow {
-    animation: requests-status-glow-subtle 2s ease-in-out infinite;
-}
-@keyframes requests-status-glow-subtle {
-    0%, 100% { box-shadow: 0 0 0 1px rgba(56,189,248,0.3); }
-    50% { box-shadow: 0 0 0 2px rgba(56,189,248,0.5); }
-}
-
 /* Respect reduced-motion preference */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         animation-duration: 0.01ms !important;
         transition-duration: 0.01ms !important;
     }
-}
-
-/* Targeted perf mode: do not globally apply `*` selectors (expensive style recalculation) */
-body.performance-mode .kpi-trend,
-body.performance-mode .terminal-connection-card,
-body.performance-mode .requests-status-btn:not(.requests-status-glow),
-body.performance-mode .ai-chat-popup,
-body.performance-mode .security-copilot-popup {
-    animation: none !important;
-    transition-duration: 0.12s !important;
 }
 
 /* Keep existing theme typography; only tune text rasterization in perf mode */
@@ -84,5 +54,7 @@ body.performance-mode {
 html[data-theme="dark"] body.performance-mode {
     --text-primary: #f3f6ff;
     --text-secondary: #c6cfdf;
+    --text-muted: #aeb9ce;
     --border-color: #4a5a77;
+    --border-subtle: #4a5a77;
 }
