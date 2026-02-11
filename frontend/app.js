@@ -586,7 +586,7 @@ function showPage(pageId, evt) {
 // Admin Tab Navigation
 function showAdminTab(tabId, event) {
     // Hide all admin tabs
-    document.querySelectorAll('.admin-tab').forEach(tab => {
+    document.querySelectorAll('#adminPage .admin-tab').forEach(tab => {
         tab.style.display = 'none';
         tab.classList.remove('active');
     });
@@ -598,49 +598,59 @@ function showAdminTab(tabId, event) {
         'policies': 'adminPoliciesTab',
         'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
-        'integrations': 'adminIntegrationsTab'
+        'integrations': 'adminIntegrationsTab',
+        'reports': 'adminReportsTab'
     };
+
+    // Fallback order guarantees at least one admin tab remains visible.
+    const fallbackOrder = ['users', 'dashboard', 'policies', 'features', 'security', 'integrations', 'reports'];
+    let effectiveTabId = tabId;
     
     // Show selected tab (use setProperty important to override design-system.css !important)
-    const targetTab = document.getElementById(tabMap[tabId]);
+    let targetTab = document.getElementById(tabMap[effectiveTabId]);
+    if (!targetTab) {
+        effectiveTabId = fallbackOrder.find(id => document.getElementById(tabMap[id])) || null;
+        targetTab = effectiveTabId ? document.getElementById(tabMap[effectiveTabId]) : null;
+    }
     if (targetTab) {
         targetTab.style.setProperty('display', 'block', 'important');
         targetTab.style.setProperty('visibility', 'visible', 'important');
         targetTab.classList.add('active');
-        console.log('✅ Showing admin tab:', tabId, targetTab);
+        console.log('✅ Showing admin tab:', effectiveTabId, targetTab);
     } else {
         console.error('❌ Admin tab not found:', tabId, tabMap[tabId]);
+        return;
     }
     
     // Update tab buttons
-    document.querySelectorAll('.admin-tab-btn').forEach(btn => {
+    document.querySelectorAll('#adminPage .admin-tab-btn').forEach(btn => {
         btn.classList.remove('active');
     });
     if (event && event.target) {
         const btn = event.target.closest('.admin-tab-btn');
         if (btn) btn.classList.add('active');
     } else {
-        // Fallback: find button by tabId
-        const btn = document.querySelector(`.admin-tab-btn[onclick*="'${tabId}'"]`);
+        // Fallback: find button by resolved tab id
+        const btn = document.querySelector(`#adminPage .admin-tab-btn[onclick*="'${effectiveTabId}'"]`);
         if (btn) btn.classList.add('active');
     }
     
     // Load tab-specific data
-    if (tabId === 'dashboard') {
+    if (effectiveTabId === 'dashboard') {
         if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
         setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
-    } else if (tabId === 'users') {
+    } else if (effectiveTabId === 'users') {
         if (typeof loadUsersManagement === 'function') loadUsersManagement();
-    } else if (tabId === 'policies') {
+    } else if (effectiveTabId === 'policies') {
         if (typeof initPolicyConfig === 'function') initPolicyConfig();
         // Always reload policy settings when showing policies tab
         setTimeout(() => {
             if (typeof loadPolicySettings === 'function') loadPolicySettings();
         }, 100);
         if (typeof loadAccountsForTagging === 'function') loadAccountsForTagging();
-    } else if (tabId === 'features') {
+    } else if (effectiveTabId === 'features') {
         // Features tab - already rendered
-    } else if (tabId === 'security') {
+    } else if (effectiveTabId === 'security') {
         // Ensure security section is visible by default
         setTimeout(() => {
             const secSection = document.getElementById('securitySection');
@@ -651,7 +661,7 @@ function showAdminTab(tabId, event) {
             if (auditSection) auditSection.style.display = 'none';
         }, 10);
         if (typeof loadAuditLogs === 'function') loadAuditLogs();
-    } else if (tabId === 'integrations') {
+    } else if (effectiveTabId === 'integrations') {
         // Integrations tab - already rendered
     }
 }
