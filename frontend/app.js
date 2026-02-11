@@ -576,14 +576,14 @@ function showAdminTab(tabId, event) {
         tab.classList.remove('active');
     });
     
-    // Map tab IDs (Dashboard moved to main page) - 6 tabs from 3715bbf GovernAIX
+    // Map tab IDs - from sso_backup_20260203_173529 (Dashboard first, no Reports)
     const tabMap = {
+        'dashboard': 'adminDashboardTab',
         'users': 'adminUsersTab',
         'policies': 'adminPoliciesTab',
         'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
-        'integrations': 'adminIntegrationsTab',
-        'reports': 'adminReportsTab'
+        'integrations': 'adminIntegrationsTab'
     };
     
     // Show selected tab
@@ -610,7 +610,10 @@ function showAdminTab(tabId, event) {
     }
     
     // Load tab-specific data
-    if (tabId === 'users') {
+    if (tabId === 'dashboard') {
+        if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
+        setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
+    } else if (tabId === 'users') {
         if (typeof loadUsersManagement === 'function') loadUsersManagement();
     } else if (tabId === 'policies') {
         if (typeof initPolicyConfig === 'function') initPolicyConfig();
@@ -2007,10 +2010,11 @@ async function testConnection() {
     }
 }
 
-// Admin Functions (Dashboard merged into main page)
+// Admin Functions - from sso_backup_20260203_173529 (Dashboard first)
 function loadAdminPage() {
-    showAdminTab('users');
-    if (typeof loadUsersManagement === 'function') loadUsersManagement();
+    showAdminTab('dashboard');
+    if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
+    setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
 }
 
 

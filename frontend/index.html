@@ -1489,11 +1489,15 @@
                 </div>
             </div>
 
-            <!-- Admin Panel Page (Dashboard moved to main page) -->
+            <!-- Admin Panel Page -->
             <div id="adminPage" class="page">
-                <div class="page-header" style="margin-bottom: 1.5rem;">
+                <div class="page-header">
+                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
                     <div class="admin-nav">
-                        <button class="admin-tab-btn active" onclick="showAdminTab('users', event)">
+                        <button class="admin-tab-btn active" onclick="showAdminTab('dashboard', event)">
+                            <i class="fas fa-chart-bar"></i> Dashboard
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('users', event)">
                             <i class="fas fa-users"></i> Users & Groups
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
@@ -1508,30 +1512,79 @@
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
                         </button>
-                        <button class="admin-tab-btn" onclick="showAdminTab('reports', event)">
-                            <i class="fas fa-chart-bar"></i> Reports & Audit
-                        </button>
+                    </div>
+                </div>
+                
+                <!-- Admin Dashboard Tab -->
+                <div id="adminDashboardTab" class="admin-tab active">
+                    <div class="admin-dashboard">
+                        <div class="admin-cards">
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-plus"></i></div>
+                                <div class="card-content">
+                                    <h3 id="newUsersCount">0</h3>
+                                    <p>New Users (30 days)</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-check"></i></div>
+                                <div class="card-content">
+                                    <h3 id="repeatedUsersCount">0</h3>
+                                    <p>Repeated Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-user-shield"></i></div>
+                                <div class="card-content">
+                                    <h3 id="exceptionalUsersCount">0</h3>
+                                    <p>Exceptional Users</p>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-icon"><i class="fas fa-exclamation-triangle"></i></div>
+                                <div class="card-content">
+                                    <h3 id="pendingApprovalsCount">0</h3>
+                                    <p>Pending Approvals</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="charts-container">
+                            <div class="chart-card">
+                                <h3>User Activity Trends</h3>
+                                <canvas id="userActivityChart" width="400" height="200"></canvas>
+                            </div>
+                            <div class="chart-card">
+                                <h3>Request Types Distribution</h3>
+                                <canvas id="requestTypesChart" width="400" height="200"></canvas>
+                            </div>
+                        </div>
+                        
+                        <div class="admin-actions">
+                            <h3>Quick Actions</h3>
+                            <div class="action-buttons">
+                                <button class="btn-secondary" onclick="exportAuditLog()">
+                                    <i class="fas fa-download"></i> Export Audit Log
+                                </button>
+                                <button class="btn-warning" onclick="cleanupOldRequests()">
+                                    <i class="fas fa-broom"></i> Cleanup Old Requests
+                                </button>
+                                <button class="btn-danger" onclick="revokeAllExpired()">
+                                    <i class="fas fa-times-circle"></i> Revoke All Expired
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 
                 <!-- Admin Users & Groups Tab -->
                 <div id="adminUsersTab" class="admin-tab" style="font-family: 'Inter', sans-serif;">
-                    <!-- Top Ribbon: Add User & Add Group -->
-                    <div class="user-mgmt-ribbon">
-                        <button class="user-mgmt-glow-btn" onclick="showCreateUserModal()">
-                            <i class="fas fa-user-plus"></i> Add User
-                        </button>
-                        <button class="user-mgmt-glow-btn" onclick="showCreateGroupModal()">
-                            <i class="fas fa-users-cog"></i> Assign to Group
-                        </button>
-                    </div>
-                    
                     <!-- Sub-tabs -->
                     <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="user-mgmt-subtab user-mgmt-subtab-active" id="usersSubTab" onclick="showUsersSubTab('users')">
+                        <button class="btn-secondary" id="usersSubTab" onclick="showUsersSubTab('users')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
                             <i class="fas fa-user"></i> Users
                         </button>
-                        <button class="user-mgmt-subtab" id="groupsSubTab" onclick="showUsersSubTab('groups')">
+                        <button class="btn-secondary" id="groupsSubTab" onclick="showUsersSubTab('groups')" style="font-family: 'Inter', sans-serif;">
                             <i class="fas fa-users-cog"></i> Groups
                         </button>
                     </div>
@@ -1541,6 +1594,9 @@
                         <div class="users-management">
                             <div class="users-header">
                                 <h3>User Management</h3>
+                                <button class="btn-primary" onclick="showCreateUserModal()">
+                                    <i class="fas fa-user-plus"></i> Create User
+                                </button>
                             </div>
                             
                             <div class="users-table">
@@ -1567,11 +1623,9 @@
                                         <td><span class="badge badge-danger">Admin</span></td>
                                         <td><span class="badge badge-success">Active</span></td>
                                         <td>
-                                            <div class="user-mgmt-actions">
-                                                <button class="user-mgmt-glow-btn btn-sm" onclick="editUser('satish')">Edit</button>
-                                                <button class="user-mgmt-glow-btn btn-sm" onclick="deleteUser('satish')">Delete</button>
-                                            </div>
-                                        </td>
+                                            <button class="btn-link" onclick="editUser('satish')">Edit</button>
+                                            <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
+                                            </td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -1579,51 +1633,79 @@
                         </div>
                     </div>
 
-                    <!-- Groups Section (Access groups: ReadOnly, Manager, Admin) -->
+                    <!-- Groups Section -->
                     <div id="groupsSection" style="display: none;">
                         <div class="groups-management">
-                            <div class="section-header">
-                                <h3>Access Groups</h3>
-                                <p class="section-desc">Groups that define who can access the JIT tool and at what level. Same as roles.</p>
+                        <div class="section-header">
+                            <h3>Groups Management</h3>
+                                <button class="btn-primary" onclick="showCreateGroupModal()">
+                                    <i class="fas fa-plus"></i> Create Group
+                                </button>
                             </div>
-                            <div class="groups-list">
-                                <div class="group-detail-card">
-                                    <div class="group-detail-header">
-                                        <h4>ReadOnly</h4>
-                                        <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('ReadOnly')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('ReadOnly')">Delete</button>
+                            
+                        <div class="groups-list">
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>DevOps Team</h4>
+                                        <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('devops')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('devops')">Delete</button>
                                         </div>
                                     </div>
-                                    <div class="group-permissions">
-                                        <p class="group-desc">Users can access the JIT console with read access.</p>
-                                        <p class="group-members"><strong>Members:</strong> <span id="readonlyGroupCount">0</span> users</p>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> GCP Console</label>
+                                        <label><input type="checkbox" checked disabled> Azure Console</label>
+                                        <label><input type="checkbox" disabled> Oracle Console</label>
+                                        <label><input type="checkbox" checked disabled> Storage</label>
+                                        <label><input type="checkbox" checked disabled> Databases</label>
+                                        <label><input type="checkbox" checked disabled> Identity</label>
+                                        <label><input type="checkbox" checked disabled> Networking</label>
+                                        <label><input type="checkbox" checked disabled> Container</label>
+                                        <label><input type="checkbox" checked disabled> Instances</label>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="group-detail-card">
-                                    <div class="group-detail-header">
-                                        <h4>Manager</h4>
-                                        <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Manager')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Manager')">Delete</button>
+
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>Security Team</h4>
+                                        <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('security')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('security')">Delete</button>
                                         </div>
                                     </div>
-                                    <div class="group-permissions">
-                                        <p class="group-desc">Integrations with cloud, create users and groups, download reports.</p>
-                                        <p class="group-members"><strong>Members:</strong> <span id="managerGroupCount">0</span> users</p>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> GCP Console</label>
+                                        <label><input type="checkbox" checked disabled> Azure Console</label>
+                                        <label><input type="checkbox" checked disabled> Oracle Console</label>
+                                        <label><input type="checkbox" checked disabled> ALL (Read-Only)</label>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="group-detail-card">
-                                    <div class="group-detail-header">
-                                        <h4>Admin</h4>
-                                        <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Admin')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Admin')">Delete</button>
+
+                            <div class="group-detail-card">
+                                <div class="group-detail-header">
+                                    <h4>Developers</h4>
+                                        <div>
+                                        <button class="btn-secondary btn-sm" onclick="editGroup('developers')">Edit</button>
+                                        <button class="btn-link" onclick="deleteGroup('developers')">Delete</button>
                                         </div>
                                     </div>
-                                    <div class="group-permissions">
-                                        <p class="group-desc">All above and manage guardrails, policies and security inside the tool.</p>
-                                        <p class="group-members"><strong>Members:</strong> <span id="adminGroupCount">0</span> users</p>
+                                <div class="group-permissions">
+                                    <h5>Permissions:</h5>
+                                    <div class="permission-checks">
+                                        <label><input type="checkbox" checked disabled> AWS Console</label>
+                                        <label><input type="checkbox" checked disabled> Storage (S3)</label>
+                                        <label><input type="checkbox" checked disabled> Databases (RDS)</label>
+                                        <label><input type="checkbox" checked disabled> Container (ECS/EKS)</label>
+                                        <label><input type="checkbox" checked disabled> Instances (EC2)</label>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -2116,7 +2198,7 @@
                             <div class="feature-card">
                                 <div class="feature-header">
                                     <div>
-                                        <h4><i class="fas fa-database"></i> Database Access Management</h4>
+                                        <h4><span class="icon-database"></span> Database Access Management</h4>
                                         <p>Manage temporary database credentials and connections</p>
                                     </div>
                                     <label class="toggle-switch">
@@ -2185,7 +2267,7 @@
                                 <div class="feature-header">
                                     <div>
                                         <h4><i class="fas fa-brain"></i> Intelligent Permission Assistant</h4>
-                                        <p>NPAMX-powered natural language understanding for permission requests</p>
+                                        <p>AI-powered natural language understanding for permission requests</p>
                                     </div>
                                     <label class="toggle-switch">
                                         <input type="checkbox" id="featureAI" onchange="toggleFeature('ai', this.checked)">
@@ -2204,268 +2286,47 @@
 
                 <!-- Admin Integrations Tab -->
                 <div id="adminIntegrationsTab" class="admin-tab" style="display: none;">
-                    <div class="admin-integration-tabs">
-                        <button class="admin-integration-tab-btn active" onclick="showAdminIntegrationCategory('cloud')"><i class="fas fa-cloud"></i> Cloud</button>
-                        <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('identity')"><i class="fas fa-key"></i> Identity & Login</button>
-                        <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('siem')"><i class="fas fa-shield-halved"></i> SIEM</button>
-                        <button class="admin-integration-tab-btn" onclick="showAdminIntegrationCategory('ticketing')"><i class="fas fa-ticket-alt"></i> Ticketing</button>
-                    </div>
-                    
-                    <!-- Cloud Integrations -->
-                    <div id="adminIntegrationCloud" class="admin-integration-category active">
                         <div class="integrations-grid">
                             <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-aws"><i class="fab fa-aws"></i></div>
-                                    <h3>AWS</h3>
-                                </div>
-                                <p>Amazon Web Services</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary" onclick="configureIntegration('aws')"><i class="fas fa-cog"></i> Configure</button>
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-jira">J</div>
+                                <h3>JIRA</h3>
                             </div>
+                            <p>Issue & Project Tracking System</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
+                            </div>
+                            <button class="btn-secondary" onclick="configureIntegration('jira')">
+                                <i class="fas fa-cog"></i> Configure
+                                </button>
+                            </div>
+                        
                             <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-gcp"><i class="fab fa-google"></i></div>
-                                    <h3>GCP</h3>
-                                </div>
-                                <p>Google Cloud Platform</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary" onclick="configureIntegration('gcp')"><i class="fas fa-cog"></i> Configure</button>
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-splunk">S</div>
+                                <h3>Splunk</h3>
                             </div>
+                            <p>Log Analysis & SIEM Platform</p>
+                            <div class="integration-status connected">
+                                <i class="fas fa-check-circle"></i> Connected
                         </div>
+                            <button class="btn-secondary" onclick="configureIntegration('splunk')">
+                                <i class="fas fa-cog"></i> Configure
+                            </button>
                     </div>
                     
-                    <!-- Identity & Login Integrations -->
-                    <div id="adminIntegrationIdentity" class="admin-integration-category">
-                        <div class="integrations-grid">
                             <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-okta"><i class="fas fa-key"></i></div>
-                                    <h3>Okta</h3>
-                                </div>
-                                <p>SSO & Identity Management</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('okta')"><i class="fas fa-plug"></i> Connect</button>
+                            <div class="integration-header">
+                                <div class="integration-logo app-logo-servicenow">SN</div>
+                                <h3>ServiceNow</h3>
                             </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-jumpcloud"><i class="fas fa-user-shield"></i></div>
-                                    <h3>JumpCloud</h3>
-                                </div>
-                                <p>Directory-as-a-Service & SSO</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
+                            <p>IT Service Management Platform</p>
+                            <div class="integration-status disconnected">
+                                <i class="fas fa-times-circle"></i> Not Connected
                             </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-onelogin"><i class="fas fa-sign-in-alt"></i></div>
-                                    <h3>OneLogin</h3>
-                                </div>
-                                <p>Unified Access Management</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('onelogin')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-azuread"><i class="fab fa-microsoft"></i></div>
-                                    <h3>Azure AD</h3>
-                                </div>
-                                <p>Microsoft Entra ID</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('azuread')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-google"><i class="fab fa-google"></i></div>
-                                    <h3>Google Workspace</h3>
-                                </div>
-                                <p>Google Identity & Directory</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('googleworkspace')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-ping"><i class="fas fa-fingerprint"></i></div>
-                                    <h3>Ping Identity</h3>
-                                </div>
-                                <p>Enterprise Identity Platform</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('pingidentity')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-auth0"><i class="fas fa-lock"></i></div>
-                                    <h3>Auth0</h3>
-                                </div>
-                                <p>Authentication & Authorization</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('auth0')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-duo"><i class="fas fa-shield-alt"></i></div>
-                                    <h3>Duo Security</h3>
-                                </div>
-                                <p>MFA & Zero Trust Access</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('duo')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- SIEM Integrations -->
-                    <div id="adminIntegrationSiem" class="admin-integration-category">
-                        <div class="integrations-grid">
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-splunk"><i class="fas fa-chart-line"></i></div>
-                                    <h3>Splunk</h3>
-                                </div>
-                                <p>Log Analysis & SIEM Platform</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary" onclick="configureIntegration('splunk')"><i class="fas fa-cog"></i> Configure</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-sentinel"><i class="fab fa-microsoft"></i></div>
-                                    <h3>Microsoft Sentinel</h3>
-                                </div>
-                                <p>Cloud-Native SIEM & SOAR</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('sentinel')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-chronicle"><i class="fab fa-google"></i></div>
-                                    <h3>Google Chronicle</h3>
-                                </div>
-                                <p>Security Analytics & Detection</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('chronicle')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-qradar"><i class="fas fa-shield-halved"></i></div>
-                                    <h3>IBM QRadar</h3>
-                                </div>
-                                <p>Enterprise SIEM & Threat Intelligence</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('qradar')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-elastic"><i class="fas fa-magnifying-glass"></i></div>
-                                    <h3>Elastic Security</h3>
-                                </div>
-                                <p>SIEM & Endpoint Security</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('elastic')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-datadog"><i class="fas fa-chart-area"></i></div>
-                                    <h3>Datadog</h3>
-                                </div>
-                                <p>Monitoring & Security Platform</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('datadog')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-wazuh"><i class="fas fa-shield-virus"></i></div>
-                                    <h3>Wazuh</h3>
-                                </div>
-                                <p>Open Source SIEM & XDR</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('wazuh')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-crowdstrike"><i class="fas fa-shield-halved"></i></div>
-                                    <h3>CrowdStrike</h3>
-                                </div>
-                                <p>Falcon XDR & Threat Intelligence</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('crowdstrike')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Ticketing Integrations -->
-                    <div id="adminIntegrationTicketing" class="admin-integration-category">
-                        <div class="integrations-grid">
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-jira"><i class="fab fa-jira"></i></div>
-                                    <h3>Jira</h3>
-                                </div>
-                                <p>Issue & Project Tracking (Atlassian)</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary" onclick="configureIntegration('jira')"><i class="fas fa-cog"></i> Configure</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-servicenow"><i class="fas fa-cogs"></i></div>
-                                    <h3>ServiceNow</h3>
-                                </div>
-                                <p>IT Service Management Platform</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('servicenow')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-zendesk"><i class="fas fa-headset"></i></div>
-                                    <h3>Zendesk</h3>
-                                </div>
-                                <p>Customer Support & Ticketing</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('zendesk')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-freshdesk"><i class="fas fa-life-ring"></i></div>
-                                    <h3>Freshdesk</h3>
-                                </div>
-                                <p>Help Desk & Ticketing</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('freshdesk')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-pagerduty"><i class="fas fa-bell"></i></div>
-                                    <h3>PagerDuty</h3>
-                                </div>
-                                <p>Incident Management & On-Call</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('pagerduty')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-opsgenie"><i class="fas fa-bolt"></i></div>
-                                    <h3>Opsgenie</h3>
-                                </div>
-                                <p>Alerting & Incident Response (Atlassian)</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('opsgenie')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-zoho"><i class="fas fa-comments"></i></div>
-                                    <h3>Zoho Desk</h3>
-                                </div>
-                                <p>Customer Support Suite</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('zohodesk')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                            <div class="integration-card">
-                                <div class="integration-header">
-                                    <div class="integration-logo-icon integration-logo-confluence"><i class="fab fa-confluence"></i></div>
-                                    <h3>Confluence</h3>
-                                </div>
-                                <p>Documentation & Knowledge Base</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary" onclick="configureIntegration('confluence')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
+                            <button class="btn-primary" onclick="configureIntegration('servicenow')">
+                                    <i class="fas fa-plug"></i> Connect
+                                </button>
                         </div>
                     </div>
                 </div>
@@ -2474,13 +2335,13 @@
                 <div id="adminSecurityTab" class="admin-tab" style="display: none;">
                     <!-- Sub-tabs -->
                     <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="tab-glow-subtab tab-glow-subtab-active" id="securitySubTab" onclick="showSecuritySubTab('security')">
+                        <button class="btn-secondary" id="securitySubTab" onclick="showSecuritySubTab('security')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
                             <i class="fas fa-shield-alt"></i> Security
                         </button>
-                        <button class="tab-glow-subtab" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')">
+                        <button class="btn-secondary" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')" style="font-family: 'Inter', sans-serif;">
                             <i class="fas fa-shield-check"></i> Guardrails
                         </button>
-                        <button class="tab-glow-subtab" id="auditSubTab" onclick="showSecuritySubTab('audit')">
+                        <button class="btn-secondary" id="auditSubTab" onclick="showSecuritySubTab('audit')" style="font-family: 'Inter', sans-serif;">
                             <i class="fas fa-clipboard-list"></i> Audit Logs
                         </button>
                     </div>
@@ -2552,7 +2413,7 @@
                             <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-bottom: 30px; color: white;">
                                 <h4 style="margin: 0 0 10px 0; display: flex; align-items: center; gap: 10px;">
                                     <i class="fas fa-robot" style="font-size: 24px;"></i>
-                                    NPAMX Guardrail Generator
+                                    AI-Powered Guardrail Generator
                                 </h4>
                                 <p style="margin: 0 0 15px 0; font-size: 13px; opacity: 0.9;">Describe your security requirements in natural language, and AI will generate appropriate guardrails</p>
                                 <div style="display: flex; gap: 10px;">
@@ -2755,384 +2616,7 @@
                     </div>
             </div>
             </div>
-
-                <!-- Admin Reports & Audit Tab -->
-                <div id="adminReportsTab" class="admin-tab" style="display: none;">
-                    <div class="admin-reports-audit">
-                        <div class="reports-audit-tabs" style="display: flex; gap: 10px; margin-bottom: 24px; border-bottom: 2px solid var(--border-color); padding-bottom: 12px;">
-                            <button class="tab-glow-subtab tab-glow-subtab-active" onclick="showReportsAuditSubTab('reports', event)">
-                                <i class="fas fa-chart-bar"></i> Reports & Analytics
-                            </button>
-                            <button class="tab-glow-subtab" onclick="showReportsAuditSubTab('audit', event)">
-                                <i class="fas fa-clipboard-list"></i> Audit Logs
-                            </button>
-                        </div>
-                        <div id="adminReportsContent" class="reports-content">
-                            <div class="reports-placeholder" style="text-align: center; padding: 60px 20px; background: var(--bg-card); border-radius: 12px; border: 1px dashed var(--border-color);">
-                                <i class="fas fa-chart-line" style="font-size: 3rem; color: var(--primary); margin-bottom: 16px;"></i>
-                                <h3>Access Reports & Analytics</h3>
-                                <p style="color: var(--text-secondary); margin-top: 8px;">View detailed reports on access patterns, trends, and compliance metrics</p>
-                            </div>
-                        </div>
-                        <div id="adminAuditContent" class="audit-content" style="display: none;">
-                            <div class="audit-logs">
-                                <div class="audit-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                                    <h3><i class="fas fa-clipboard-list"></i> Audit Logs</h3>
-                                    <div class="audit-filters" style="display: flex; gap: 10px;">
-                                        <select id="adminAuditFilter" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary);">
-                                            <option value="all">All Events</option>
-                                            <option value="login">Login Events</option>
-                                            <option value="request">Access Requests</option>
-                                            <option value="approval">Approvals</option>
-                                            <option value="revoke">Revocations</option>
-                                        </select>
-                                        <input type="date" id="adminAuditDateFrom" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-                                        <input type="date" id="adminAuditDateTo" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
-                                        <button class="btn-secondary" onclick="filterAdminAuditLogs()"><i class="fas fa-filter"></i> Filter</button>
-                                    </div>
-                                </div>
-                                <div class="audit-table">
-                                    <table style="width: 100%; border-collapse: collapse;">
-                                        <thead>
-                                            <tr>
-                                                <th>Timestamp</th>
-                                                <th>User</th>
-                                                <th>Event</th>
-                                                <th>Resource</th>
-                                                <th>IP Address</th>
-                                                <th>Status</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="adminAuditLogsTableBody"></tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </div>
-            </div>
-
-                                </div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label>Duration</label>
-                                <select id="othersRequestDuration">
-                                    <option value="4">4 hours</option>
-                                    <option value="8" selected>8 hours</option>
-                                    <option value="24">24 hours</option>
-                                    <option value="72">3 days</option>
-                                    <option value="120">5 days (max)</option>
-                                </select>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label>Business Justification *</label>
-                                <textarea id="othersRequestJustification" placeholder="Explain why this access is needed" rows="3" required></textarea>
-                            </div>
-                            
-                            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
-                                <button type="button" class="btn-secondary" onclick="cancelRequestForOthers()">Cancel</button>
-                                <button type="submit" class="btn-primary">Submit Request</button>
-                            </div>
-                        </form>
-                        
-                        <div style="flex: 0 0 280px;">
-                            <div style="position: sticky; top: 20px; background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 8px; padding: 16px;">
-                                <h4 style="margin: 0 0 12px 0; font-size: 14px; color: var(--text-primary); font-family: 'Inter', sans-serif; font-weight: 600;">Selected Resources</h4>
-                                <div id="othersSelectedResourcesPanel" style="max-height: 400px; overflow-y: auto;">
-                                    <p style="color: var(--text-secondary); font-size: 12px;">No resources selected</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </main>
-        </div>
-    </div>
-
-    <!-- Modals -->
-    <div id="modalOverlay" class="modal-overlay">
-        <!-- Profile Modal -->
-        <div id="profileModal" class="modal">
-            <div class="modal-header">
-                <h3><i class="fas fa-user"></i> My Profile</h3>
-                <button class="modal-close" onclick="closeModal()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="profile-info">
-                    <div class="profile-avatar">
-                        <i class="fas fa-user-circle"></i>
-                    </div>
-                    <div class="profile-details">
-                        <h4>Satish Korra</h4>
-                        <p>Satish.Korra@nykaa.com</p>
-                        <p>Senior DevOps Engineer</p>
-                    </div>
-                </div>
-                <div class="theme-settings">
-                    <h4>Theme Settings</h4>
-                    <div class="theme-options">
-                        <button class="theme-option active" onclick="setTheme('light')">
-                            <i class="fas fa-sun"></i> Light
-                        </button>
-                        <button class="theme-option" onclick="setTheme('dark')">
-                            <i class="fas fa-moon"></i> Dark
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Create User Modal -->
-        <div id="createUserModal" class="modal">
-        <div class="modal-header">
-            <h3><i class="fas fa-user-plus"></i> Add User</h3>
-            <button class="modal-close" onclick="closeModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <form id="createUserForm">
-                <div class="form-row">
-                    <div class="form-group">
-                        <label>First Name <span class="required">*</span></label>
-                        <input type="text" id="userFirstName" required placeholder="John">
-                    </div>
-                    <div class="form-group">
-                        <label>Middle Name</label>
-                        <input type="text" id="userMiddleName" placeholder="M">
-                    </div>
-                    <div class="form-group">
-                        <label>Last Name <span class="required">*</span></label>
-                        <input type="text" id="userLastName" required placeholder="Doe">
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label>Email Address <span class="required">*</span></label>
-                    <input type="email" id="userEmail" required placeholder="john.doe@company.com">
-                </div>
-                <div class="form-group">
-                    <label>Role <span class="required">*</span></label>
-                    <select id="userRole" required>
-                        <option value="">Select Role</option>
-                        <option value="ReadOnly">ReadOnly</option>
-                        <option value="Manager">Manager</option>
-                        <option value="Admin">Admin</option>
-                    </select>
-                    <small class="form-hint">ReadOnly: View only | Manager: Approve requests, manage access | Admin: Full control</small>
-                </div>
-                <div class="form-group">
-                    <label>Add to Group</label>
-                    <select id="userGroup">
-                        <option value="">Select Group (optional)</option>
-                        <!-- Populated by populateGroupDropdown() -->
-                    </select>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn-primary">Create User</button>
-                </div>
-            </form>
-        </div>
-        </div>
-
-        <!-- Assign Users to Group Modal (Access groups: ReadOnly, Manager, Admin) -->
-        <div id="createGroupModal" class="modal">
-        <div class="modal-header">
-            <h3><i class="fas fa-users-cog"></i> Assign Users to Group</h3>
-            <button class="modal-close" onclick="closeModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <form id="createGroupForm">
-                <div class="form-group">
-                    <label>Group <span class="required">*</span></label>
-                    <select id="groupName" required>
-                        <option value="">Select Group</option>
-                        <option value="ReadOnly">ReadOnly</option>
-                        <option value="Manager">Manager</option>
-                        <option value="Admin">Admin</option>
-                    </select>
-                    <small class="form-hint">Access groups define who can use the JIT tool and at what level</small>
-                </div>
-                <div class="form-group">
-                    <label>Add Users to Group</label>
-                    <div id="groupUsersList" class="users-checklist">
-                        <p class="text-muted">Loading users...</p>
-                    </div>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn-primary">Assign to Group</button>
-                </div>
-            </form>
-        </div>
-        </div>
-    </div>
-
-    <!-- Manual Onboard Modal -->
-    <div id="manualOnboardModal" class="modal">
-        <div class="modal-header">
-            <h3><i class="fas fa-user-plus"></i> Manual User Onboarding</h3>
-            <button class="modal-close" onclick="closeModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <form id="manualOnboardForm">
-                <div class="form-group">
-                    <label>Email Address <span class="required">*</span></label>
-                    <input type="email" id="onboardEmail" required placeholder="user@nykaa.com">
-                </div>
-                <div class="form-group">
-                    <label>Full Name <span class="required">*</span></label>
-                    <input type="text" id="onboardName" required placeholder="John Doe">
-                </div>
-                <div class="form-group">
-                    <label>Department</label>
-                    <select id="onboardDepartment">
-                        <option value="">Select Department</option>
-                        <option value="engineering">Engineering</option>
-                        <option value="devops">DevOps</option>
-                        <option value="security">Security</option>
-                        <option value="qa">Quality Assurance</option>
-                        <option value="product">Product</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Temporary Password <span class="required">*</span></label>
-                    <div style="display: flex; gap: 0.5rem;">
-                        <input type="password" id="onboardPassword" required style="flex: 1;">
-                        <button type="button" class="btn-secondary" onclick="generateTempPassword()">Generate</button>
-                    </div>
-                </div>
-                <div class="form-group">
-                    <label class="checkbox-label">
-                        <input type="checkbox" id="enableMFA" checked>
-                        Enable MFA (Recommended)
-                    </label>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn-primary">Onboard User</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Application Request Modal -->
-    <div id="appRequestModal" class="modal">
-        <div class="modal-header">
-            <h3><i class="fas fa-apps"></i> Application Access Request</h3>
-            <button class="modal-close" onclick="closeModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <form id="appRequestForm">
-                <div class="form-group">
-                    <label>Application Type <span class="required">*</span></label>
-                    <select id="appType" required>
-                        <option value="">Select Application Type</option>
-                        <option value="cloud">Cloud Platform</option>
-                        <option value="kubernetes">Kubernetes</option>
-                        <option value="database">Database</option>
-                        <option value="application">Application</option>
-                        <option value="ticketing">Ticketing System</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Specific Application <span class="required">*</span></label>
-                    <select id="specificApp" required>
-                        <option value="">Select Application</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Access Level <span class="required">*</span></label>
-                    <select id="appAccessLevel" required>
-                        <option value="read">Read Only</option>
-                        <option value="write">Read/Write</option>
-                        <option value="admin">Admin (Requires Approval)</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Duration <span class="required">*</span></label>
-                    <select id="appRequestDuration" required>
-                        <option value="1">1 Hour</option>
-                        <option value="4">4 Hours</option>
-                        <option value="8" selected>8 Hours</option>
-                        <option value="24">1 Day</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Business Justification <span class="required">*</span></label>
-                    <textarea id="appRequestJustification" required rows="3" placeholder="Explain why this access is needed..."></textarea>
-                </div>
-                <div class="modal-actions">
-                    <button type="button" class="btn-secondary" onclick="closeModal()">Cancel</button>
-                    <button type="submit" class="btn-primary">Submit Request</button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Cloud Onboarding Modal -->
-    <div id="cloudOnboardingModal" class="modal">
-        <div class="modal-header">
-            <h3><img src="assets/logos/aws.png" alt="" class="page-title-logo"> Cloud Onboarding</h3>
-            <button class="modal-close" onclick="closeModal()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <div class="cloud-onboard-grid">
-                <button class="cloud-onboard-btn" onclick="onboardCloud('aws')">
-                    <img src="assets/logos/aws.png" alt="AWS" class="card-logo">
-                </button>
-                <button class="cloud-onboard-btn" onclick="onboardCloud('gcp')">
-                    <img src="assets/logos/gcp.png" alt="GCP" class="card-logo">
-                </button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Security Copilot - hidden on requests page (Unified Assistant shown there) -->
-    <div id="securityCopilotButton" class="security-copilot-button" onclick="toggleSecurityCopilot()" data-hide-on="requests">
-        <div class="copilot-icon">
-            <i class="fas fa-robot"></i>
-        </div>
-        <span class="copilot-label">NPAMX</span>
-    </div>
-    <div id="securityCopilotPopup" class="security-copilot-popup">
-        <div class="copilot-header">
-            <div class="copilot-header-content">
-                <div class="copilot-avatar" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
-                    <i class="fas fa-shield-alt"></i>
-                </div>
-                <div class="copilot-header-text">
-                    <h4>NPAMX</h4>
-                    <p>Your AI security assistant</p>
-                </div>
-            </div>
-            <button class="copilot-close" onclick="toggleSecurityCopilot()">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        <div class="copilot-messages" id="copilotMessages">
-            <div class="copilot-message assistant">
-                <div class="message-content">
-                    <p>Hello! I'm NPAMX. I can help you:</p>
-                    <ul>
-                        <li>Explain access decisions</li>
-                        <li>Understand risk scores</li>
-                        <li>Clarify policies</li>
-                        <li>Review audit logs</li>
-                    </ul>
-                    <p>What would you like to know?</p>
-                </div>
-            </div>
-        </div>
-        <div class="copilot-input-area">
-            <input type="text" id="copilotInput" class="copilot-input" placeholder="Ask about access decisions, policies, or risk scores..." onkeydown="if(event.key==='Enter') sendCopilotMessage()">
-            <button class="copilot-send" onclick="sendCopilotMessage()">
-                <i class="fas fa-paper-plane"></i>
-            </button>
-        </div>
-    </div>
 
             <!-- Request for Others Page -->
             </div>
