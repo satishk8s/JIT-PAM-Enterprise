@@ -40,7 +40,7 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=8" rel="stylesheet">
+    <link href="databases.css?v=9" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
     <link href="performance.css?v=12" rel="stylesheet">
 </head>
@@ -990,8 +990,17 @@
                 <div class="page-content db-page-layout">
                     <!-- Top: Single info box with full description -->
                     <div class="db-page-info-banner">
-                        <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
-                        <p>This platform provides temporary, time-bound access to databases using Just-In-Time (JIT) controls. There is no permanent database access — request access only when required, and it expires automatically.</p>
+                        <div class="db-info-hero-head">
+                            <div class="db-info-hero-title">
+                                <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
+                                <p>This platform provides temporary, time-bound database access with strict least-privilege controls. There is no permanent access; sessions expire automatically.</p>
+                            </div>
+                            <div class="db-info-badges">
+                                <span class="db-info-pill"><i class="fas fa-bolt"></i> JIT Enforced</span>
+                                <span class="db-info-pill"><i class="fas fa-user-shield"></i> Approval Controlled</span>
+                                <span class="db-info-pill"><i class="fas fa-clock"></i> Auto Revocation</span>
+                            </div>
+                        </div>
                         <div class="db-info-sections">
                             <div class="db-info-section">
                                 <h4>Default Access Role — Read-Only</h4>
@@ -1004,7 +1013,7 @@
                                 <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Manager approval — Production: Manager and CISO approval</p>
                             </div>
                         </div>
-                        <p class="db-info-footer">All access remains time-bound and is revoked automatically after expiry. <strong>Select the database engine below</strong> to begin your access request.</p>
+                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to start your access request workflow.</p>
                     </div>
                     <!-- Layout: Tree (left) + Config/AI (right) -->
                     <div class="db-page-body">
@@ -2672,7 +2681,7 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=9"></script>
+    <script src="databases.js?v=10"></script>
     <script src="terminal-page.js?v=7"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js?v=2"></script>

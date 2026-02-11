@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=16" as="style">
+    <link rel="preload" href="bundle.css?v=17" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=16" rel="stylesheet">
+    <link href="bundle.css?v=17" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -974,8 +974,17 @@
                 <div class="page-content db-page-layout">
                     <!-- Top: Single info box with full description -->
                     <div class="db-page-info-banner">
-                        <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
-                        <p>This platform provides temporary, time-bound access to databases using Just-In-Time (JIT) controls. There is no permanent database access — request access only when required, and it expires automatically.</p>
+                        <div class="db-info-hero-head">
+                            <div class="db-info-hero-title">
+                                <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
+                                <p>This platform provides temporary, time-bound database access with strict least-privilege controls. There is no permanent access; sessions expire automatically.</p>
+                            </div>
+                            <div class="db-info-badges">
+                                <span class="db-info-pill"><i class="fas fa-bolt"></i> JIT Enforced</span>
+                                <span class="db-info-pill"><i class="fas fa-user-shield"></i> Approval Controlled</span>
+                                <span class="db-info-pill"><i class="fas fa-clock"></i> Auto Revocation</span>
+                            </div>
+                        </div>
                         <div class="db-info-sections">
                             <div class="db-info-section">
                                 <h4>Default Access Role — Read-Only</h4>
@@ -988,7 +997,7 @@
                                 <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Manager approval — Production: Manager and CISO approval</p>
                             </div>
                         </div>
-                        <p class="db-info-footer">All access remains time-bound and is revoked automatically after expiry. <strong>Select the database engine below</strong> to begin your access request.</p>
+                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to start your access request workflow.</p>
                     </div>
                     <!-- Layout: Tree (left) + Config/AI (right) -->
                     <div class="db-page-body">
@@ -3215,7 +3224,7 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=16"></script>
+    <script src="bundle.js?v=17"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

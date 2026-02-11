@@ -186,31 +186,49 @@ async function renderDbStepContent() {
                 : 'No RDS instances found in this account.';
             content.innerHTML = `
                 ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
+                ${instances.length ? `
+                <div class="db-step-toolbar">
+                    <div class="db-step-toolbar-left">
+                        <span class="db-step-count"><i class="fas fa-server"></i> <span id="dbStepInstanceCount">${instances.length}</span> Instances</span>
+                        <span class="db-step-toolbar-subtle">Use search to quickly find an instance.</span>
+                    </div>
+                    <div class="db-step-search">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="dbStepInstanceSearch" placeholder="Search by instance ID, host, or engine..." oninput="filterDbStepInstances()">
+                    </div>
+                </div>` : ''}
                 <div class="db-step-field">
                     <label>Select RDS Instance</label>
                     <div id="dbStepInstanceList" class="db-step-instance-list">
                         ${instances.length ? instances.map(inst => {
                             const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
                             const defaultDb = inst.name || 'default';
+                            const searchText = escapeAttr(`${inst.id} ${inst.engine} ${inst.host} ${defaultDb}`.toLowerCase());
                             return `<label class="db-instance-card">
-                                <input type="radio" name="dbInstance" value="${inst.id}" data-name="${defaultDb}" data-host="${inst.host}" data-port="${inst.port || 3306}" data-engine="${eng}" onchange="onDbStepInstanceSelect(this)">
+                                <input type="radio" name="dbInstance" value="${escapeAttr(inst.id)}" data-name="${escapeAttr(defaultDb)}" data-host="${escapeAttr(inst.host)}" data-port="${escapeAttr(inst.port || 3306)}" data-engine="${escapeAttr(eng)}" onchange="onDbStepInstanceSelect(this)">
                                 <div class="db-instance-card-inner">
                                     <i class="fas fa-database"></i>
                                     <div>
-                                        <strong>${inst.id}</strong>
-                                        <small>${inst.engine} @ ${inst.host}</small>
+                                        <strong data-search="${searchText}">${escapeHtml(inst.id)}</strong>
+                                        <small>${escapeHtml(inst.engine)} @ ${escapeHtml(inst.host)}:${escapeHtml(String(inst.port || 3306))}</small>
+                                        <div class="db-instance-card-meta">
+                                            <span class="db-instance-badge">Default DB: ${escapeHtml(defaultDb)}</span>
+                                            <span class="db-instance-badge">Engine: ${escapeHtml(eng.toUpperCase())}</span>
+                                        </div>
                                     </div>
                                 </div>
                             </label>`;
                         }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
-                        <div class="db-step-manual-toggle">
-                            <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Or enter host manually</button>
-                        </div>
-                        <div id="dbManualEntry" class="db-manual-entry" style="display:none">
-                            <div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
-                            <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
-                        </div>`}
+                        `}
                     </div>
+                    <p id="dbStepInstanceEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No instances match your search.</p>
+                </div>
+                <div class="db-step-manual-toggle">
+                    <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Can't find your instance? Enter host manually</button>
+                </div>
+                <div id="dbManualEntry" class="db-manual-entry" style="display:${instances.length ? 'none' : 'block'}">
+                    <div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
+                    <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
                 </div>
             `;
         } else if (step === 3 && useChatFlow) {
@@ -218,8 +236,17 @@ async function renderDbStepContent() {
             const defaultDb = inst.name || 'default';
             content.innerHTML = `
                 <div class="db-step-field">
-                    <label>Database Name</label>
-                    <input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input" value="${(defaultDb || '').replace(/"/g, '&quot;')}">
+                    <label>Database Name(s)</label>
+                    <div class="db-step-dbname-shell">
+                        <i class="fas fa-table"></i>
+                        <input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input" value="${(defaultDb || '').replace(/"/g, '&quot;')}">
+                    </div>
+                    <div class="db-step-dbname-suggestions">
+                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('default')">default</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('app')">app</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('analytics')">analytics</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('reporting')">reporting</button>
+                    </div>
                     <small class="db-step-hint">Enter the database name inside the instance. Multiple databases: comma-separated.</small>
                 </div>
             `;
@@ -238,14 +265,29 @@ async function renderDbStepContent() {
                 : 'No databases found in this account.';
             content.innerHTML = `
                 ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list databases — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
+                ${dbs.length ? `
+                <div class="db-step-toolbar">
+                    <div class="db-step-toolbar-left">
+                        <span class="db-step-count"><i class="fas fa-database"></i> <span id="dbStepDbCount">${dbs.length}</span> Databases</span>
+                        <span class="db-step-toolbar-subtle">Select one or more databases.</span>
+                    </div>
+                    <div class="db-step-search">
+                        <i class="fas fa-search"></i>
+                        <input type="text" id="dbStepDbSearch" placeholder="Search database name, host, or engine..." oninput="filterDbStepDatabases()">
+                    </div>
+                </div>` : ''}
                 <div class="db-step-field">
                     <label>Select Database(s)</label>
                     <div id="dbStepDbList" class="db-step-db-list">
                         ${dbs.length ? dbs.map(db => {
                             const eng = (db.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
+                            const searchText = escapeAttr(`${db.name} ${db.host} ${db.engine}`.toLowerCase());
                             return `<label class="db-discover-item">
-                                <input type="checkbox" value="${db.id}" data-name="${db.name}" data-host="${db.host}" data-port="${db.port || 3306}" data-engine="${eng}" onchange="toggleDbStepSelection()">
-                                <span>${db.name}</span> <small>${db.engine} @ ${db.host}</small>
+                                <input type="checkbox" value="${escapeAttr(db.id)}" data-name="${escapeAttr(db.name)}" data-host="${escapeAttr(db.host)}" data-port="${escapeAttr(db.port || 3306)}" data-engine="${escapeAttr(eng)}" onchange="toggleDbStepSelection()">
+                                <span data-search="${searchText}">
+                                    <strong>${escapeHtml(db.name)}</strong>
+                                    <small>${escapeHtml(db.engine)} @ ${escapeHtml(db.host)}:${escapeHtml(String(db.port || 3306))}</small>
+                                </span>
                             </label>`;
                         }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
                         <div class="db-step-manual-toggle">
@@ -256,6 +298,7 @@ async function renderDbStepContent() {
                             <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
                         </div>`}
                     </div>
+                    <p id="dbStepDbEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No databases match your search.</p>
                 </div>
             `;
         }
@@ -321,6 +364,7 @@ async function renderDbStepContent() {
             </div>
         `;
     }
+    updateDbStepNextButton();
 }
 
 async function fetchAccounts() {
@@ -458,6 +502,78 @@ function toggleDbStepSelection() {
     }));
 }
 
+function filterDbStepInstances() {
+    const query = (document.getElementById('dbStepInstanceSearch')?.value || '').trim().toLowerCase();
+    const cards = Array.from(document.querySelectorAll('#dbStepInstanceList .db-instance-card'));
+    const emptyState = document.getElementById('dbStepInstanceEmptyFiltered');
+    const countEl = document.getElementById('dbStepInstanceCount');
+    let visible = 0;
+
+    cards.forEach(card => {
+        const searchText = (card.textContent || '').toLowerCase();
+        const isVisible = !query || searchText.includes(query);
+        card.style.display = isVisible ? '' : 'none';
+        if (isVisible) visible += 1;
+    });
+
+    if (countEl) countEl.textContent = String(visible);
+    if (emptyState) emptyState.style.display = visible === 0 && cards.length > 0 ? 'block' : 'none';
+}
+
+function filterDbStepDatabases() {
+    const query = (document.getElementById('dbStepDbSearch')?.value || '').trim().toLowerCase();
+    const rows = Array.from(document.querySelectorAll('#dbStepDbList .db-discover-item'));
+    const emptyState = document.getElementById('dbStepDbEmptyFiltered');
+    const countEl = document.getElementById('dbStepDbCount');
+    let visible = 0;
+
+    rows.forEach(row => {
+        const searchText = (row.textContent || '').toLowerCase();
+        const isVisible = !query || searchText.includes(query);
+        row.style.display = isVisible ? '' : 'none';
+        if (isVisible) visible += 1;
+    });
+
+    if (countEl) countEl.textContent = String(visible);
+    if (emptyState) emptyState.style.display = visible === 0 && rows.length > 0 ? 'block' : 'none';
+}
+
+function applyDbNameSuggestion(name) {
+    const input = document.getElementById('dbStepDbName');
+    if (!input || !name) return;
+    const existing = (input.value || '').trim();
+    if (!existing) {
+        input.value = name;
+    } else {
+        const values = existing.split(',').map(s => s.trim()).filter(Boolean);
+        if (!values.includes(name)) {
+            values.push(name);
+            input.value = values.join(', ');
+        }
+    }
+    input.focus();
+}
+
+function updateDbStepNextButton() {
+    const btn = document.getElementById('dbStepNextBtn');
+    if (!btn || !dbStepState || !selectedEngine) return;
+    const { step, provider } = dbStepState;
+    const useChatFlow = provider === 'aws' && AWS_CHAT_FLOW_ENGINES.includes((selectedEngine.engine || '').toLowerCase());
+    let label = 'Continue';
+
+    if (provider === 'aws' && useChatFlow) {
+        if (step === 1) label = 'Next: Instance';
+        else if (step === 2) label = 'Next: Database Name';
+        else label = 'Continue to AI';
+    } else if (provider === 'aws' && !useChatFlow) {
+        label = step === 1 ? 'Next: Databases' : 'Continue to AI';
+    } else {
+        label = 'Continue to AI';
+    }
+
+    btn.innerHTML = `<i class="fas fa-arrow-right"></i> ${label}`;
+}
+
 async function dbStepNext() {
     if (!dbStepState || !selectedEngine) return;
     const { step, provider } = dbStepState;
@@ -480,9 +596,13 @@ async function dbStepNext() {
             const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
             const instances = result.databases || [];
             const selectedRadio = document.querySelector('#dbStepInstanceList input[name="dbInstance"]:checked');
-            if (instances.length) {
+            const manualHost = document.getElementById('dbStepHost')?.value?.trim();
+            const manualDbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
+            if (manualHost) {
+                dbRequestDraft._selectedInstance = { id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine };
+            } else if (instances.length) {
                 if (!selectedRadio) {
-                    alert('Please select an RDS instance.');
+                    alert('Please select an RDS instance or enter host manually.');
                     return;
                 }
                 dbRequestDraft._selectedInstance = {
@@ -493,13 +613,11 @@ async function dbStepNext() {
                     engine: selectedRadio.getAttribute('data-engine')
                 };
             } else {
-                const host = document.getElementById('dbStepHost')?.value?.trim();
-                const dbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
-                if (!host) {
+                if (!manualHost) {
                     alert('Please enter the instance host.');
                     return;
                 }
-                dbRequestDraft._selectedInstance = { id: 'manual', name: dbName, host, port: 3306, engine: selectedEngine.engine };
+                dbRequestDraft._selectedInstance = { id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine };
             }
             dbStepState.step = 3;
             renderDbStepContent();
@@ -526,18 +644,18 @@ async function dbStepNext() {
         if (step === 2 && !useChatFlow) {
             const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
             const dbs = result.databases || [];
-            if (dbs.length && selectedDatabases.length === 0) {
-                alert('Please select at least one database.');
+            const manualHost = document.getElementById('dbStepHost')?.value?.trim();
+            const manualDbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
+            if (dbs.length && selectedDatabases.length === 0 && !manualHost) {
+                alert('Please select at least one database or enter host manually.');
                 return;
             }
-            if (!dbs.length) {
-                const host = document.getElementById('dbStepHost')?.value?.trim();
-                const dbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
-                if (!host) {
+            if (!dbs.length || manualHost) {
+                if (!manualHost) {
                     alert('Please enter the database host.');
                     return;
                 }
-                selectedDatabases = [{ id: 'manual', name: dbName, host, port: 3306, engine: selectedEngine.engine }];
+                selectedDatabases = [{ id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine }];
             }
         }
     } else if (provider === 'managed') {
@@ -602,15 +720,32 @@ function transitionToDbChatUI() {
 
 function initDbAiChat(label, engine) {
     const chat = document.getElementById('dbAiChat');
-    chat.innerHTML = `<div class="db-ai-msg db-ai-bot">
-        <p>Hi! I'll help you request access to <strong>${label}</strong>. Let me ask a few questions:</p>
-        <p>1. Which <strong>account</strong> or <strong>environment</strong> do you need? (e.g., dev, staging, prod)</p>
-        <p>2. What's the <strong>database name</strong> or <strong>cluster endpoint</strong>?</p>
-        <p>3. What do you need to do? (read-only, run queries, update data, schema changes)</p>
-        <p>4. How long do you need access? (2, 4, or 8 hours)</p>
-        <p>Reply with your answers and I'll prepare the request.</p>
+    chat.innerHTML = `<div class="db-ai-msg db-ai-bot db-ai-welcome">
+        <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
+        <div class="db-ai-msg-content">
+            <p><strong>Let's prepare your ${escapeHtml(label)} access request.</strong></p>
+            <p>Share these details in one message:</p>
+            <p>1. Account/Environment (dev, staging, prod)</p>
+            <p>2. Database/cluster endpoint</p>
+            <p>3. Required permissions (read-only, write, schema changes)</p>
+            <p>4. Duration (2h / 4h / 8h)</p>
+        </div>
     </div>`;
     chat.scrollTop = chat.scrollHeight;
+    const quickPrompts = document.getElementById('dbAiQuickPrompts');
+    if (quickPrompts) {
+        quickPrompts.style.display = 'flex';
+        quickPrompts.innerHTML = `
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need read-only access for production troubleshooting for 2 hours.')">
+                <i class="fas fa-eye"></i> Read-only for 2h
+            </button>
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need limited write access for data correction in staging for 4 hours.')">
+                <i class="fas fa-pen"></i> Limited write for 4h
+            </button>
+            <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
+                <i class="fas fa-comments"></i> Custom request
+            </button>`;
+    }
     document.getElementById('dbAiRequestSummary').style.display = 'none';
     document.getElementById('dbAiActions').style.display = 'none';
 }
@@ -685,7 +820,7 @@ async function sendDbAiMessage() {
         } catch (parseErr) {
             if (thinkingEl) thinkingEl.style.display = 'none';
             if (!response.ok || text.trim().startsWith('<')) {
-                chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>Server returned an error (${response.status}). Ensure the backend is running and reachable.</p><small style="opacity:0.8">API: ${escapeHtml((typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '') + '/api/databases/ai-chat')}</small></div>`;
+                chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>Server returned an error (${response.status}). Ensure the backend is running and reachable.</p><small style="opacity:0.8">API: ${escapeHtml((typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '') + '/api/databases/ai-chat')}</small></div></div>`;
             } else {
                 throw parseErr;
             }
@@ -695,9 +830,10 @@ async function sendDbAiMessage() {
         if (thinkingEl) thinkingEl.style.display = 'none';
         if (data.conversation_id) dbConversationId = data.conversation_id;
         if (data.error) {
-            chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>${escapeHtml(data.error)}</p></div>`;
+            chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(data.error)}</p></div></div>`;
         } else {
-            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div><div class="db-ai-msg-content"><p>${(data.response || '').replace(/\n/g, '<br>')}</p></div></div>`;
+            const safeResponse = escapeHtml(data.response || '').replace(/\n/g, '<br>');
+            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div><div class="db-ai-msg-content"><p>${safeResponse}</p></div></div>`;
             if (data.permissions || data.suggested_role) {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.permissions && data.permissions.length) {
@@ -718,7 +854,7 @@ async function sendDbAiMessage() {
         const thinkingEl = document.getElementById('dbAiThinking');
         if (thinkingEl) thinkingEl.style.display = 'none';
         var apiUrl = (typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '?') + '/api/databases/ai-chat';
-        chat.innerHTML += `<div class="db-ai-msg db-ai-error"><p>Error: ${escapeHtml(err.message)}</p><small style="opacity:0.8">API: ${escapeHtml(apiUrl)}</small></div>`;
+        chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>Error: ${escapeHtml(err.message)}</p><small style="opacity:0.8">API: ${escapeHtml(apiUrl)}</small></div></div>`;
         chat.scrollTop = chat.scrollHeight;
     }
 }
@@ -729,11 +865,29 @@ function escapeHtml(s) {
     return d.innerHTML;
 }
 
+function escapeAttr(s) {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
 function showDbRequestSummaryIfReady() {
     if (!dbRequestDraft || !selectedEngine) return;
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
-    summary.innerHTML = `<p><strong>Draft:</strong> ${selectedEngine.label} | Role: ${dbRequestDraft.role || 'read_only'} | Duration: ${dbRequestDraft.duration_hours || 2}h</p>`;
+    const role = dbRequestDraft.role || 'read_only';
+    const duration = dbRequestDraft.duration_hours || 2;
+    const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
+    summary.innerHTML = `
+        <p><strong>Draft ready for approval</strong></p>
+        <div class="db-ai-summary-grid">
+            <span><strong>Engine:</strong> ${escapeHtml(selectedEngine.label)}</span>
+            <span><strong>Databases:</strong> ${escapeHtml(databases)}</span>
+            <span><strong>Role:</strong> ${escapeHtml(role)}</span>
+            <span><strong>Duration:</strong> ${escapeHtml(String(duration))} hour(s)</span>
+        </div>`;
     summary.style.display = 'block';
     actions.style.display = 'flex';
 }
