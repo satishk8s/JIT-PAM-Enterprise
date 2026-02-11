@@ -190,38 +190,38 @@ async function renderDbStepContent() {
                 <div class="db-step-toolbar">
                     <div class="db-step-toolbar-left">
                         <span class="db-step-count"><i class="fas fa-server"></i> <span id="dbStepInstanceCount">${instances.length}</span> Instances</span>
-                        <span class="db-step-toolbar-subtle">Use search to quickly find an instance.</span>
+                        <span class="db-step-toolbar-subtle">Use search and pick from the dropdown.</span>
                     </div>
                     <div class="db-step-search">
                         <i class="fas fa-search"></i>
-                        <input type="text" id="dbStepInstanceSearch" placeholder="Search by instance ID, host, or engine..." oninput="filterDbStepInstances()">
+                        <input type="text" id="dbStepInstanceSearch" placeholder="Type to filter instance ID, endpoint, or engine..." oninput="filterDbStepInstances()">
                     </div>
                 </div>` : ''}
                 <div class="db-step-field">
                     <label>Select RDS Instance</label>
-                    <div id="dbStepInstanceList" class="db-step-instance-list">
-                        ${instances.length ? instances.map(inst => {
-                            const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
-                            const defaultDb = inst.name || 'default';
-                            const searchText = escapeAttr(`${inst.id} ${inst.engine} ${inst.host} ${defaultDb}`.toLowerCase());
-                            return `<label class="db-instance-card">
-                                <input type="radio" name="dbInstance" value="${escapeAttr(inst.id)}" data-name="${escapeAttr(defaultDb)}" data-host="${escapeAttr(inst.host)}" data-port="${escapeAttr(inst.port || 3306)}" data-engine="${escapeAttr(eng)}" onchange="onDbStepInstanceSelect(this)">
-                                <div class="db-instance-card-inner">
-                                    <i class="fas fa-database"></i>
-                                    <div>
-                                        <strong data-search="${searchText}">${escapeHtml(inst.id)}</strong>
-                                        <small>${escapeHtml(inst.engine)} @ ${escapeHtml(inst.host)}:${escapeHtml(String(inst.port || 3306))}</small>
-                                        <div class="db-instance-card-meta">
-                                            <span class="db-instance-badge">Default DB: ${escapeHtml(defaultDb)}</span>
-                                            <span class="db-instance-badge">Engine: ${escapeHtml(eng.toUpperCase())}</span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </label>`;
-                        }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
-                        `}
+                    ${instances.length ? `
+                    <div class="db-instance-select-shell">
+                        <i class="fas fa-server"></i>
+                        <select id="dbStepInstanceSelect" class="db-step-select db-step-instance-select" onchange="onDbStepInstanceDropdownChange(this)">
+                            <option value="">-- Select an RDS instance --</option>
+                            ${instances.map(inst => {
+                                const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
+                                const defaultDb = inst.name || 'default';
+                                const searchText = escapeAttr(`${inst.id} ${inst.engine} ${inst.host} ${defaultDb}`.toLowerCase());
+                                return `<option
+                                    value="${escapeAttr(inst.id)}"
+                                    data-name="${escapeAttr(defaultDb)}"
+                                    data-host="${escapeAttr(inst.host)}"
+                                    data-port="${escapeAttr(inst.port || 3306)}"
+                                    data-engine="${escapeAttr(eng)}"
+                                    data-search="${searchText}"
+                                >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | ${escapeHtml(inst.host)}:${escapeHtml(String(inst.port || 3306))}</option>`;
+                            }).join('')}
+                        </select>
                     </div>
+                    <p id="dbStepSelectedInstanceMeta" class="db-step-selected-meta" style="display:none;"></p>
                     <p id="dbStepInstanceEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No instances match your search.</p>
+                    ` : `<p class="db-step-empty">${emptyMsg}</p>`}
                 </div>
                 <div class="db-step-manual-toggle">
                     <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Can't find your instance? Enter host manually</button>
@@ -491,6 +491,39 @@ function onDbStepInstanceSelect(radio) {
     };
 }
 
+function renderDbStepSelectedInstanceMeta(sourceEl) {
+    const meta = document.getElementById('dbStepSelectedInstanceMeta');
+    if (!meta) return;
+    if (!sourceEl || !sourceEl.value) {
+        meta.style.display = 'none';
+        meta.innerHTML = '';
+        return;
+    }
+
+    const host = sourceEl.getAttribute('data-host') || '-';
+    const port = sourceEl.getAttribute('data-port') || '3306';
+    const engine = (sourceEl.getAttribute('data-engine') || selectedEngine?.engine || 'mysql').toUpperCase();
+    const defaultDb = sourceEl.getAttribute('data-name') || 'default';
+    meta.innerHTML = `
+        <i class="fas fa-circle-check"></i>
+        <span><strong>${escapeHtml(sourceEl.value)}</strong> | ${escapeHtml(engine)} | ${escapeHtml(host)}:${escapeHtml(String(port))} | default DB <strong>${escapeHtml(defaultDb)}</strong></span>
+    `;
+    meta.style.display = 'flex';
+}
+
+function onDbStepInstanceDropdownChange(selectEl) {
+    if (!selectEl) return;
+    const selected = selectEl.options[selectEl.selectedIndex];
+    if (!selected || !selected.value) {
+        dbRequestDraft = dbRequestDraft || {};
+        dbRequestDraft._selectedInstance = null;
+        renderDbStepSelectedInstanceMeta(null);
+        return;
+    }
+    onDbStepInstanceSelect(selected);
+    renderDbStepSelectedInstanceMeta(selected);
+}
+
 function toggleDbStepSelection() {
     const checkboxes = document.querySelectorAll('#dbStepDbList input:checked');
     selectedDatabases = Array.from(checkboxes).map(cb => ({
@@ -504,18 +537,43 @@ function toggleDbStepSelection() {
 
 function filterDbStepInstances() {
     const query = (document.getElementById('dbStepInstanceSearch')?.value || '').trim().toLowerCase();
-    const cards = Array.from(document.querySelectorAll('#dbStepInstanceList .db-instance-card'));
     const emptyState = document.getElementById('dbStepInstanceEmptyFiltered');
     const countEl = document.getElementById('dbStepInstanceCount');
-    let visible = 0;
+    const select = document.getElementById('dbStepInstanceSelect');
 
+    if (select) {
+        const options = Array.from(select.options).filter(opt => !!opt.value);
+        let visible = 0;
+        let hiddenSelected = false;
+
+        options.forEach(opt => {
+            const searchText = (opt.getAttribute('data-search') || opt.textContent || '').toLowerCase();
+            const isVisible = !query || searchText.includes(query);
+            opt.hidden = !isVisible;
+            if (isVisible) visible += 1;
+            if (opt.selected && !isVisible) hiddenSelected = true;
+        });
+
+        if (hiddenSelected) {
+            select.value = '';
+            dbRequestDraft = dbRequestDraft || {};
+            dbRequestDraft._selectedInstance = null;
+            renderDbStepSelectedInstanceMeta(null);
+        }
+
+        if (countEl) countEl.textContent = String(visible);
+        if (emptyState) emptyState.style.display = visible === 0 && options.length > 0 ? 'block' : 'none';
+        return;
+    }
+
+    const cards = Array.from(document.querySelectorAll('#dbStepInstanceList .db-instance-card'));
+    let visible = 0;
     cards.forEach(card => {
         const searchText = (card.textContent || '').toLowerCase();
         const isVisible = !query || searchText.includes(query);
         card.style.display = isVisible ? '' : 'none';
         if (isVisible) visible += 1;
     });
-
     if (countEl) countEl.textContent = String(visible);
     if (emptyState) emptyState.style.display = visible === 0 && cards.length > 0 ? 'block' : 'none';
 }
@@ -564,11 +622,11 @@ function updateDbStepNextButton() {
     if (provider === 'aws' && useChatFlow) {
         if (step === 1) label = 'Next: Instance';
         else if (step === 2) label = 'Next: Database Name';
-        else label = 'Continue to AI';
+        else label = 'Continue to NPAMX';
     } else if (provider === 'aws' && !useChatFlow) {
-        label = step === 1 ? 'Next: Databases' : 'Continue to AI';
+        label = step === 1 ? 'Next: Databases' : 'Continue to NPAMX';
     } else {
-        label = 'Continue to AI';
+        label = 'Continue to NPAMX';
     }
 
     btn.innerHTML = `<i class="fas fa-arrow-right"></i> ${label}`;
@@ -593,24 +651,24 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && useChatFlow) {
-            const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
-            const instances = result.databases || [];
-            const selectedRadio = document.querySelector('#dbStepInstanceList input[name="dbInstance"]:checked');
+            const select = document.getElementById('dbStepInstanceSelect');
+            const hasDiscoveredInstances = !!(select && Array.from(select.options).some(opt => !!opt.value));
+            const selectedOption = (select && select.value) ? select.options[select.selectedIndex] : null;
             const manualHost = document.getElementById('dbStepHost')?.value?.trim();
             const manualDbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
             if (manualHost) {
                 dbRequestDraft._selectedInstance = { id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine };
-            } else if (instances.length) {
-                if (!selectedRadio) {
+            } else if (hasDiscoveredInstances) {
+                if (!selectedOption) {
                     alert('Please select an RDS instance or enter host manually.');
                     return;
                 }
                 dbRequestDraft._selectedInstance = {
-                    id: selectedRadio.value,
-                    name: selectedRadio.getAttribute('data-name'),
-                    host: selectedRadio.getAttribute('data-host'),
-                    port: selectedRadio.getAttribute('data-port') || 3306,
-                    engine: selectedRadio.getAttribute('data-engine')
+                    id: selectedOption.value,
+                    name: selectedOption.getAttribute('data-name'),
+                    host: selectedOption.getAttribute('data-host'),
+                    port: selectedOption.getAttribute('data-port') || 3306,
+                    engine: selectedOption.getAttribute('data-engine')
                 };
             } else {
                 if (!manualHost) {
@@ -723,12 +781,8 @@ function initDbAiChat(label, engine) {
     chat.innerHTML = `<div class="db-ai-msg db-ai-bot db-ai-welcome">
         <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
         <div class="db-ai-msg-content">
-            <p><strong>Let's prepare your ${escapeHtml(label)} access request.</strong></p>
-            <p>Share these details in one message:</p>
-            <p>1. Account/Environment (dev, staging, prod)</p>
-            <p>2. Database/cluster endpoint</p>
-            <p>3. Required permissions (read-only, write, schema changes)</p>
-            <p>4. Duration (2h / 4h / 8h)</p>
+            <p><strong>Hi, I'm NPAMX.</strong> I'll help you prepare this ${escapeHtml(label)} request.</p>
+            <p>Share environment, what you need to do, and duration (2h / 4h / 8h). I'll ask quick follow-ups only if needed.</p>
         </div>
     </div>`;
     chat.scrollTop = chat.scrollHeight;
@@ -736,11 +790,11 @@ function initDbAiChat(label, engine) {
     if (quickPrompts) {
         quickPrompts.style.display = 'flex';
         quickPrompts.innerHTML = `
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need read-only access for production troubleshooting for 2 hours.')">
-                <i class="fas fa-eye"></i> Read-only for 2h
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need production troubleshooting access for 2 hours.')">
+                <i class="fas fa-bug"></i> Prod troubleshooting 2h
             </button>
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need limited write access for data correction in staging for 4 hours.')">
-                <i class="fas fa-pen"></i> Limited write for 4h
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need deployment-time data and schema changes in staging for 4 hours.')">
+                <i class="fas fa-wrench"></i> Staging changes 4h
             </button>
             <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
                 <i class="fas fa-comments"></i> Custom request
@@ -760,20 +814,22 @@ function initDbChatWithPrompts(label, engine) {
         <div class="db-ai-msg db-ai-bot db-ai-welcome">
             <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
             <div class="db-ai-msg-content">
-                <p><strong>Your request is ready.</strong></p>
-                <p>Access to <strong>${dbNames}</strong> on ${label}.</p>
-                <p>Choose an option below:</p>
+                <p><strong>Great, ${escapeHtml(dbNames)} is selected.</strong></p>
+                <p>Tell NPAMX the exact operations and duration. I'll keep it short.</p>
             </div>
         </div>`;
     chat.scrollTop = chat.scrollHeight;
     if (quickPrompts) {
         quickPrompts.style.display = 'flex';
         quickPrompts.innerHTML = `
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('I need read-only access (SELECT, EXPLAIN) for querying and analytics.')">
-                <i class="fas fa-eye"></i> Read-only access (SELECT, EXPLAIN)
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need query access for production diagnostics for 2 hours.')">
+                <i class="fas fa-magnifying-glass-chart"></i> Diagnostics 2h
+            </button>
+            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need write and migration permissions in staging for 4 hours.')">
+                <i class="fas fa-database"></i> Write + migration 4h
             </button>
             <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
-                <i class="fas fa-comments"></i> Chat with NPAMX for custom permissions
+                <i class="fas fa-comments"></i> Chat with NPAMX
             </button>`;
     }
     document.getElementById('dbAiRequestSummary').style.display = 'none';
@@ -843,10 +899,6 @@ async function sendDbAiMessage() {
                     dbRequestDraft.role = data.suggested_role;
                 }
             }
-            if (selectedDatabases && selectedDatabases.length && !dbRequestDraft.role && message.toLowerCase().includes('read-only')) {
-                dbRequestDraft.role = 'read_only';
-                dbRequestDraft.permissions = 'SELECT, EXPLAIN';
-            }
         }
         chat.scrollTop = chat.scrollHeight;
         showDbRequestSummaryIfReady();
@@ -877,7 +929,7 @@ function showDbRequestSummaryIfReady() {
     if (!dbRequestDraft || !selectedEngine) return;
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
-    const role = dbRequestDraft.role || 'read_only';
+    const role = dbRequestDraft.role || 'Pending NPAMX suggestion';
     const duration = dbRequestDraft.duration_hours || 2;
     const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
     summary.innerHTML = `
@@ -906,7 +958,7 @@ function editDbRequestDuration() {
 
 async function submitDbRequestViaAi() {
     if (!selectedEngine || !dbRequestDraft) {
-        alert('Please complete the AI conversation first. Select account and database.');
+        alert('Please complete the NPAMX conversation first. Select account and database.');
         return;
     }
     const userEmail = localStorage.getItem('userEmail') || 'user@company.com';
@@ -941,8 +993,8 @@ async function submitDbRequestViaAi() {
                 user_email: userEmail,
                 user_full_name: fullName,
                 db_username: userEmail.split('@')[0],
-                permissions: dbRequestDraft.permissions || 'SELECT',
-                role: dbRequestDraft.role || 'read_only',
+                permissions: dbRequestDraft.permissions || '',
+                role: dbRequestDraft.role || 'custom',
                 duration_hours: dbRequestDraft.duration_hours || 2,
                 justification,
                 conversation_id: dbConversationId
@@ -977,7 +1029,7 @@ async function loadDbRequests() {
             list.innerHTML = `<div class="db-requests-empty">No ${dbStatusFilter === 'all' ? '' : dbStatusFilter.replace('_', ' ') + ' '}database requests</div>`;
             return;
         }
-        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin' })[r] || r;
+        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
         list.innerHTML = data.requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = db?.engine || 'db';
@@ -1092,7 +1144,7 @@ async function refreshApprovedDatabases() {
             tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">No approved databases</td></tr>';
             return;
         }
-        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin' })[r || 'read_only'] || (r || 'Read-only');
+        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r || 'custom'] || (r || 'Custom (NPAMX)');
         tbody.innerHTML = data.databases.map(db => {
             const requestId = (db.request_id || '').replace(/'/g, "\\'");
             const dbName = (db.db_name || db.engine || '').replace(/'/g, "\\'");

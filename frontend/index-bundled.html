@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=17" as="style">
+    <link rel="preload" href="bundle.css?v=18" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=17" rel="stylesheet">
+    <link href="bundle.css?v=18" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -977,7 +977,7 @@
                         <div class="db-info-hero-head">
                             <div class="db-info-hero-title">
                                 <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
-                                <p>This platform provides temporary, time-bound database access with strict least-privilege controls. There is no permanent access; sessions expire automatically.</p>
+                                <p>This platform provides temporary, time-bound database access. NPAMX gathers your intent, prepares the request, and access is revoked automatically after expiry.</p>
                             </div>
                             <div class="db-info-badges">
                                 <span class="db-info-pill"><i class="fas fa-bolt"></i> JIT Enforced</span>
@@ -987,17 +987,17 @@
                         </div>
                         <div class="db-info-sections">
                             <div class="db-info-section">
-                                <h4>Default Access Role — Read-Only</h4>
-                                <p>Permissions include: <strong>SELECT</strong>, <strong>EXPLAIN</strong></p>
-                                <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Automatically approved — Production: Manager approval required</p>
+                                <h4>NPAMX Request Guidance</h4>
+                                <p>Describe your task in plain language. NPAMX keeps the chat short and asks follow-up questions only when required.</p>
+                                <p class="db-info-flow"><strong>Conversation flow:</strong> Environment + intent + duration, then submit the generated request.</p>
                             </div>
                             <div class="db-info-section">
-                                <h4>Custom Access Roles</h4>
-                                <p>If you need permissions beyond read-only, use <strong>NPAMX AI</strong> to describe your requirement in plain language. The system will generate a least-privilege role for your task.</p>
-                                <p class="db-info-flow"><strong>Approval flow:</strong> Non-Production: Manager approval — Production: Manager and CISO approval</p>
+                                <h4>Dynamic Permission Generation</h4>
+                                <p>Permissions are generated from your request context. There are no fixed templates on this page; NPAMX can draft custom permission sets for each task.</p>
+                                <p class="db-info-flow"><strong>Execution path:</strong> NPAMX -> Backend -> Proxy/Vault workflow for time-bound DB access.</p>
                             </div>
                         </div>
-                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to start your access request workflow.</p>
+                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to start with NPAMX.</p>
                     </div>
                     <!-- Layout: Tree (left) + Config/AI (right) -->
                     <div class="db-page-body">
@@ -1030,7 +1030,7 @@
                                 </div>
                                 <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
-                                    <input type="text" id="dbAiInput" placeholder="Type your message or describe custom permissions..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
+                                    <input type="text" id="dbAiInput" placeholder="Message NPAMX with your task, permissions, and duration..." onkeypress="if(event.key==='Enter') sendDbAiMessage()">
                                     <button class="btn-primary" onclick="sendDbAiMessage()"><i class="fas fa-paper-plane"></i></button>
                                 </div>
                                 <div id="dbAiRequestSummary" class="db-ai-summary" style="display: none;"></div>
@@ -3224,7 +3224,7 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=17"></script>
+    <script src="bundle.js?v=18"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

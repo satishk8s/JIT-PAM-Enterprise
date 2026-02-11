@@ -721,6 +721,58 @@
     padding-right: 4px;
 }
 
+.db-instance-select-shell {
+    position: relative;
+}
+
+.db-instance-select-shell > i {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    font-size: 13px;
+    pointer-events: none;
+}
+
+.db-step-instance-select {
+    padding-left: 36px;
+    padding-right: 34px;
+    font-weight: 600;
+    appearance: none;
+    background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+        linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+    background-position:
+        calc(100% - 18px) calc(50% - 3px),
+        calc(100% - 12px) calc(50% - 3px);
+    background-size: 6px 6px, 6px 6px;
+    background-repeat: no-repeat;
+}
+
+.db-step-selected-meta {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, #22c55e 28%);
+    background: color-mix(in srgb, var(--bg-secondary) 84%, #22c55e 16%);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.db-step-selected-meta i {
+    color: #22c55e;
+    margin-top: 2px;
+}
+
+.db-step-selected-meta strong {
+    color: var(--text-primary);
+}
+
 .db-step-instance-list::-webkit-scrollbar,
 .db-step-db-list::-webkit-scrollbar,
 .db-ai-chat::-webkit-scrollbar {
@@ -1091,7 +1143,10 @@
     overflow-y: auto;
     margin: 0;
     padding: 16px 18px;
-    background: color-mix(in srgb, var(--bg-secondary) 92%, #0f172a 8%);
+    background:
+        radial-gradient(circle at 15% 12%, rgba(56, 189, 248, 0.14) 0%, rgba(56, 189, 248, 0) 34%),
+        radial-gradient(circle at 82% 14%, rgba(14, 165, 233, 0.12) 0%, rgba(14, 165, 233, 0) 30%),
+        color-mix(in srgb, var(--bg-secondary) 94%, #0f172a 6%);
     scroll-behavior: smooth;
 }
 
@@ -1142,8 +1197,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
-    background: color-mix(in srgb, var(--bg-secondary) 80%, #38bdf8 20%);
+    padding: 9px 13px;
+    background: color-mix(in srgb, var(--bg-secondary) 78%, #38bdf8 22%);
     border: 1px solid color-mix(in srgb, var(--border-color) 68%, #38bdf8 32%);
     border-radius: 999px;
     color: var(--primary-color);
@@ -1174,9 +1229,9 @@
 }
 
 .db-ai-msg {
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     padding: 0;
-    border-radius: 14px;
+    border-radius: 20px;
     font-size: 14px;
     display: flex;
     gap: 10px;
@@ -1184,30 +1239,31 @@
 }
 
 .db-ai-msg-avatar {
-    width: 30px;
-    height: 30px;
-    min-width: 30px;
-    border-radius: 9px;
+    width: 34px;
+    height: 34px;
+    min-width: 34px;
+    border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 13px;
-    margin-top: 2px;
+    margin-top: 4px;
 }
 
 .db-ai-msg-content {
     max-width: min(680px, 82%);
     min-width: 0;
-    padding: 10px 12px;
-    border-radius: 14px;
+    position: relative;
+    padding: 11px 13px;
+    border-radius: 16px;
     border: 1px solid color-mix(in srgb, var(--border-color) 78%, #38bdf8 22%);
     background: var(--bg-primary);
-    box-shadow: 0 6px 14px rgba(2, 6, 23, 0.08);
+    box-shadow: 0 10px 22px rgba(2, 6, 23, 0.16);
 }
 
 .db-ai-msg-content p {
     margin: 0 0 6px 0;
-    line-height: 1.55;
+    line-height: 1.6;
 }
 
 .db-ai-msg-content p:last-child {
@@ -1220,15 +1276,28 @@
 }
 
 .db-ai-user .db-ai-msg-avatar {
-    background: color-mix(in srgb, var(--primary-color) 28%, var(--bg-primary) 72%);
-    color: var(--primary-color);
+    background: linear-gradient(145deg, rgba(14, 165, 233, 0.92) 0%, rgba(56, 189, 248, 0.92) 100%);
+    color: #ffffff;
     order: 2;
 }
 
 .db-ai-user .db-ai-msg-content {
-    background: linear-gradient(180deg, rgba(56, 189, 248, 0.18) 0%, rgba(56, 189, 248, 0.1) 100%);
-    border-color: color-mix(in srgb, var(--border-color) 68%, #38bdf8 32%);
+    background: linear-gradient(160deg, rgba(14, 165, 233, 0.26) 0%, rgba(56, 189, 248, 0.16) 100%);
+    border-color: color-mix(in srgb, var(--border-color) 62%, #38bdf8 38%);
     order: 1;
+    border-bottom-right-radius: 8px;
+}
+
+.db-ai-user .db-ai-msg-content::after {
+    content: "";
+    position: absolute;
+    right: -7px;
+    bottom: 10px;
+    width: 0;
+    height: 0;
+    border-left: 8px solid rgba(56, 189, 248, 0.26);
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
 }
 
 .db-ai-bot {
@@ -1236,13 +1305,29 @@
 }
 
 .db-ai-bot .db-ai-msg-avatar {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(145deg, #0f172a 0%, #1e293b 100%);
     color: white;
 }
 
 .db-ai-welcome .db-ai-msg-avatar {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: linear-gradient(145deg, #0f172a 0%, #1e293b 100%);
     color: white;
+}
+
+.db-ai-bot .db-ai-msg-content {
+    border-bottom-left-radius: 8px;
+}
+
+.db-ai-bot .db-ai-msg-content::after {
+    content: "";
+    position: absolute;
+    left: -7px;
+    bottom: 10px;
+    width: 0;
+    height: 0;
+    border-right: 8px solid color-mix(in srgb, var(--bg-primary) 86%, #38bdf8 14%);
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
 }
 
 .db-ai-error {
@@ -1257,6 +1342,7 @@
 .db-ai-error .db-ai-msg-content {
     border-color: rgba(239, 68, 68, 0.46);
     background: rgba(239, 68, 68, 0.1);
+    border-bottom-left-radius: 8px;
 }
 
 .db-ai-input-row {

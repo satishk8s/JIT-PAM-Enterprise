@@ -3723,104 +3723,132 @@ def database_ai_chat():
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
             db_conversations[conversation_id] = []
+        elif conversation_id not in db_conversations:
+            db_conversations[conversation_id] = []
         
         # Add user message
         db_conversations[conversation_id].append({'role': 'user', 'content': message})
-        
-        # Fast path: use rule-based fallback for common short inputs (instant, no Bedrock latency)
-        msg_lower = message.lower().strip()
-        fast_keywords = ['dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
-                         '2', '4', '8', 'hour', 'default', 'testdb', 'jit_test', 'localhost']
-        if any(x in msg_lower for x in fast_keywords) and len(msg_lower) < 80:
-            ai_response = None
-            if any(x in msg_lower for x in ['dev', 'staging', 'prod']):
-                ai_response = "Got it! For **database name**, please tell me the name (e.g. jit_test or default). For **access type**, choose: read-only or read+write. For **duration**, 2, 4, or 8 hours?"
-            elif any(x in msg_lower for x in ['write', 'update', 'insert', 'delete', 'modify']):
-                ai_response = "I'll set **Limited Write** (SELECT, INSERT, UPDATE, DELETE). How long — **2, 4, or 8 hours**?"
-            elif any(x in msg_lower for x in ['read', 'select', 'query', 'view']):
-                ai_response = "I'll set **read-only** (SELECT). How long — **2, 4, or 8 hours**?"
-            elif any(x in msg_lower for x in ['2', '4', '8']) and 'hour' in msg_lower or msg_lower in ('2', '4', '8'):
-                ai_response = "All set! Click **Submit for Approval** below to create your database access request."
-            elif any(x in msg_lower for x in ['default', 'testdb', 'jit_test', 'localhost']):
-                ai_response = "Thanks! What access do you need? **read-only** or **read+write**? And for how long — **2, 4, or 8 hours**?"
-            if ai_response:
-                db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-                suggested_perms = ['SELECT'] if 'read' in msg_lower or 'select' in msg_lower else []
-                suggested_role = None
-                if any(x in msg_lower for x in ['write', 'update', 'insert', 'delete']):
-                    suggested_perms = ['SELECT', 'INSERT', 'UPDATE', 'DELETE']
-                    suggested_role = 'read_limited_write'
-                elif any(x in msg_lower for x in ['read', 'select']):
-                    suggested_role = 'read_only'
-                return jsonify({
-                    'response': ai_response,
-                    'conversation_id': conversation_id,
-                    'permissions': suggested_perms if suggested_perms else None,
-                    'suggested_role': suggested_role
-                })
-        
-        # Build conversation history - include JIT roles so AI can explain them
-        messages = [{
-            'role': 'user',
-            'content': f"""You are a database access advisor for a JIT (Just-in-Time) access system. Help users choose the right access role and understand what they can do.
 
-AVAILABLE JIT ROLES (choose one when requesting access):
-1. **Read-only**: SELECT, EXPLAIN, SHOW, DESCRIBE — for viewing data, reports, debugging. Safest option.
-2. **Read + Limited Write**: Above + INSERT, UPDATE, DELETE — for modifying data (no DDL).
-3. **Read + Full Write**: Above + TRUNCATE, CREATE, ALTER, DROP — for schema changes, migrations.
-4. **Admin**: All operations including GRANT, CREATE USER — for DBA tasks. Highest approval needed.
+        def infer_permissions_and_role(text):
+            text_upper = (text or '').upper()
+            text_lower = (text or '').lower()
+            known_permissions = [
+                'SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE',
+                'INSERT', 'UPDATE', 'DELETE',
+                'CREATE', 'ALTER', 'DROP', 'TRUNCATE',
+                'GRANT', 'REVOKE'
+            ]
+            suggested = []
+            for perm in known_permissions:
+                if re.search(rf'\b{perm}\b', text_upper):
+                    suggested.append(perm)
 
-When users ask "what roles are available", "what can I do", "which role do I need", explain these roles clearly and suggest the minimal role for their use case.
+            if 'ALL PRIVILEGES' in text_upper or re.search(r'\bALL\b', text_upper):
+                if 'ALL' not in suggested:
+                    suggested.insert(0, 'ALL')
 
-User request: {message}
+            if not suggested:
+                if re.search(r'\b(admin|dba|owner|full access|all access)\b', text_lower):
+                    suggested.append('ALL')
+                if re.search(r'\b(read|query|view|analytics|diagnostic|troubleshoot)\b', text_lower):
+                    suggested.append('SELECT')
+                if re.search(r'\b(write|modify|edit|correction|update data|insert data)\b', text_lower):
+                    for perm in ['INSERT', 'UPDATE', 'DELETE']:
+                        if perm not in suggested:
+                            suggested.append(perm)
+                if re.search(r'\b(schema|migration|ddl|table change|structure change)\b', text_lower):
+                    for perm in ['CREATE', 'ALTER', 'DROP']:
+                        if perm not in suggested:
+                            suggested.append(perm)
 
-Provide a helpful response. Be conversational and friendly. If they ask about roles, explain the 4 roles above."""
-        }]
-        
-        # Call Bedrock AI (fallback to rule-based when AWS creds expired)
+            role = None
+            if 'ALL' in suggested or any(p in suggested for p in ['GRANT', 'REVOKE']):
+                role = 'admin'
+            elif any(p in suggested for p in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE']):
+                role = 'read_full_write'
+            elif any(p in suggested for p in ['INSERT', 'UPDATE', 'DELETE']):
+                role = 'read_limited_write'
+            elif suggested:
+                role = 'read_only'
+
+            return suggested, role
+
+        def fast_fallback_reply(msg):
+            msg_lower = (msg or '').lower().strip()
+            has_env = any(x in msg_lower for x in ['dev', 'development', 'staging', 'prod', 'production', 'uat'])
+            has_target = any(x in msg_lower for x in ['database', ' db ', 'rds', 'endpoint', 'host', 'instance', 'schema', 'cluster'])
+            has_actions = any(x in msg_lower for x in [
+                'read', 'write', 'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'grant', 'revoke', 'admin'
+            ])
+            has_duration = bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower) or msg_lower in ('2', '4', '8'))
+
+            if has_actions and has_duration and (has_env or has_target):
+                return "Perfect, I captured that. If this looks right, click Submit for Approval."
+            if has_actions and not has_duration:
+                return "Got it. How long do you need this access (for example 2h, 4h, or 8h)?"
+            if has_env and not has_actions:
+                return "Understood. What operations do you need on the DB (for example SELECT, UPDATE, schema changes, or admin)?"
+            if has_target and not has_actions:
+                return "Thanks. What exact operations do you need, and for how long?"
+            return "Share the target DB, required operations, and duration. I'll prepare the request."
+
+        # Fast path: keep latency low for short messages.
         ai_response = None
-        try:
-            bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1', config=AWS_CONFIG)
-            response = bedrock.invoke_model(
-                modelId='anthropic.claude-3-sonnet-20240229-v1:0',
-                body=json.dumps({
-                    'anthropic_version': 'bedrock-2023-05-31',
-                    'max_tokens': 500,
-                    'messages': messages
-                })
-            )
-            result = json.loads(response['body'].read())
-            ai_response = result['content'][0]['text']
-        except Exception as bedrock_err:
-            print(f"Bedrock unavailable ({bedrock_err}), using fallback")
-            # Rule-based fallback when AWS/Bedrock unavailable
-            msg_lower = message.lower()
-            if any(x in msg_lower for x in ['dev', 'staging', 'prod', 'account']):
-                ai_response = "Got it! For **database name**, please tell me the name (e.g. jit_test or default). For **access type**, choose: read-only (SELECT only), or read+write. For **duration**, 2, 4, or 8 hours?"
-            elif any(x in msg_lower for x in ['jit_test', 'default', 'database']):
-                ai_response = "Thanks! What access do you need? **read-only** (SELECT) or **read+write**? And for how long — **2, 4, or 8 hours**?"
-            elif any(x in msg_lower for x in ['read', 'select', 'query']):
-                ai_response = "Perfect. I'll set **read-only** (SELECT). How long — **2, 4, or 8 hours**?"
-            elif any(x in msg_lower for x in ['2', '4', '8', 'hour']):
-                ai_response = "All set! Click **Submit Request** below to create your database access request."
-            else:
-                ai_response = "Please share: 1) Database name (e.g. jit_test), 2) Access type (read-only or read+write), 3) Duration (2, 4, or 8 hours)."
-        
-        # Store AI response
+        msg_lower = message.lower().strip()
+        fast_keywords = [
+            'dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
+            'create', 'alter', 'drop', 'grant', 'revoke', 'database', 'rds', 'hour', '2', '4', '8'
+        ]
+        if any(x in msg_lower for x in fast_keywords) and len(msg_lower) < 90:
+            ai_response = fast_fallback_reply(message)
+
+        if not ai_response:
+            # Build compact conversation history for Bedrock.
+            recent_msgs = db_conversations[conversation_id][-8:]
+            history = "\n".join([f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in recent_msgs])
+            prompt = f"""You are NPAMX, a friendly database access assistant in a JIT access platform.
+
+Goal: help users quickly submit a database access request.
+Collect only what is missing:
+- environment/account
+- target database/endpoint
+- requested operations/permissions (free-form; do not force predefined role templates)
+- duration in hours
+
+Response style:
+- Keep it concise: max 3 short sentences.
+- Friendly, natural tone (not robotic).
+- Ask at most one clarifying question.
+- If enough details exist, summarize briefly and ask user to click Submit for Approval.
+
+Conversation so far:
+{history}
+
+Reply to the latest user message only."""
+
+            try:
+                bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1', config=AWS_CONFIG)
+                response = bedrock.invoke_model(
+                    modelId='anthropic.claude-3-sonnet-20240229-v1:0',
+                    body=json.dumps({
+                        'anthropic_version': 'bedrock-2023-05-31',
+                        'max_tokens': 260,
+                        'temperature': 0.4,
+                        'messages': [{'role': 'user', 'content': prompt}]
+                    })
+                )
+                result = json.loads(response['body'].read())
+                ai_response = result['content'][0]['text']
+            except Exception as bedrock_err:
+                print(f"Bedrock unavailable ({bedrock_err}), using fallback")
+                ai_response = fast_fallback_reply(message)
+
+        # Store assistant response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-        
-        # Try to extract suggested permissions and role
-        suggested_perms = []
-        perms = ['CREATE', 'ALTER', 'DROP', 'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'GRANT', 'REVOKE']
-        for perm in perms:
-            if perm in ai_response.upper():
-                suggested_perms.append(perm)
-        suggested_role = None
-        if any(p in suggested_perms for p in ['INSERT', 'UPDATE', 'DELETE']) and 'DROP' not in suggested_perms and 'CREATE' not in suggested_perms:
-            suggested_role = 'read_limited_write'
-        elif 'SELECT' in suggested_perms and len(suggested_perms) == 1:
-            suggested_role = 'read_only'
-        
+
+        # Infer permissions from user+assistant text without forcing fixed templates.
+        suggested_perms, suggested_role = infer_permissions_and_role(f"{message}\n{ai_response}")
+
         return jsonify({
             'response': ai_response,
             'conversation_id': conversation_id,
@@ -3959,11 +3987,23 @@ def request_database_access():
         justification = data.get('justification')
         use_vault = data.get('use_vault', False)
         ai_generated = data.get('ai_generated', False)
-        role = data.get('role', 'read_only')  # MVP 2: read_only, read_limited_write, read_full_write, admin
+        role = (data.get('role') or 'custom').strip().lower()  # custom or named role
         
         # Only DROP/TRUNCATE/DDL/ALL require approval; plain DELETE (data) allowed for Limited Write
         perms = (permissions or []) if isinstance(permissions, list) else [p.strip() for p in str(permissions or '').split(',') if p.strip()]
-        has_destructive = 'ALL' in perms or 'DROP' in perms or 'TRUNCATE' in perms or 'DDL' in (query_types or [])
+        perms_upper = [p.upper() for p in perms]
+        known_roles = {'read_only', 'read_limited_write', 'read_full_write', 'admin'}
+        if role not in known_roles:
+            if 'ALL' in perms_upper or any(p in perms_upper for p in ['GRANT', 'REVOKE']):
+                role = 'admin'
+            elif any(p in perms_upper for p in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE']):
+                role = 'read_full_write'
+            elif any(p in perms_upper for p in ['INSERT', 'UPDATE', 'DELETE']):
+                role = 'read_limited_write'
+            elif perms_upper:
+                role = 'read_only'
+
+        has_destructive = 'ALL' in perms_upper or 'DROP' in perms_upper or 'TRUNCATE' in perms_upper or 'DDL' in (query_types or [])
         
         request_id = str(uuid.uuid4())
         expires_at = datetime.now() + timedelta(hours=duration_hours)
@@ -4028,15 +4068,27 @@ def request_database_access():
         if status == 'approved' and not vault_lease_id:
             admin_user = os.getenv('DB_ADMIN_USER', 'admin')
             admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-            # Map role to MySQL GRANT permissions (fix: read+write was granting only SELECT)
+            # Map role to MySQL GRANT permissions. For custom role, honor explicit permission list when provided.
             if role == 'admin':
                 sql_perms = 'ALL PRIVILEGES'
             elif role == 'read_full_write':
                 sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
             elif role == 'read_limited_write':
                 sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
-            else:
+            elif role == 'read_only':
                 sql_perms = 'SELECT'
+            else:
+                requested_perms = []
+                for p in perms:
+                    p_norm = p.strip().upper()
+                    if p_norm and p_norm not in requested_perms:
+                        requested_perms.append(p_norm)
+                if 'ALL' in requested_perms:
+                    sql_perms = 'ALL PRIVILEGES'
+                elif requested_perms:
+                    sql_perms = ', '.join(requested_perms)
+                else:
+                    sql_perms = 'SELECT'
             
             create_error = None
             for db in databases:
@@ -4098,7 +4150,7 @@ def get_approved_databases():
                         'host': db['host'],
                         'port': db['port'],
                         'db_username': req['db_username'],
-                        'role': req.get('role', 'read_only'),
+                        'role': req.get('role', 'custom'),
                         'expires_at': req['expires_at']
                     })
         
