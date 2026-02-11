@@ -487,11 +487,17 @@ function showPage(pageId) {
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
         page.classList.remove('active');
+        page.style.removeProperty('display');
+        page.style.removeProperty('visibility');
     });
-    
+
     // Show selected page (skip if page was removed, e.g. azure/oracle in trimmed nykaa-jit)
     const pageEl = document.getElementById(pageId + 'Page');
-    if (pageEl) pageEl.classList.add('active');
+    if (pageEl) {
+        pageEl.classList.add('active');
+        pageEl.style.setProperty('display', 'block', 'important');
+        pageEl.style.setProperty('visibility', 'visible', 'important');
+    }
     
     // Update sidebar nav items
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
@@ -2077,10 +2083,10 @@ function updateAdminDashboard() {
     
     const pendingApprovals = requests.filter(r => r.status === 'pending').length;
     
-    const newUsersEl = document.getElementById('newUsersCount');
-    const repeatedUsersEl = document.getElementById('repeatedUsersCount');
-    const exceptionalUsersEl = document.getElementById('exceptionalUsersCount');
-    const pendingApprovalsEl = document.getElementById('pendingApprovalsCount');
+    const newUsersEl = document.getElementById('adminNewUsersCount') || document.getElementById('newUsersCount');
+    const repeatedUsersEl = document.getElementById('adminRepeatedUsersCount') || document.getElementById('repeatedUsersCount');
+    const exceptionalUsersEl = document.getElementById('adminExceptionalUsersCount') || document.getElementById('exceptionalUsersCount');
+    const pendingApprovalsEl = document.getElementById('adminPendingApprovalsCount') || document.getElementById('pendingApprovalsCount');
     
     if (newUsersEl) newUsersEl.textContent = newUsers.size;
     if (repeatedUsersEl) repeatedUsersEl.textContent = repeatedUsers;
@@ -2109,7 +2115,8 @@ function loadCharts() {
 }
 
 function loadUserActivityChart() {
-    const ctx = document.getElementById('userActivityChart');
+    const activePage = document.querySelector('.page.active');
+    const ctx = activePage ? (activePage.querySelector('#adminUserActivityChart') || activePage.querySelector('#userActivityChart')) : document.getElementById('userActivityChart');
     if (!ctx) return;
     
     const data = {
@@ -2136,7 +2143,8 @@ function loadUserActivityChart() {
 }
 
 function loadRequestTypesChart() {
-    const ctx = document.getElementById('requestTypesChart');
+    const activePage = document.querySelector('.page.active');
+    const ctx = activePage ? (activePage.querySelector('#adminRequestTypesChart') || activePage.querySelector('#requestTypesChart')) : document.getElementById('requestTypesChart');
     if (!ctx) return;
     
     const data = {

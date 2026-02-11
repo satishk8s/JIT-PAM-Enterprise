@@ -619,6 +619,11 @@ body.user-is-admin .admin-only-nav#adminPanelBtn {
     display: none;
 }
 
+/* Force active page visible (overrides other stylesheets - fixes admin + terminal blank) */
+.app-main .page.active {
+    display: block !important;
+    visibility: visible !important;
+}
 .page.active {
     display: block;
 }
@@ -2038,13 +2043,21 @@ td {
     color: var(--text-primary);
 }
 
-/* Force admin panel and its active tab visible (fix blank panel) */
+/* Admin panel: force page and active tab visible */
 #adminPage.page.active {
     display: block !important;
     visibility: visible !important;
     min-height: 400px;
 }
 #adminPage .admin-tab.active {
+    display: block !important;
+    visibility: visible !important;
+}
+
+/* Terminal page: ensure content visible when active */
+#terminalPage.page.active,
+#terminalPage.page.active .terminal-page-layout,
+#terminalPage.page.active .terminal-main {
     display: block !important;
     visibility: visible !important;
 }

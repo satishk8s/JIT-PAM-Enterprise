@@ -1491,60 +1491,59 @@
 
             <!-- Admin Panel Page -->
             <div id="adminPage" class="page">
-                <div class="page-content" style="display: block;">
-                    <div class="page-header">
-                        <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
-                        <div class="admin-nav">
-                            <button class="admin-tab-btn active" onclick="showAdminTab('dashboard', event)">
-                                <i class="fas fa-chart-bar"></i> Dashboard
-                            </button>
-                            <button class="admin-tab-btn" onclick="showAdminTab('users', event)">
-                                <i class="fas fa-users"></i> Users & Groups
-                            </button>
-                            <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
-                                <i class="fas fa-cogs"></i> Management
-                            </button>
-                            <button class="admin-tab-btn" onclick="showAdminTab('features', event)">
-                                <i class="fas fa-toggle-on"></i> Features
-                            </button>
-                            <button class="admin-tab-btn" onclick="showAdminTab('security', event)">
-                                <i class="fas fa-shield-alt"></i> Security
-                            </button>
-                            <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
-                                <i class="fas fa-plug"></i> Integrations
-                            </button>
-                        </div>
+                <div class="page-header">
+                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
+                    <div class="admin-nav">
+                        <button class="admin-tab-btn active" onclick="showAdminTab('dashboard', event)">
+                            <i class="fas fa-chart-bar"></i> Dashboard
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('users', event)">
+                            <i class="fas fa-users"></i> Users & Groups
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
+                            <i class="fas fa-cogs"></i> Management
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('features', event)">
+                            <i class="fas fa-toggle-on"></i> Features
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('security', event)">
+                            <i class="fas fa-shield-alt"></i> Security
+                        </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
+                            <i class="fas fa-plug"></i> Integrations
+                        </button>
                     </div>
+                </div>
 
-                    <!-- Admin Dashboard Tab -->
+                <!-- Admin Dashboard Tab -->
                 <div id="adminDashboardTab" class="admin-tab active">
                     <div class="admin-dashboard">
                         <div class="admin-cards">
                             <div class="card">
                                 <div class="card-icon"><i class="fas fa-user-plus"></i></div>
                                 <div class="card-content">
-                                    <h3 id="newUsersCount">0</h3>
+                                    <h3 id="adminNewUsersCount">0</h3>
                                     <p>New Users (30 days)</p>
                                 </div>
                             </div>
                             <div class="card">
                                 <div class="card-icon"><i class="fas fa-user-check"></i></div>
                                 <div class="card-content">
-                                    <h3 id="repeatedUsersCount">0</h3>
+                                    <h3 id="adminRepeatedUsersCount">0</h3>
                                     <p>Repeated Users</p>
                                 </div>
                             </div>
                             <div class="card">
                                 <div class="card-icon"><i class="fas fa-user-shield"></i></div>
                                 <div class="card-content">
-                                    <h3 id="exceptionalUsersCount">0</h3>
+                                    <h3 id="adminExceptionalUsersCount">0</h3>
                                     <p>Exceptional Users</p>
                                 </div>
                             </div>
                             <div class="card">
                                 <div class="card-icon"><i class="fas fa-exclamation-triangle"></i></div>
                                 <div class="card-content">
-                                    <h3 id="pendingApprovalsCount">0</h3>
+                                    <h3 id="adminPendingApprovalsCount">0</h3>
                                     <p>Pending Approvals</p>
                                 </div>
                             </div>
@@ -1553,11 +1552,11 @@
                         <div class="charts-container">
                             <div class="chart-card">
                                 <h3>User Activity Trends</h3>
-                                <canvas id="userActivityChart" width="400" height="200"></canvas>
+                                <canvas id="adminUserActivityChart" width="400" height="200"></canvas>
                             </div>
                             <div class="chart-card">
                                 <h3>Request Types Distribution</h3>
-                                <canvas id="requestTypesChart" width="400" height="200"></canvas>
+                                <canvas id="adminRequestTypesChart" width="400" height="200"></canvas>
                             </div>
                         </div>
                         
@@ -2617,8 +2616,6 @@
                     </div>
             </div>
             </div>
-            </div>
-                </div>
             </div>
 
             </main>
