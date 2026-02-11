@@ -1508,6 +1508,9 @@
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
                         </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('reports', event)">
+                            <i class="fas fa-chart-bar"></i> Reports & Audit
+                        </button>
                     </div>
                 </div>
                 
@@ -2752,67 +2755,64 @@
                     </div>
             </div>
             </div>
-            </div>
 
-            <!-- Request for Others Page -->
-            <div id="requestForOthersPage" class="page">
-                <div class="page-header">
-                    <h2><i class="fas fa-user-plus"></i> Request Access for Others</h2>
-                    <button class="btn-secondary" onclick="cancelRequestForOthers()">
-                        <i class="fas fa-times"></i> Cancel
-                    </button>
-                </div>
-                
-                <div id="othersStep1" class="request-wizard-step">
-                    <h3 style="font-family: 'Inter', sans-serif; font-size: 18px; margin-bottom: 20px; color: var(--text-primary);">What do you want to request access for?</h3>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; max-width: 800px;">
-                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('aws')">
-                            <img src="assets/logos/aws.png" alt="AWS" class="card-logo">
-                            <h4>AWS</h4>
+                <!-- Admin Reports & Audit Tab -->
+                <div id="adminReportsTab" class="admin-tab" style="display: none;">
+                    <div class="admin-reports-audit">
+                        <div class="reports-audit-tabs" style="display: flex; gap: 10px; margin-bottom: 24px; border-bottom: 2px solid var(--border-color); padding-bottom: 12px;">
+                            <button class="tab-glow-subtab tab-glow-subtab-active" onclick="showReportsAuditSubTab('reports', event)">
+                                <i class="fas fa-chart-bar"></i> Reports & Analytics
+                            </button>
+                            <button class="tab-glow-subtab" onclick="showReportsAuditSubTab('audit', event)">
+                                <i class="fas fa-clipboard-list"></i> Audit Logs
+                            </button>
                         </div>
-                        <div class="cloud-choice-card" onclick="selectCloudProviderForOthers('gcp')">
-                            <img src="assets/logos/gcp.png" alt="GCP" class="card-logo">
-                            <h4>GCP</h4>
+                        <div id="adminReportsContent" class="reports-content">
+                            <div class="reports-placeholder" style="text-align: center; padding: 60px 20px; background: var(--bg-card); border-radius: 12px; border: 1px dashed var(--border-color);">
+                                <i class="fas fa-chart-line" style="font-size: 3rem; color: var(--primary); margin-bottom: 16px;"></i>
+                                <h3>Access Reports & Analytics</h3>
+                                <p style="color: var(--text-secondary); margin-top: 8px;">View detailed reports on access patterns, trends, and compliance metrics</p>
+                            </div>
+                        </div>
+                        <div id="adminAuditContent" class="audit-content" style="display: none;">
+                            <div class="audit-logs">
+                                <div class="audit-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                    <h3><i class="fas fa-clipboard-list"></i> Audit Logs</h3>
+                                    <div class="audit-filters" style="display: flex; gap: 10px;">
+                                        <select id="adminAuditFilter" style="padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); background: var(--bg-secondary);">
+                                            <option value="all">All Events</option>
+                                            <option value="login">Login Events</option>
+                                            <option value="request">Access Requests</option>
+                                            <option value="approval">Approvals</option>
+                                            <option value="revoke">Revocations</option>
+                                        </select>
+                                        <input type="date" id="adminAuditDateFrom" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                        <input type="date" id="adminAuditDateTo" style="padding: 8px; border-radius: 8px; border: 1px solid var(--border-color);">
+                                        <button class="btn-secondary" onclick="filterAdminAuditLogs()"><i class="fas fa-filter"></i> Filter</button>
+                                    </div>
+                                </div>
+                                <div class="audit-table">
+                                    <table style="width: 100%; border-collapse: collapse;">
+                                        <thead>
+                                            <tr>
+                                                <th>Timestamp</th>
+                                                <th>User</th>
+                                                <th>Event</th>
+                                                <th>Resource</th>
+                                                <th>IP Address</th>
+                                                <th>Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="adminAuditLogsTableBody"></tbody>
+                                    </table>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
+            </div>
+            </div>
 
-                <div id="othersStep2AWS" class="request-wizard-step" style="display: none;">
-                    <button class="btn-secondary" onclick="backToOthersStep1()" style="margin-bottom: 20px;">
-                        <i class="fas fa-arrow-left"></i> Back
-                    </button>
-                    
-                    <div style="display: flex; gap: 20px;">
-                        <form id="requestForOthersForm" style="flex: 0 0 450px; max-width: 450px;">
-                            <div class="form-group">
-                                <label>Requester Email(s) *</label>
-                                <div class="email-tags-container" style="display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-primary);">
-                                    <div id="othersEmailTags" style="display: flex; flex-wrap: wrap; gap: 5px;"></div>
-                                    <input type="text" id="othersEmailInput" placeholder="Type email and press Tab" style="border: none; outline: none; flex: 1; min-width: 200px; background: transparent; color: var(--text-primary);">
-                                </div>
-                                <small>Press Tab or Enter to add multiple emails</small>
-                            </div>
-
-                            <div class="form-group">
-                                <label>Select AWS Account *</label>
-                                <select id="othersRequestAccount" required onchange="fetchAWSResourcesForOthers()">
-                                    <option value="">Select Account</option>
-                                </select>
-                            </div>
-
-                            <div id="othersResourceExplorerSection" style="display: none;">
-                                <div class="form-group">
-                                    <label>Available AWS Services</label>
-                                    <div id="othersResourceExplorerLoading" style="display: none; text-align: center; padding: 20px;">
-                                        <i class="fas fa-spinner fa-spin" style="font-size: 24px; color: #667eea;"></i>
-                                        <p style="margin-top: 10px; color: var(--text-secondary); font-size: 14px;">Fetching resources from AWS...</p>
-                                    </div>
-                                    <div id="othersAWSServicesList" style="display: none;"></div>
-                                </div>
-
-                                <div class="form-group" id="othersMyResourcesSection" style="display: none;">
-                                    <label>Selected Resources</label>
-                                    <div id="othersMyResourcesList" class="resources-list"></div>
                                 </div>
                             </div>
                             

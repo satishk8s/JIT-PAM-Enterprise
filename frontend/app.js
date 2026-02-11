@@ -576,13 +576,14 @@ function showAdminTab(tabId, event) {
         tab.classList.remove('active');
     });
     
-    // Map tab IDs (Dashboard moved to main page) - 5 tabs from 87a181a (no Reports)
+    // Map tab IDs (Dashboard moved to main page) - 6 tabs from 3715bbf GovernAIX
     const tabMap = {
         'users': 'adminUsersTab',
         'policies': 'adminPoliciesTab',
         'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
-        'integrations': 'adminIntegrationsTab'
+        'integrations': 'adminIntegrationsTab',
+        'reports': 'adminReportsTab'
     };
     
     // Show selected tab
