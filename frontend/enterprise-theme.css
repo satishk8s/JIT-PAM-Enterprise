@@ -19,7 +19,7 @@ html {
     contain: paint;
 }
 input, textarea, .sidebar-toggle-btn {
-    transform: translateZ(0);
+    will-change: auto;
 }
 
 /* ============================================

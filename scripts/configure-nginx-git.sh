@@ -62,13 +62,17 @@ server {
     listen [::]:80 default_server;
     server_name _;
     root $WEB_ROOT;
-    index index.html index-bundled.html;
+    # Prefer bundled entry for lower request count and faster first paint.
+    index index-bundled.html index.html;
     charset utf-8;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
 
     # Zero-copy file send - bypasses userspace
     # WHY: Huge CPU reduction, lower latency for static files
     sendfile on;
     tcp_nopush on;
+    etag on;
 
     # Cache open file descriptors for repeated requests
     # WHY: Reduces disk I/O on scroll and navigation
@@ -76,19 +80,27 @@ server {
     open_file_cache_valid 30s;
     open_file_cache_min_uses 1;
 
+    # Versioned bundle artifacts can be cached longer (cache-busted via ?v=)
+    location ~* ^/bundle\.(css|js)$ {
+        try_files \$uri =404;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000, immutable";
+        add_header X-Content-Type-Options "nosniff";
+    }
+
     # === STATIC FILES (must match before location /) ===
     # Served directly from disk - NOT proxied to Flask
-    # WHY: Flask is slow for static; Nginx uses sendfile + kernel
+    # Use moderate cache by default to avoid stale assets after deploy.
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp|woff2?|ttf|eot)$ {
         try_files \$uri =404;
-        expires 7d;
-        add_header Cache-Control "public, immutable";
+        expires 1h;
+        add_header Cache-Control "public, max-age=3600";
         add_header X-Content-Type-Options "nosniff";
     }
 
     # HTML - SPA fallback
     location / {
-        try_files \$uri \$uri/ /index.html /index-bundled.html;
+        try_files \$uri \$uri/ /index-bundled.html /index.html;
         add_header Cache-Control "no-cache";
     }
 
