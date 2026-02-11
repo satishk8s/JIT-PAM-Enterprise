@@ -193,6 +193,11 @@ function deleteAccessGroup(groupName) {
     }
 }
 
+// Alias for Groups Management UI (buttons call deleteGroup; implementation is deleteAccessGroup)
+function deleteGroup(groupName) {
+    deleteAccessGroup(groupName);
+}
+
 // Load users management - also populates USER_MGMT_USERS for modals
 async function loadUsersManagement() {
     try {

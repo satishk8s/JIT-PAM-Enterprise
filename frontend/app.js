@@ -710,7 +710,8 @@ function showNewRequestPage(cloudProvider) {
 function showRequestForOthersWithCloud(cloudProvider) {
     const page = document.getElementById('requestForOthersPage');
     if (!page) {
-        alert('ERROR: requestForOthersPage not found!');
+        showPage('requests');
+        if (typeof filterRequestsByCategory === 'function') filterRequestsByCategory('cloud', 'pending');
         return;
     }
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -719,14 +720,18 @@ function showRequestForOthersWithCloud(cloudProvider) {
         if (typeof selectCloudProviderForOthers === 'function') {
             selectCloudProviderForOthers('aws');
         } else {
-            document.getElementById('othersStep1').style.display = 'none';
-            document.getElementById('othersStep2AWS').style.display = 'block';
+            const step1 = document.getElementById('othersStep1');
+            const step2 = document.getElementById('othersStep2AWS');
+            if (step1) step1.style.display = 'none';
+            if (step2) step2.style.display = 'block';
             if (typeof loadAccountsForOthers === 'function') loadAccountsForOthers();
         }
     } else {
         window.currentCloudAccessPage = null;
-        document.getElementById('othersStep1').style.display = 'block';
-        document.getElementById('othersStep2AWS').style.display = 'none';
+        const step1 = document.getElementById('othersStep1');
+        const step2 = document.getElementById('othersStep2AWS');
+        if (step1) step1.style.display = 'block';
+        if (step2) step2.style.display = 'none';
         if (cloudProvider) alert(`${cloudProvider.toUpperCase()} integration coming soon!`);
     }
 }
@@ -745,13 +750,16 @@ function cancelNewRequest() {
 function showRequestForOthersModal() {
     const page = document.getElementById('requestForOthersPage');
     if (!page) {
-        alert('ERROR: requestForOthersPage not found!');
+        showPage('requests');
+        if (typeof filterRequestsByCategory === 'function') filterRequestsByCategory('cloud', 'pending');
         return;
     }
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     page.classList.add('active');
-    document.getElementById('othersStep1').style.display = 'block';
-    document.getElementById('othersStep2AWS').style.display = 'none';
+    const step1 = document.getElementById('othersStep1');
+    const step2 = document.getElementById('othersStep2AWS');
+    if (step1) step1.style.display = 'block';
+    if (step2) step2.style.display = 'none';
     if (typeof loadAccountsForOthers === 'function') loadAccountsForOthers();
 }
 
@@ -2320,10 +2328,14 @@ function filterAuditLogs() {
 }
 
 function showReportsAuditSubTab(subTab, ev) {
-    document.querySelectorAll('#adminReportsTab .tab-glow-subtab').forEach(b => { b.classList.remove('tab-glow-subtab-active'); });
+    const reportsTab = document.getElementById('adminReportsTab');
+    const reportsContent = document.getElementById('adminReportsContent');
+    const auditContent = document.getElementById('adminAuditContent');
+    if (!reportsTab || !reportsContent || !auditContent) return;
+    reportsTab.querySelectorAll('.tab-glow-subtab').forEach(b => { b.classList.remove('tab-glow-subtab-active'); });
     if (ev && ev.target) ev.target.closest('.tab-glow-subtab')?.classList.add('tab-glow-subtab-active');
-    document.getElementById('adminReportsContent').style.display = subTab === 'reports' ? 'block' : 'none';
-    document.getElementById('adminAuditContent').style.display = subTab === 'audit' ? 'block' : 'none';
+    reportsContent.style.display = subTab === 'reports' ? 'block' : 'none';
+    auditContent.style.display = subTab === 'audit' ? 'block' : 'none';
     if (subTab === 'audit' && typeof loadAdminAuditLogs === 'function') loadAdminAuditLogs();
 }
 
