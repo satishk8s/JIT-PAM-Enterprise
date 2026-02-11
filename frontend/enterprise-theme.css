@@ -14,10 +14,10 @@ html {
     text-rendering: auto;
 }
 .sidebar-nav {
-    contain: paint;
+    contain: none;
 }
 .page-content {
-    contain: paint;
+    contain: none;
 }
 input, textarea, .sidebar-toggle-btn {
     will-change: auto;

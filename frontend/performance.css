@@ -14,29 +14,18 @@ img.nav-logo {
     image-rendering: auto;
 }
 
-/* Isolate only expensive cards/lists; avoid forcing GPU layers on full page text */
+/* Avoid paint/layout isolation that can look soft on some GPU/browser setups */
 .requests-category-card,
 .jit-requests-grid,
 .terminal-page-layout,
-.term-query-terminal {
-    contain: paint;
-}
-
-/* Isolate scroll areas to reduce repaints */
+.term-query-terminal,
 .terminal-page-layout .terminal-sidebar,
-.sidebar-nav {
-    contain: paint;
-}
-
-/* content-visibility: skip off-screen work (biggest scroll win) */
-.jit-requests-grid,
-.terminal-category-list {
-    content-visibility: auto;
-}
+.sidebar-nav,
+.terminal-category-list,
 .jit-requests-grid .requests-category-card,
 .terminal-connection-card {
-    content-visibility: auto;
-    contain-intrinsic-size: auto 72px;
+    contain: none;
+    content-visibility: visible;
 }
 
 /* Avoid layout thrash on inputs */
