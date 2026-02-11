@@ -2025,23 +2025,23 @@ async function testConnection() {
     }
 }
 
-// Admin Functions - from sso_backup_20260203_173529 (Dashboard first)
+// Admin Functions - default to Users tab (87a181a behavior); Dashboard still supported if present
 function loadAdminPage() {
     var adminPage = document.getElementById('adminPage');
-    var dashboardTab = document.getElementById('adminDashboardTab');
     if (adminPage) {
         adminPage.classList.add('active');
         adminPage.style.setProperty('display', 'block', 'important');
         adminPage.style.setProperty('visibility', 'visible', 'important');
     }
-    showAdminTab('dashboard');
-    if (dashboardTab) {
-        dashboardTab.style.setProperty('display', 'block', 'important');
-        dashboardTab.style.setProperty('visibility', 'visible', 'important');
-        dashboardTab.classList.add('active');
+    var usersTab = document.getElementById('adminUsersTab');
+    var dashboardTab = document.getElementById('adminDashboardTab');
+    if (usersTab) {
+        showAdminTab('users');
+    } else if (dashboardTab) {
+        showAdminTab('dashboard');
+        if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
+        setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
     }
-    if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
-    setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
 }
 
 
