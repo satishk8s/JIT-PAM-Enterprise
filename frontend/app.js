@@ -481,8 +481,16 @@ function setTheme(theme) {
     }
 }
 
+function getEventTarget(evt) {
+    if (evt && evt.target) return evt.target;
+    if (typeof window !== 'undefined' && window.event && window.event.target) {
+        return window.event.target;
+    }
+    return null;
+}
+
 // Navigation
-function showPage(pageId) {
+function showPage(pageId, evt) {
     document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
@@ -503,8 +511,9 @@ function showPage(pageId) {
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
         item.classList.remove('active');
     });
-    if (event && event.target) {
-        const navItem = event.target.closest('.nav-item');
+    const navTarget = getEventTarget(evt);
+    if (navTarget) {
+        const navItem = navTarget.closest('.nav-item');
         if (navItem) {
             navItem.classList.add('active');
         }
@@ -1009,10 +1018,11 @@ function loadWorkloadsRequests() {
     list.innerHTML = '<div class="requests-empty">No workload requests</div>';
 }
 
-function filterRequests(filter) {
+function filterRequests(filter, evt) {
     currentFilter = filter;
-    if (event && event.target) {
-        event.target.classList.add('active');
+    const target = getEventTarget(evt);
+    if (target) {
+        target.classList.add('active');
     }
     loadRequestsPage();
 }
@@ -1684,7 +1694,7 @@ function calculateRiskScore(permissions, useCase) {
     return Math.min(risk, 10);
 }
 
-async function generateAIPermissions() {
+async function generateAIPermissions(evt) {
     const useCase = document.getElementById('aiUseCase').value;
     if (!useCase) {
         alert('Please describe what you need to do');
@@ -1697,10 +1707,12 @@ async function generateAIPermissions() {
     
     // Backend will handle all validation - just send the request
     
-    const button = event.target;
-    const originalText = button.innerHTML;
-    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
-    button.disabled = true;
+    const button = getEventTarget(evt);
+    const originalText = button ? button.innerHTML : '';
+    if (button) {
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+        button.disabled = true;
+    }
     
     try {
         const response = await fetch(`${API_BASE}/generate-permissions`, {
@@ -1825,8 +1837,10 @@ async function generateAIPermissions() {
         console.error('Error generating permissions:', error);
         alert('Error generating permissions. Please try again.');
     } finally {
-        button.innerHTML = originalText;
-        button.disabled = false;
+        if (button) {
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
     }
 }
 
@@ -2432,10 +2446,11 @@ function isValidEmail(email) {
     return emailRegex.test(email);
 }
 
-function switchOtherAccessType(type) {
+function switchOtherAccessType(type, evt) {
     // Update tab buttons
     document.querySelectorAll('#requestForOthersModal .tab-btn').forEach(btn => btn.classList.remove('active'));
-    event.target.classList.add('active');
+    const target = getEventTarget(evt);
+    if (target) target.classList.add('active');
     
     // Update tab content
     document.querySelectorAll('#requestForOthersModal .tab-content').forEach(content => content.classList.remove('active'));
@@ -2444,7 +2459,7 @@ function switchOtherAccessType(type) {
 
 let otherCurrentAIPermissions = null;
 
-async function generateOtherAIPermissions() {
+async function generateOtherAIPermissions(evt) {
     const useCase = document.getElementById('otherAiUseCase').value;
     if (!useCase) {
         alert('Please describe what users need to do');
@@ -2463,10 +2478,12 @@ async function generateOtherAIPermissions() {
         return;
     }
     
-    const button = event.target;
-    const originalText = button.innerHTML;
-    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
-    button.disabled = true;
+    const button = getEventTarget(evt);
+    const originalText = button ? button.innerHTML : '';
+    if (button) {
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+        button.disabled = true;
+    }
     
     try {
         const response = await fetch(`${API_BASE}/generate-permissions`, {
@@ -2504,8 +2521,10 @@ async function generateOtherAIPermissions() {
         console.error('Error generating permissions:', error);
         alert('Error generating permissions. Please try again.');
     } finally {
-        button.innerHTML = originalText;
-        button.disabled = false;
+        if (button) {
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
     }
 }
 
