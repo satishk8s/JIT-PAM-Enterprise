@@ -2042,6 +2042,15 @@ function loadAdminPage() {
         if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
         setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
     }
+    // Re-apply visibility after a frame so delayed updateUIForRole or CSS cannot leave admin blank
+    requestAnimationFrame(function() {
+        if (adminPage && document.body.getAttribute('data-page') === 'admin') {
+            adminPage.style.setProperty('display', 'block', 'important');
+            adminPage.style.setProperty('visibility', 'visible', 'important');
+            var activeTab = document.querySelector('#adminPage .admin-tab.active');
+            if (activeTab) activeTab.style.setProperty('display', 'block', 'important');
+        }
+    });
 }
 
 
