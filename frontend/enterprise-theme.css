@@ -3,7 +3,7 @@
    Security-First | AI-Powered | Dark Theme
    ============================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600;700&display=swap');
 /* display=swap prevents FOIT (flash of invisible text) - faster perceived load */
 
 /* Performance: sharper text, less jank on scroll/type */
@@ -80,6 +80,7 @@ body {
     -webkit-font-smoothing: auto;
     -moz-osx-font-smoothing: auto;
     text-rendering: auto;
+    font-synthesis: none;
 }
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }

@@ -79,3 +79,10 @@ body.performance-mode {
     text-rendering: optimizeLegibility;
     font-kerning: normal;
 }
+
+/* Dark-mode clarity boost: stronger text/border contrast without layout changes */
+html[data-theme="dark"] body.performance-mode {
+    --text-primary: #f3f6ff;
+    --text-secondary: #c6cfdf;
+    --border-color: #4a5a77;
+}
