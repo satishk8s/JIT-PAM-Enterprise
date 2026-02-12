@@ -1735,7 +1735,9 @@ def approve_request(request_id):
             # Activate (mint Vault credentials / IAM assignment) once approvals are complete.
             activate_result = _activate_database_access_request(request_id)
             if activate_result.get('error'):
-                return jsonify({'status': 'failed', 'error': activate_result['error']}), 500
+                # Do not leak internal Vault/config details to the UI.
+                safe_msg, _safe_code = _public_db_activation_error(activate_result['error'])
+                return jsonify({'status': 'failed', 'error': safe_msg}), 500
 
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
             approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
@@ -3843,6 +3845,34 @@ def _mask_secret(value, visible=2):
         return '*' * len(raw)
     return raw[:visible] + ('*' * max(4, len(raw) - visible))
 
+def _public_db_activation_error(err) -> tuple[str, str]:
+    """
+    Convert internal activation/config errors into a safe user-facing message.
+
+    We still log/store the real error server-side, but we do not leak internal
+    configuration or infrastructure details (Vault addr, tokens, stack traces).
+    """
+    raw = str(err or '')
+    low = raw.lower()
+
+    # Vault configuration / connectivity errors
+    if 'vault_addr' in low or 'vault addr' in low:
+        return ("Database access service is not configured. Please contact an administrator.", "VAULT_ADDR_MISSING")
+    if 'approle' in low and ('role_id' in low or 'secret_id' in low or 'vault_role_id' in low or 'vault_secret_id' in low):
+        return ("Database access service is not configured. Please contact an administrator.", "VAULT_APPROLE_MISSING")
+    if 'refusing to use a vault token' in low and 'root' in low:
+        return ("Database access service is misconfigured. Please contact an administrator.", "VAULT_TOKEN_POLICY")
+    if 'vault http 403' in low or 'forbidden' in low or 'permission denied' in low:
+        return ("Database access service is unavailable. Please contact an administrator.", "VAULT_FORBIDDEN")
+    if 'vault connection failed' in low or 'timed out' in low:
+        return ("Database access service is temporarily unreachable. Please retry in a few minutes.", "VAULT_UNREACHABLE")
+
+    # Proxy misconfiguration
+    if 'db_connect_proxy_host' in low or 'db_connect_proxy_port' in low or 'proxy-not-configured' in low:
+        return ("Database access service is not configured. Please contact an administrator.", "DB_PROXY_NOT_CONFIGURED")
+
+    return ("Database access activation failed. Please retry or contact an administrator.", "DB_ACTIVATION_FAILED")
+
 def _sanitize_database_request_for_client(req: dict) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
     safe = dict(req or {})
@@ -3850,6 +3880,16 @@ def _sanitize_database_request_for_client(req: dict) -> dict:
 
     # Remove secrets
     for k in ('db_password', 'vault_token', 'password'):
+        safe.pop(k, None)
+    # Remove internal-only fields / errors (do not leak internals to UI)
+    for k in (
+        'activation_error',
+        'vault_role_name', 'role_name',
+        'vault_lease_id', 'lease_id',
+        'lease_duration',
+        'iam_permission_set_arn',
+        'db_connect_arn',
+    ):
         safe.pop(k, None)
 
     # Replace DB endpoints with proxy endpoint (users must never see real endpoints).
@@ -5476,13 +5516,16 @@ def request_database_access():
 
         # Auto-approved NONPROD read-only requests activate immediately.
         create_error = None
+        create_error_public = None
         if initial_status == 'approved':
             try:
                 activate_result = _activate_database_access_request(request_id)
                 if activate_result.get('error'):
                     create_error = activate_result['error']
+                    create_error_public, _ = _public_db_activation_error(create_error)
             except Exception as e:
                 create_error = str(e)
+                create_error_public, _ = _public_db_activation_error(create_error)
 
         # Update conversation state (helps prevent accidental duplicate submissions).
         if conversation_id and conversation_id in db_conversation_states:
@@ -5503,13 +5546,14 @@ def request_database_access():
         elif str(status).strip().lower() == 'pending':
             msg = approval_message
         elif str(status).strip().lower() == 'failed':
-            msg = f"❌ Request created but activation failed: {create_error or 'unknown error'}"
+            msg = f"❌ Request created but activation failed. {create_error_public or 'Please contact an administrator.'}"
 
         return jsonify({
             'status': status,
             'request_id': request_id,
             'message': msg,
-            'creation_error': create_error,
+            # Never expose internal activation details to the browser.
+            'creation_error': create_error_public,
             'auth_mode': auth_profile.get('auth_mode'),
             'effective_auth': effective_auth,
         })
@@ -5589,7 +5633,7 @@ def get_database_request_credentials(request_id):
         effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         if not proxy_host or proxy_host == 'proxy-not-configured':
-            return jsonify({'error': 'DB proxy is not configured on the backend.'}), 500
+            return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
         dbs = req.get('databases') or []
         db_names = [str(d.get('name') or '').strip() for d in dbs if isinstance(d, dict) and d.get('name')]
         db_name = db_names[0] if db_names else 'default'
@@ -5683,7 +5727,7 @@ def execute_database_query():
         # Users must connect only via proxy. For PAM Terminal, backend also connects via proxy when configured.
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         if not proxy_host or proxy_host == 'proxy-not-configured':
-            return jsonify({'error': 'DB proxy is not configured on the backend (DB_CONNECT_PROXY_HOST/DB_CONNECT_PROXY_PORT).'}), 500
+            return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
         host = proxy_host
         port = int(proxy_port or 3306)
         database = db_name or db_info.get('name', '')

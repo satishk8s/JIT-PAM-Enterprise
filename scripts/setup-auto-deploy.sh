@@ -24,6 +24,9 @@ Type=simple
 User=root
 WorkingDirectory=$BACKEND_DIR
 ExecStart=$BACKEND_DIR/run-backend-on-ec2.sh
+# Optional environment file for Vault/Proxy settings (recommended).
+# Create: /etc/npamx/npamx.env (chmod 600)
+EnvironmentFile=-/etc/npamx/npamx.env
 Environment="DB_ADMIN_USER=admin"
 Environment="DB_ADMIN_PASSWORD=admin123"
 Environment="USE_DB_PROXY=true"

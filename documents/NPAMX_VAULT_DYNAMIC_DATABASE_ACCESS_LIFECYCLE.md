@@ -182,6 +182,24 @@ The database selection wizard no longer collects or displays the real RDS endpoi
 - Manual fallback is `RDS Instance ID` (and optional region), not a hostname.
 - All user-facing screens show only the configured **proxy** host/port.
 
+## 7) EC2 Deployment Notes (Vault/Proxy Env)
+
+If you run the backend via `systemd` (recommended), exporting variables in an SSH session will NOT reach the service.
+
+Use an env file:
+- Path: `/etc/npamx/npamx.env`
+- Permissions: `chmod 600 /etc/npamx/npamx.env`
+- Example template in repo: `scripts/npamx.env.example`
+
+Required variables for Vault dynamic DB access:
+- `VAULT_ADDR`
+- `VAULT_ROLE_ID`
+- `VAULT_SECRET_ID`
+
+Required variables for proxy-only connectivity:
+- `DB_CONNECT_PROXY_HOST`
+- `DB_CONNECT_PROXY_PORT`
+
 ### 6.1 Approved Databases Actions
 
 In "My Requests > Databases", approved items now show:

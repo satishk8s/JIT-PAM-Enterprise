@@ -1279,7 +1279,7 @@ async function submitStructuredDbRequest() {
         // Keep user in structured panel but clear for next request.
         resetStructuredDbRequest();
     } catch (e) {
-        alert('Failed: ' + e.message);
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -1657,6 +1657,21 @@ function escapeAttr(s) {
         .replace(/>/g, '&gt;');
 }
 
+function safeUserFacingErrorMessage(err) {
+    const msg = String((err && err.message) ? err.message : (err || '')).trim();
+    if (!msg) return 'Something went wrong. Please retry.';
+    const low = msg.toLowerCase();
+    const internalMarkers = [
+        'vault', 'approle', 'secret_id', 'role_id', 'vault_addr',
+        'internal_api_token', 'traceback', 'keyerror', 'boto3',
+        'permission denied', 'no such file', 'systemd', 'journalctl'
+    ];
+    if (internalMarkers.some(m => low.includes(m))) {
+        return 'Something went wrong while processing this request. Please retry or contact an administrator.';
+    }
+    return msg;
+}
+
 function domIdFromRequestId(requestId) {
     return String(requestId || '')
         .toLowerCase()
@@ -1782,7 +1797,7 @@ async function submitDbRequestViaAi(opts = {}) {
         if (data.creation_error) msg += '\n\n' + data.creation_error;
         alert(msg);
     } catch (e) {
-        alert('Failed: ' + e.message);
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -1832,7 +1847,7 @@ async function loadDbRequests() {
                     <span class="db-request-status db-status-badge-${req.status}">${escapeHtml(statusLabel)}</span>
                 </div>
                 <div class="db-request-body">
-                    <p><strong>${escapeHtml(eng)}</strong> • ${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</p>
+                    <p><strong>${escapeHtml(eng)}</strong> • <span class="db-req-proxy">Proxy:</span> <code>${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</code></p>
                     ${dbNames ? `<p>Database(s): <strong>${escapeHtml(dbNames)}</strong></p>` : ''}
                     <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
                     <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | Expires: ${escapeHtml(expires)}</p>
@@ -1877,7 +1892,7 @@ async function denyDbRequest(requestId) {
         loadDbRequests();
         if (typeof loadRequests === 'function') loadRequests();
     } catch (e) {
-        alert('Failed: ' + e.message);
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -1898,7 +1913,7 @@ async function approveDbRequest(requestId) {
         refreshApprovedDatabases();
         if (typeof loadRequests === 'function') loadRequests();
     } catch (e) {
-        alert('Failed: ' + e.message);
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -2070,7 +2085,7 @@ async function openDbExternalToolModal(requestId) {
         `;
         document.body.appendChild(modal);
     } catch (e) {
-        alert('Failed to load credentials: ' + e.message);
+        alert('Failed to load credentials: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -2132,7 +2147,7 @@ async function viewDbRequestDetails(requestId) {
         `;
         document.body.appendChild(modal);
     } catch (e) {
-        alert('Failed to load request details: ' + e.message);
+        alert('Failed to load request details: ' + safeUserFacingErrorMessage(e));
     }
 }
 
@@ -2155,7 +2170,7 @@ async function editDbRequestDurationModal(requestId) {
         loadDbRequests();
         alert('Duration updated');
     } catch (e) {
-        alert('Failed: ' + e.message);
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
 }
 

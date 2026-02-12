@@ -8,6 +8,18 @@ BACKEND_DIR="${BACKEND_DIR:-$SCRIPT_DIR}"
 
 echo "=== NPAM Backend Startup ==="
 
+# systemd does not inherit interactive shell exports; load env from a file if present.
+# Keep this file root-readable only (contains VAULT_SECRET_ID).
+for ENV_FILE in /etc/npamx/npamx.env "$BACKEND_DIR/.env" "$BACKEND_DIR/.env.local"; do
+  if [ -f "$ENV_FILE" ]; then
+    echo "Loading environment: $ENV_FILE"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+done
+
 # 1. Ensure app.py exists (must run from git clone)
 if [ ! -f "$BACKEND_DIR/app.py" ]; then
   echo "ERROR: app.py not found. Run from repo: cd /root/JIT-PAM-Enterprise/backend && ./run-backend-on-ec2.sh"

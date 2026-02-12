@@ -250,8 +250,8 @@ After pull on server:
 4. Hard refresh browser.
 
 Cache-bust versions used:
-- `frontend/index.html`: `enterprise-theme.css?v=13`, `performance.css?v=12`, `databases.css?v=15`, `databases.js?v=22`
-- `frontend/index-bundled.html`: `bundle.css?v=29`, `bundle.js?v=29`
+- `frontend/index.html`: `enterprise-theme.css?v=13`, `performance.css?v=12`, `databases.css?v=15`, `databases.js?v=23`
+- `frontend/index-bundled.html`: `bundle.css?v=30`, `bundle.js?v=30`
 
 ## 7) Quick Validation Checklist
 
