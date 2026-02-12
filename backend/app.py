@@ -3734,9 +3734,51 @@ def database_ai_chat():
             db_conversations[conversation_id] = []
         elif conversation_id not in db_conversations:
             db_conversations[conversation_id] = []
-        
-        # Add user message
-        db_conversations[conversation_id].append({'role': 'user', 'content': message})
+
+        def redact_sensitive_content(text):
+            redacted = str(text or '')
+            patterns = [
+                (r'(?i)\b(username|user)\s*(?:is|=|:)\s*([^\s,;]+)\s+(?:and\s+)?\b(password|passwd|pwd)\s*(?:is|=|:)\s*([^\s,;]+)', r'\1=[REDACTED] \3=[REDACTED]'),
+                (r'(?i)\b(password|passwd|pwd)\s*(?:is|=|:)\s*([^\s,;]+)', r'\1=[REDACTED]'),
+                (r'(?i)\b(api[_ -]?key|access[_ -]?key|secret[_ -]?key|token)\s*(?:is|=|:)\s*([^\s,;]+)', r'\1=[REDACTED]'),
+                (r'([a-zA-Z][a-zA-Z0-9+.-]*://[^:\s/@]+:)([^@\s]+)(@)', r'\1[REDACTED]\3'),
+            ]
+            for pattern, repl in patterns:
+                redacted = re.sub(pattern, repl, redacted)
+            return redacted
+
+        def is_out_of_scope_request(msg):
+            msg_lower = (msg or '').lower()
+            non_db_terms = ['movie', 'ticket', 'flight', 'hotel', 'food', 'restaurant', 'cab', 'weather']
+            db_terms = ['db', 'database', 'rds', 'sql', 'table', 'schema', 'instance', 'mysql', 'postgres']
+            return any(t in msg_lower for t in non_db_terms) and not any(t in msg_lower for t in db_terms)
+
+        def is_destructive_execution_request(msg):
+            msg_lower = (msg or '').lower()
+            destructive_words = ['delete', 'drop', 'truncate', 'terminate', 'destroy', 'wipe', 'purge']
+            db_targets = ['rds', 'instance', 'database', 'db', 'table', 'schema', 'cluster']
+            execution_markers = ['can you', 'please', 'for me', 'go ahead', 'right now', 'make yourself admin']
+            has_destructive = any(word in msg_lower for word in destructive_words)
+            has_target = any(word in msg_lower for word in db_targets)
+            has_execution = any(marker in msg_lower for marker in execution_markers)
+            return has_destructive and has_target and has_execution
+
+        def asks_for_sensitive_data(text):
+            t = str(text or '')
+            patterns = [
+                r'(?i)\b(share|provide|send|give|tell)\b[^.?!]{0,60}\b(password|passwd|credential|secret|api key|token)\b',
+                r'(?i)\b(master|db)\s+(username|password)\b',
+                r'(?i)\bwhat\s+is\s+your\s+password\b',
+            ]
+            return any(re.search(p, t) for p in patterns)
+
+        def claims_direct_execution(text):
+            t = (text or '').lower()
+            if any(x in t for x in ["i can't", "i cannot", "i can not", "unable to"]):
+                return False
+            has_commit = any(x in t for x in ['i can', "i'll", 'i will', 'we can', 'we will'])
+            has_action = any(x in t for x in ['delete', 'drop', 'terminate', 'destroy', 'create', 'modify'])
+            return has_commit and has_action
 
         def infer_permissions_and_role(text):
             text_upper = (text or '').upper()
@@ -3798,6 +3840,54 @@ def database_ai_chat():
                 concise = concise[:257].rstrip() + "..."
             return concise
 
+        def local_guardrailed_fallback(msg):
+            msg_lower = (msg or '').lower().strip()
+            target_hint = selected_instance_name or (context_db_names[0] if context_db_names else (context_hosts[0] if context_hosts else 'the selected database'))
+            greeting = bool(re.match(r'^(hi|hii|hello|hey|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
+            if greeting:
+                return f"Hey hi, I am here. How can I help with {target_hint}?"
+            if 'are you there' in msg_lower or 'what happened' in msg_lower:
+                return "I am here. Tell me the operations and duration, and I will prepare your request."
+            if is_out_of_scope_request(msg_lower):
+                return "I can help only with database access in NPAMX. Tell me your DB task and duration."
+            if is_destructive_execution_request(msg_lower):
+                return "I cannot execute destructive actions through chat. I can help you submit a controlled access request instead."
+            has_ops = any(x in msg_lower for x in ['read', 'write', 'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke'])
+            has_duration = bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower))
+            if has_ops and has_duration:
+                return "Perfect, I captured it. Please click Submit for Approval."
+            if has_ops and not has_duration:
+                return "Got it. How long do you need this access (for example 2h, 4h, or 8h)?"
+            if not has_ops and has_duration:
+                return "Understood. What operations do you need on the selected database?"
+            return "Tell me the required operations and duration, and I will prepare the request."
+
+        message_for_ai = redact_sensitive_content(message)
+        shared_secret = message_for_ai != message
+
+        # Add sanitized user message to history.
+        db_conversations[conversation_id].append({'role': 'user', 'content': message_for_ai})
+
+        if shared_secret:
+            ai_response = "Please do not share usernames, passwords, tokens, or keys in chat. NPAMX does not need secrets here, so tell me only the operations and duration."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None
+            })
+
+        if is_destructive_execution_request(message_for_ai):
+            ai_response = "I cannot execute destructive actions like deleting databases or RDS instances through chat. If needed, I can help you request the right temporary access."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None
+            })
+
         context_lines = []
         if context_engine_label:
             context_lines.append(f"Engine: {context_engine_label}")
@@ -3828,6 +3918,10 @@ Rules:
 - Infer intent from plain language (including troubleshooting narratives) and guide the user toward a usable DB access request.
 - When the user asks a direct question, answer it first, then ask one follow-up only if needed.
 - If user asks something outside database/JIT scope, gently redirect to database assistance in one short sentence.
+- Never ask for usernames, passwords, API keys, tokens, or any secret.
+- If a user shares a secret, tell them not to share secrets and continue without it.
+- Never claim to directly execute infrastructure changes yourself.
+- For delete/drop/terminate requests against infrastructure, refuse execution and redirect to the approved request workflow.
 - Avoid bullet points, markdown, or template-like wording.
 - Keep tone friendly, brief, and practical.
 
@@ -3860,13 +3954,13 @@ If enough details are available (operations and duration), confirm briefly and a
             role = msg.get('role')
             if role not in ('user', 'assistant'):
                 continue
-            content = str(msg.get('content') or '').strip()
+            content = redact_sensitive_content(str(msg.get('content') or '').strip())
             if not content:
                 continue
             chat_messages.append({'role': role, 'content': content})
 
         if not chat_messages or chat_messages[-1].get('role') != 'user':
-            chat_messages.append({'role': 'user', 'content': message})
+            chat_messages.append({'role': 'user', 'content': message_for_ai})
 
         try:
             response = bedrock_client.invoke_model(
@@ -3893,12 +3987,16 @@ If enough details are available (operations and duration), confirm briefly and a
                 ai_response = str(result.get('output_text') or '').strip()
         except Exception as bedrock_err:
             print(f"Bedrock chat failed: {bedrock_err}")
-            ai_response = "NPAMX is temporarily unavailable. Please retry in a few seconds."
+            ai_response = local_guardrailed_fallback(message_for_ai)
 
         ai_response = normalize_db_ai_reply(ai_response)
+        if asks_for_sensitive_data(ai_response):
+            ai_response = "I will never ask for usernames or passwords in chat. Tell me the operations and duration, and I will prepare your access request."
+        elif claims_direct_execution(ai_response):
+            ai_response = "I cannot directly execute infrastructure changes. I can help you prepare a controlled JIT access request."
 
         if not ai_response:
-            ai_response = "I can help with your database access request. Please share the required operations and duration."
+            ai_response = local_guardrailed_fallback(message_for_ai)
 
         # Store assistant response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})

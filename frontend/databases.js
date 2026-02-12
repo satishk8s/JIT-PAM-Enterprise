@@ -832,6 +832,20 @@ function hideDbQuickPrompts() {
     if (el) el.style.display = 'none';
 }
 
+function redactSensitiveChatInput(text) {
+    let redacted = String(text || '');
+    const patterns = [
+        [/\b(username|user)\s*(?:is|=|:)\s*([^\s,;]+)\s+(?:and\s+)?\b(password|passwd|pwd)\s*(?:is|=|:)\s*([^\s,;]+)/gi, '$1=[REDACTED] $3=[REDACTED]'],
+        [/\b(password|passwd|pwd)\s*(?:is|=|:)\s*([^\s,;]+)/gi, '$1=[REDACTED]'],
+        [/\b(api[_ -]?key|access[_ -]?key|secret[_ -]?key|token)\s*(?:is|=|:)\s*([^\s,;]+)/gi, '$1=[REDACTED]'],
+        [/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:\s/@]+:)([^@\s]+)(@)/g, '$1[REDACTED]$3']
+    ];
+    patterns.forEach(([pattern, replacement]) => {
+        redacted = redacted.replace(pattern, replacement);
+    });
+    return redacted;
+}
+
 function buildDbAiContext() {
     const selectedInstance = dbRequestDraft?._selectedInstance || null;
     const databases = (selectedDatabases || []).map(db => ({
@@ -875,12 +889,17 @@ function shouldShowDbRequestSummary() {
 
 async function sendDbAiMessage() {
     const input = document.getElementById('dbAiInput');
-    const message = input.value.trim();
-    if (!message) return;
+    const rawMessage = input.value.trim();
+    if (!rawMessage) return;
+    const message = redactSensitiveChatInput(rawMessage);
+    const wasRedacted = message !== rawMessage;
     hideDbQuickPrompts();
     const chat = document.getElementById('dbAiChat');
     const thinkingEl = document.getElementById('dbAiThinking');
     chat.innerHTML += `<div class="db-ai-msg db-ai-user"><div class="db-ai-msg-avatar"><i class="fas fa-user"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(message)}</p></div></div>`;
+    if (wasRedacted) {
+        chat.innerHTML += `<div class="db-ai-msg db-ai-bot">${dbAssistantAvatar()}<div class="db-ai-msg-content"><p>Sensitive values were masked for safety.</p></div></div>`;
+    }
     input.value = '';
     chat.scrollTop = chat.scrollHeight;
     if (thinkingEl) thinkingEl.style.display = 'flex';
