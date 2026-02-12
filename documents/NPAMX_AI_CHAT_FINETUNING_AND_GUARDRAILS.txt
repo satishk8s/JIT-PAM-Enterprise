@@ -917,4 +917,94 @@ Mermaid thinking rise/sink (CSS keyframes, SVG stays vector-sharp):
 - The mermaid SVG uses unique `<defs>` ids per instance to avoid collisions when multiple avatars are rendered in the DOM.
 - Bundled deploy: run `scripts/bundle-frontend.sh` on the server (already invoked by `scripts/configure-nginx-git.sh`).
 
+---
+
+## 14) Database Access (Structured) (No AI) (Latest Update)
+
+This adds an alternative deterministic access-request path under Databases:
+- AI Guided (existing)
+- Structured (new)
+
+### 14.1 Goal
+
+Provide a no-AI workflow where the user explicitly selects query permissions (multi-select), enters duration + justification, and submits the request. Backend provisioning/approvals remain unchanged.
+
+### 14.2 What Changed
+
+Frontend:
+- Added a sidebar entry: "Database Access (Structured)" (opens Databases page in structured mode)
+- Added a mode toggle on the Databases page: AI Guided vs Structured
+- Added a structured panel with:
+  - "Select Required Query Permissions" button grid (engine-filtered)
+  - Selected permissions list with remove chips
+  - Duration (TTL) input + quick chips (2h/4h/8h)
+  - Business justification textarea
+  - Submit for approval button
+- Updated My Requests > Databases to display:
+  - Selected queries
+  - Expiry time
+  - View-only details modal (no edit after submission)
+
+Backend:
+- `/api/databases/requests` now returns `permissions` and `query_types` so the UI can display selected queries without extra calls.
+
+Files updated:
+- `backend/app.py`
+- `frontend/index.html`
+- `frontend/index-bundled.html`
+- `frontend/databases.js`
+- `frontend/databases.css`
+
+### 14.3 Key Code (How It Works)
+
+Permission grid + selection (frontend):
+```javascript
+function renderStructuredPermissionGroups(engine) {
+  const groups = getStructuredPermissionGroupsForEngine(engine);
+  container.innerHTML = groups.map(g => `... <button class="db-perm-btn" data-op="${op}">${op}</button> ...`).join('');
+}
+
+function toggleStructuredPermission(op) {
+  const idx = dbStructuredPermissions.indexOf(op);
+  if (idx >= 0) dbStructuredPermissions.splice(idx, 1);
+  else dbStructuredPermissions.push(op);
+  syncStructuredPermissionUI();
+}
+```
+
+Submit payload (same backend endpoint as AI flow):
+```javascript
+await fetch(`${DB_API_BASE}/api/databases/request-access`, {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({
+    databases: selectedDatabases,
+    account_id: accountId,
+    db_instance_id: inst.id || '',
+    user_email: userEmail,
+    user_full_name: fullName,
+    db_username: userEmail.split('@')[0],
+    permissions: dbStructuredPermissions,
+    query_types: deriveStructuredQueryTypes(dbStructuredPermissions),
+    role: deriveStructuredRole(dbStructuredPermissions),
+    duration_hours: duration,
+    justification
+  })
+});
+```
+
+My Requests list includes permissions (backend):
+```python
+db_requests.append({
+  ...,
+  'permissions': req.get('permissions', []),
+  'query_types': req.get('query_types', []),
+})
+```
+
+### 14.4 Cache Bust
+
+- `frontend/index.html`: `databases.css?v=15`, `databases.js?v=21`
+- `frontend/index-bundled.html`: `bundle.css?v=28`, `bundle.js?v=28`
+
 If this document needs a second version for leadership/non-technical audience, create `documents/NPAMX_AI_CHAT_EXECUTIVE_SUMMARY.txt` with only business outcomes, risk reduction, and release notes.

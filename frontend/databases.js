@@ -8,6 +8,42 @@ let selectedEngine = null;
 let dbRequestDraft = null;
 let dbStatusFilter = 'all';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
+let dbAccessMode = 'ai'; // 'ai' | 'structured'
+let dbStructuredPermissions = [];
+
+// Structured permission catalog (engine-specific filtering applied at render time)
+const DB_STRUCTURED_PERMISSIONS = [
+    {
+        id: 'retrieval',
+        title: 'Data Retrieval',
+        ops: ['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE']
+    },
+    {
+        id: 'modification',
+        title: 'Data Modification',
+        ops: ['INSERT', 'UPDATE', 'DELETE', 'MERGE']
+    },
+    {
+        id: 'schema',
+        title: 'Schema Modification',
+        ops: ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME']
+    },
+    {
+        id: 'index',
+        title: 'Index & Performance',
+        ops: ['CREATE INDEX', 'DROP INDEX', 'ANALYZE']
+    },
+    {
+        id: 'privileges',
+        title: 'Privileges',
+        ops: ['GRANT', 'REVOKE']
+    },
+    {
+        id: 'admin',
+        title: 'Administrative',
+        ops: ['EXECUTE', 'CALL', 'LOCK', 'UNLOCK']
+    }
+];
 
 // AWS engines that use Account -> Instance -> DB name -> Chat flow (RDS, Redshift, DocumentDB)
 const AWS_CHAT_FLOW_ENGINES = ['mysql', 'postgres', 'aurora', 'maria', 'mssql', 'documentdb', 'redshift'];
@@ -120,9 +156,12 @@ function selectDbEngine(engId, label, engine) {
     // Show step panel, hide AI panel
     const aiPanel = document.getElementById('dbAiPanel');
     if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+    const structuredPanel = document.getElementById('dbStructuredPanel');
+    if (structuredPanel) structuredPanel.classList.add('db-structured-panel-hidden');
     dbRequestDraft = { engine, provider, databases: [] };
     dbStepState = { step: 1, provider };
     selectedDatabases = [];
+    dbStructuredPermissions = [];
     showDbStepPanel();
     renderDbStepContent();
 }
@@ -141,6 +180,7 @@ function closeDbStepPanel() {
     selectedEngine = null;
     dbStepState = null;
     dbConversationId = null;
+    dbStructuredPermissions = [];
 }
 
 function closeDbAiPanel() {
@@ -148,9 +188,71 @@ function closeDbAiPanel() {
     if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
     const stepPanel = document.getElementById('dbStepPanel');
     if (stepPanel) stepPanel.classList.add('db-step-hidden');
+    const structuredPanel = document.getElementById('dbStructuredPanel');
+    if (structuredPanel) structuredPanel.classList.add('db-structured-panel-hidden');
     selectedEngine = null;
     dbStepState = null;
     dbConversationId = null;
+    dbStructuredPermissions = [];
+}
+
+function closeDbStructuredPanel() {
+    const structuredPanel = document.getElementById('dbStructuredPanel');
+    if (structuredPanel) structuredPanel.classList.add('db-structured-panel-hidden');
+    const stepPanel = document.getElementById('dbStepPanel');
+    if (stepPanel) stepPanel.classList.add('db-step-hidden');
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+    selectedEngine = null;
+    dbStepState = null;
+    dbConversationId = null;
+    dbStructuredPermissions = [];
+}
+
+function openStructuredDatabaseAccess() {
+    try { setDbAccessMode('structured'); } catch (_) {}
+    if (typeof showPage === 'function') showPage('databases');
+}
+
+function setDbAccessMode(mode) {
+    const m = (mode || '').toLowerCase() === 'structured' ? 'structured' : 'ai';
+    dbAccessMode = m;
+    const aiBtn = document.getElementById('dbModeAiBtn');
+    const stBtn = document.getElementById('dbModeStructuredBtn');
+    if (aiBtn) {
+        const active = m === 'ai';
+        aiBtn.classList.toggle('is-active', active);
+        aiBtn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+    if (stBtn) {
+        const active = m === 'structured';
+        stBtn.classList.toggle('is-active', active);
+        stBtn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+
+    // If a panel is already visible, switch without losing selection.
+    const aiPanel = document.getElementById('dbAiPanel');
+    const structuredPanel = document.getElementById('dbStructuredPanel');
+    const stepPanel = document.getElementById('dbStepPanel');
+    const selectionComplete = !!(selectedEngine && Array.isArray(selectedDatabases) && selectedDatabases.length);
+    const stepHidden = !!(stepPanel && stepPanel.classList.contains('db-step-hidden'));
+
+    if (m === 'structured') {
+        if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+        if (selectionComplete && stepHidden) {
+            transitionToDbStructuredUI();
+        } else if (structuredPanel && !structuredPanel.classList.contains('db-structured-panel-hidden')) {
+            hydrateStructuredSummary();
+        }
+    } else {
+        if (structuredPanel) structuredPanel.classList.add('db-structured-panel-hidden');
+        if (selectionComplete && stepHidden) {
+            transitionToDbChatUI();
+        }
+    }
+
+    // If the wizard is open, update the CTA label to match the selected mode.
+    try { updateDbStepNextButton(); } catch (_) {}
 }
 
 async function renderDbStepContent() {
@@ -627,16 +729,17 @@ function updateDbStepNextButton() {
     if (!btn || !dbStepState || !selectedEngine) return;
     const { step, provider } = dbStepState;
     const useChatFlow = provider === 'aws' && AWS_CHAT_FLOW_ENGINES.includes((selectedEngine.engine || '').toLowerCase());
+    const finalLabel = dbAccessMode === 'structured' ? 'Continue to Permissions' : 'Continue to NPAMX';
     let label = 'Continue';
 
     if (provider === 'aws' && useChatFlow) {
         if (step === 1) label = 'Next: Instance';
         else if (step === 2) label = 'Next: Database Name';
-        else label = 'Continue to NPAMX';
+        else label = finalLabel;
     } else if (provider === 'aws' && !useChatFlow) {
-        label = step === 1 ? 'Next: Databases' : 'Continue to NPAMX';
+        label = step === 1 ? 'Next: Databases' : finalLabel;
     } else {
-        label = 'Continue to NPAMX';
+        label = finalLabel;
     }
 
     btn.innerHTML = `<i class="fas fa-arrow-right"></i> ${label}`;
@@ -711,7 +814,7 @@ async function dbStepNext() {
                 alert('Please enter at least one database name.');
                 return;
             }
-            transitionToDbChatUI();
+            transitionToDbFinalPanel();
             return;
         }
         if (step === 2 && !useChatFlow) {
@@ -775,11 +878,15 @@ async function dbStepNext() {
         selectedDatabases = [{ id: projectId, name: 'default', host: `${projectId}.mongodb.net`, port: 27017, engine: 'mongodb' }];
     }
 
-    // All steps complete — hide step panel, show AI assistant
+    // All steps complete — hide step panel, show the selected access mode panel
     document.getElementById('dbStepPanel').classList.add('db-step-hidden');
-    document.getElementById('dbAiEngineLabel').textContent = selectedEngine.label;
-    document.getElementById('dbAiPanel').classList.remove('db-ai-panel-hidden');
-    initDbAiChat(selectedEngine.label, selectedEngine.engine);
+    if (dbAccessMode === 'structured') {
+        transitionToDbStructuredUI();
+    } else {
+        document.getElementById('dbAiEngineLabel').textContent = selectedEngine.label;
+        document.getElementById('dbAiPanel').classList.remove('db-ai-panel-hidden');
+        initDbAiChat(selectedEngine.label, selectedEngine.engine);
+    }
 }
 
 function transitionToDbChatUI() {
@@ -789,6 +896,26 @@ function transitionToDbChatUI() {
     if (aiPanel) aiPanel.classList.remove('db-ai-panel-hidden');
     document.getElementById('dbAiEngineLabel').textContent = selectedEngine?.label || 'Database';
     initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
+}
+
+function transitionToDbStructuredUI() {
+    const stepPanel = document.getElementById('dbStepPanel');
+    const structuredPanel = document.getElementById('dbStructuredPanel');
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (stepPanel) stepPanel.classList.add('db-step-hidden');
+    if (aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+    if (structuredPanel) structuredPanel.classList.remove('db-structured-panel-hidden');
+    const label = selectedEngine?.label || 'Database';
+    const engine = (selectedEngine?.engine || '').toLowerCase();
+    const engineLabel = document.getElementById('dbStructuredEngineLabel');
+    if (engineLabel) engineLabel.textContent = label;
+    renderStructuredPermissionGroups(engine);
+    hydrateStructuredSummary();
+}
+
+function transitionToDbFinalPanel() {
+    if (dbAccessMode === 'structured') transitionToDbStructuredUI();
+    else transitionToDbChatUI();
 }
 
 function dbAssistantAvatar(variant = 'avatar') {
@@ -905,6 +1032,266 @@ function initDbChatWithPrompts(label, engine) {
 function sendDbAiPrompt(message) {
     document.getElementById('dbAiInput').value = message;
     sendDbAiMessage();
+}
+
+function normalizeEngineForStructured(engine) {
+    const e = String(engine || '').toLowerCase();
+    if (!e) return '';
+    if (e.includes('aurora')) return 'mysql';
+    if (e.includes('maria')) return 'mysql';
+    return e;
+}
+
+function getStructuredPermissionGroupsForEngine(engine) {
+    const e = normalizeEngineForStructured(engine);
+    const isMysql = ['mysql'].includes(e);
+    const isPostgres = ['postgres', 'postgresql'].includes(e);
+    const isMssql = ['mssql', 'sqlserver', 'sql_server'].includes(e);
+    const isRedshift = ['redshift'].includes(e);
+    const isDoc = ['documentdb', 'mongodb', 'docdb'].includes(e);
+
+    // Default: SQL-like set.
+    let groups = DB_STRUCTURED_PERMISSIONS.map(g => ({ ...g, ops: [...g.ops] }));
+
+    if (isMysql) {
+        // MySQL doesn't support MERGE keyword.
+        groups = groups.map(g => (g.id === 'modification' ? { ...g, ops: g.ops.filter(op => op !== 'MERGE') } : g));
+    } else if (isPostgres) {
+        // Postgres doesn't support DESCRIBE as a SQL keyword.
+        groups = groups.map(g => (g.id === 'retrieval' ? { ...g, ops: g.ops.filter(op => op !== 'DESCRIBE') } : g));
+    } else if (isRedshift) {
+        // Redshift is Postgres-like; keep without DESCRIBE.
+        groups = groups.map(g => (g.id === 'retrieval' ? { ...g, ops: g.ops.filter(op => op !== 'DESCRIBE') } : g));
+    } else if (isDoc) {
+        // No SQL permissions for DocumentDB/Mongo.
+        return [
+            { id: 'doc_read', title: 'Data Retrieval', ops: ['FIND', 'AGGREGATE'] },
+            { id: 'doc_write', title: 'Data Modification', ops: ['INSERT', 'UPDATE', 'DELETE'] },
+            { id: 'doc_index', title: 'Index', ops: ['CREATE INDEX', 'DROP INDEX'] }
+        ];
+    } else if (isMssql) {
+        // MSSQL supports MERGE.
+    }
+
+    // Remove empty groups.
+    groups = groups.filter(g => (g.ops || []).length);
+    return groups;
+}
+
+function renderStructuredPermissionGroups(engine) {
+    const container = document.getElementById('dbStructuredPermGroups');
+    const selectedContainer = document.getElementById('dbStructuredSelected');
+    if (!container || !selectedContainer) return;
+
+    const groups = getStructuredPermissionGroupsForEngine(engine);
+    container.innerHTML = groups.map(g => `
+        <div class="db-perm-group" data-group="${escapeAttr(g.id)}">
+            <div class="db-perm-group-title">${escapeHtml(g.title)}</div>
+            <div class="db-perm-btns">
+                ${(g.ops || []).map(op => `
+                    <button type="button" class="db-perm-btn" data-op="${escapeAttr(op)}">${escapeHtml(op)}</button>
+                `).join('')}
+            </div>
+        </div>
+    `).join('');
+
+    // Event delegation (only bind once)
+    if (container.dataset.bound !== 'true') {
+        container.dataset.bound = 'true';
+        container.addEventListener('click', (e) => {
+            const btn = e.target.closest('.db-perm-btn');
+            if (!btn) return;
+            e.preventDefault();
+            toggleStructuredPermission(btn.getAttribute('data-op') || '');
+        });
+    }
+
+    if (selectedContainer.dataset.bound !== 'true') {
+        selectedContainer.dataset.bound = 'true';
+        selectedContainer.addEventListener('click', (e) => {
+            const rm = e.target.closest('[data-remove-op]');
+            if (!rm) return;
+            e.preventDefault();
+            const op = rm.getAttribute('data-remove-op') || '';
+            removeStructuredPermission(op);
+        });
+    }
+
+    // Sync UI state
+    syncStructuredPermissionUI();
+}
+
+function toggleStructuredPermission(op) {
+    const perm = String(op || '').trim();
+    if (!perm) return;
+    const idx = dbStructuredPermissions.indexOf(perm);
+    if (idx >= 0) dbStructuredPermissions.splice(idx, 1);
+    else dbStructuredPermissions.push(perm);
+    syncStructuredPermissionUI();
+    hydrateStructuredSummary();
+}
+
+function removeStructuredPermission(op) {
+    const perm = String(op || '').trim();
+    if (!perm) return;
+    dbStructuredPermissions = dbStructuredPermissions.filter(p => p !== perm);
+    syncStructuredPermissionUI();
+    hydrateStructuredSummary();
+}
+
+function syncStructuredPermissionUI() {
+    const container = document.getElementById('dbStructuredPermGroups');
+    const selectedContainer = document.getElementById('dbStructuredSelected');
+    if (!container || !selectedContainer) return;
+
+    const selected = new Set(dbStructuredPermissions);
+    container.querySelectorAll('.db-perm-btn').forEach(btn => {
+        const op = btn.getAttribute('data-op') || '';
+        btn.classList.toggle('is-selected', selected.has(op));
+    });
+
+    if (!dbStructuredPermissions.length) {
+        selectedContainer.innerHTML = `<div class="db-perm-selected-empty">Select one or more permissions above.</div>`;
+        return;
+    }
+    selectedContainer.innerHTML = `
+        <div class="db-perm-chip-row">
+            ${dbStructuredPermissions.map(op => `
+                <span class="db-perm-chip">
+                    <span class="db-perm-chip-text">${escapeHtml(op)}</span>
+                    <button type="button" class="db-perm-chip-x" data-remove-op="${escapeAttr(op)}" aria-label="Remove ${escapeAttr(op)}">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </span>
+            `).join('')}
+        </div>
+    `;
+}
+
+function deriveStructuredRole(ops) {
+    const perms = Array.isArray(ops) ? ops : [];
+    const up = perms.map(p => String(p || '').toUpperCase());
+    const hasAdminOps = up.some(p => ['GRANT', 'REVOKE', 'EXECUTE', 'CALL', 'LOCK', 'UNLOCK'].includes(p));
+    if (hasAdminOps) return 'admin';
+    const hasSchema = up.some(p => ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX'].includes(p));
+    if (hasSchema) return 'read_full_write';
+    const hasWrite = up.some(p => ['INSERT', 'UPDATE', 'DELETE', 'MERGE'].includes(p));
+    if (hasWrite) return 'read_limited_write';
+    return 'read_only';
+}
+
+function deriveStructuredQueryTypes(ops) {
+    const perms = Array.isArray(ops) ? ops : [];
+    const up = perms.map(p => String(p || '').toUpperCase());
+    const queryTypes = [];
+    const isDdl = up.some(p => ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX'].includes(p));
+    if (isDdl) queryTypes.push('DDL');
+    return queryTypes;
+}
+
+function setStructuredDuration(hours) {
+    const el = document.getElementById('dbStructuredDuration');
+    if (!el) return;
+    const h = parseInt(hours, 10);
+    if (!Number.isFinite(h) || h < 1 || h > 24) return;
+    el.value = String(h);
+    hydrateStructuredSummary();
+}
+
+function resetStructuredDbRequest() {
+    dbStructuredPermissions = [];
+    const dur = document.getElementById('dbStructuredDuration');
+    const just = document.getElementById('dbStructuredJustification');
+    if (dur) dur.value = '2';
+    if (just) just.value = '';
+    syncStructuredPermissionUI();
+    hydrateStructuredSummary();
+}
+
+function hydrateStructuredSummary() {
+    const summary = document.getElementById('dbStructuredSummary');
+    if (!summary) return;
+    const dbs = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
+    const dbNames = dbs.length ? dbs.join(', ') : (dbRequestDraft?.db_name || 'default');
+    const duration = parseInt(document.getElementById('dbStructuredDuration')?.value || '2', 10) || 2;
+    const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
+    const role = deriveStructuredRole(dbStructuredPermissions);
+    const ops = dbStructuredPermissions.length ? dbStructuredPermissions.join(', ') : '—';
+
+    summary.innerHTML = `
+        <div class="db-structured-summary-grid">
+            <span><strong>Engine:</strong> ${escapeHtml(selectedEngine?.label || 'Database')}</span>
+            <span><strong>Database(s):</strong> ${escapeHtml(dbNames)}</span>
+            <span><strong>Selected Queries:</strong> ${escapeHtml(ops)}</span>
+            <span><strong>Role:</strong> ${escapeHtml(getDbRoleLabel(role))}</span>
+            <span><strong>Duration:</strong> ${escapeHtml(String(duration))}h</span>
+            <span><strong>Reason:</strong> ${escapeHtml(justification || '—')}</span>
+        </div>
+    `;
+    summary.style.display = 'block';
+}
+
+async function submitStructuredDbRequest() {
+    if (!selectedEngine || !dbRequestDraft || !selectedDatabases?.length) {
+        alert('Please select account, instance, and database first.');
+        return;
+    }
+    if (!dbStructuredPermissions.length) {
+        alert('Please select at least one query permission.');
+        return;
+    }
+    const duration = parseInt(document.getElementById('dbStructuredDuration')?.value || '0', 10);
+    if (!duration || duration < 1 || duration > 24) {
+        alert('Duration must be between 1 and 24 hours.');
+        return;
+    }
+    const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
+    if (!justification || justification.length < 3) {
+        alert('Please enter a short business justification.');
+        return;
+    }
+
+    const userEmail = localStorage.getItem('userEmail') || 'user@company.com';
+    const fullName = (typeof currentUser !== 'undefined' && currentUser && currentUser.name) || localStorage.getItem('userName') || userEmail.split('@')[0].replace(/\./g, ' ');
+    let accountId = dbRequestDraft.account_id || dbRequestDraft.project_id || dbRequestDraft.subscription_id || dbRequestDraft.compartment_id || dbRequestDraft.atlas_project_id || '';
+    if (!accountId) {
+        const accounts = await fetchAccounts();
+        if (accounts.length) accountId = accounts[0].id;
+    }
+    const inst = dbRequestDraft?._selectedInstance || {};
+    const role = deriveStructuredRole(dbStructuredPermissions);
+    const query_types = deriveStructuredQueryTypes(dbStructuredPermissions);
+
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                databases: selectedDatabases,
+                account_id: accountId,
+                region: inst.region || '',
+                db_instance_id: inst.id || '',
+                user_email: userEmail,
+                user_full_name: fullName,
+                db_username: userEmail.split('@')[0],
+                permissions: dbStructuredPermissions,
+                query_types,
+                role,
+                duration_hours: duration,
+                justification,
+                preferred_auth: dbRequestDraft.preferred_auth || ''
+            })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        loadDbRequests();
+        refreshApprovedDatabases();
+        alert(`Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nTrack it under My Requests > Databases.`);
+        // Keep user in structured panel but clear for next request.
+        resetStructuredDbRequest();
+    } catch (e) {
+        alert('Failed: ' + e.message);
+    }
 }
 
 function renderDbRichText(rawText) {
@@ -1426,24 +1813,36 @@ async function loadDbRequests() {
             return;
         }
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
+        const isAdminUser = (typeof currentUser !== 'undefined' && currentUser && currentUser.isAdmin) || localStorage.getItem('isAdmin') === 'true';
         list.innerHTML = data.requests.map(req => {
             const db = req.databases && req.databases[0];
-            const eng = db?.engine || 'db';
-            const canEdit = req.status === 'pending';
+            const eng = String(db?.engine || 'db');
+            const dbNames = Array.isArray(req.databases)
+                ? req.databases.map(d => d?.name).filter(Boolean).join(', ')
+                : '';
+            const perms = Array.isArray(req.permissions)
+                ? req.permissions
+                : (typeof req.permissions === 'string' ? req.permissions.split(',').map(s => s.trim()).filter(Boolean) : []);
+            const permsText = perms.length ? perms.join(', ') : '—';
+            const expires = req.expires_at ? new Date(req.expires_at).toLocaleString() : '—';
+            const justification = String(req.justification || '').trim();
             return `<div class="db-request-card db-request-${req.status}">
                 <div class="db-request-header">
                     <span class="db-request-id">${(req.request_id || '').slice(0, 8)}</span>
                     <span class="db-request-status db-status-badge-${req.status}">${req.status.replace('_', ' ')}</span>
                 </div>
                 <div class="db-request-body">
-                    <p><strong>${eng}</strong> • ${db?.host || '-'}:${db?.port || '-'}</p>
-                    <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | ${req.justification?.slice(0, 50) || ''}...</p>
+                    <p><strong>${escapeHtml(eng)}</strong> • ${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</p>
+                    ${dbNames ? `<p>Database(s): <strong>${escapeHtml(dbNames)}</strong></p>` : ''}
+                    <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
+                    <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | Expires: ${escapeHtml(expires)}</p>
+                    ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
                 </div>
                 <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
-                    ${canEdit ? `
-                    <button class="btn-primary" onclick="approveDbRequest('${req.request_id || ''}')"><i class="fas fa-check"></i> Approve</button>
-                    <button class="btn-danger" onclick="denyDbRequest('${req.request_id || ''}')"><i class="fas fa-times"></i> Reject</button>
-                    <button class="btn-secondary btn-sm" onclick="editDbRequestDurationModal('${req.request_id || ''}')"><i class="fas fa-edit"></i> Edit Duration</button>
+                    <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${req.request_id || ''}')"><i class="fas fa-circle-info"></i> View</button>
+                    ${isAdminUser && req.status === 'pending' ? `
+                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id || ''}')"><i class="fas fa-check"></i> Approve</button>
+                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${req.request_id || ''}')"><i class="fas fa-times"></i> Reject</button>
                     ` : ''}
                 </div>
             </div>`;
@@ -1492,6 +1891,71 @@ async function approveDbRequest(requestId) {
         if (typeof loadRequests === 'function') loadRequests();
     } catch (e) {
         alert('Failed: ' + e.message);
+    }
+}
+
+function closeDbRequestDetailsModal() {
+    const el = document.getElementById('dbRequestDetailsModal');
+    if (el) el.remove();
+}
+
+async function viewDbRequestDetails(requestId) {
+    if (!requestId) return;
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/request/${encodeURIComponent(requestId)}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        const dbs = Array.isArray(data.databases) ? data.databases : [];
+        const db = dbs[0] || {};
+        const perms = Array.isArray(data.permissions)
+            ? data.permissions
+            : (typeof data.permissions === 'string' ? data.permissions.split(',').map(s => s.trim()).filter(Boolean) : []);
+        const permsText = perms.length ? perms.join(', ') : '—';
+        const created = data.created_at ? new Date(data.created_at).toLocaleString() : '—';
+        const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
+        const status = String(data.status || 'pending');
+        const role = getDbRoleLabel(String(data.role || 'custom'));
+        const justification = String(data.justification || '').trim() || '—';
+        const dbNames = dbs.map(d => d?.name).filter(Boolean).join(', ') || '—';
+        const endpoint = (db.host && db.port) ? `${db.host}:${db.port}` : (db.host || '—');
+
+        closeDbRequestDetailsModal();
+        const modal = document.createElement('div');
+        modal.id = 'dbRequestDetailsModal';
+        modal.className = 'db-modal-wrap';
+        modal.innerHTML = `
+          <div class="db-modal-backdrop" onclick="closeDbRequestDetailsModal()"></div>
+          <div class="db-modal">
+            <div class="db-modal-header">
+              <div class="db-modal-title">
+                <span class="db-modal-title-main">Database Request Details</span>
+                <span class="db-modal-sub">ID: <code>${escapeHtml(requestId)}</code></span>
+              </div>
+              <button class="btn-icon" onclick="closeDbRequestDetailsModal()" title="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="db-modal-body">
+              <div class="db-modal-grid">
+                <div><strong>Status:</strong> <span class="badge">${escapeHtml(status)}</span></div>
+                <div><strong>Engine:</strong> ${escapeHtml(String(db.engine || data.engine || '—'))}</div>
+                <div><strong>Endpoint:</strong> <code>${escapeHtml(endpoint)}</code></div>
+                <div><strong>Database(s):</strong> ${escapeHtml(dbNames)}</div>
+                <div><strong>Selected Queries:</strong> ${escapeHtml(permsText)}</div>
+                <div><strong>Role:</strong> ${escapeHtml(role)}</div>
+                <div><strong>Duration:</strong> ${escapeHtml(String(data.duration_hours || 2))}h</div>
+                <div><strong>Created:</strong> ${escapeHtml(created)}</div>
+                <div><strong>Expires:</strong> ${escapeHtml(expires)}</div>
+              </div>
+              <div class="db-modal-justification">
+                <div class="db-modal-justification-label"><strong>Justification</strong></div>
+                <div class="db-modal-justification-text">${escapeHtml(justification)}</div>
+              </div>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+    } catch (e) {
+        alert('Failed to load request details: ' + e.message);
     }
 }
 

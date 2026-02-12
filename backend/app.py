@@ -1457,6 +1457,8 @@ def get_database_requests():
             'status': ui_status,
             'databases': req.get('databases', []),
             'role': req.get('role', 'read_only'),
+            'permissions': req.get('permissions', []),
+            'query_types': req.get('query_types', []),
             'effective_auth': req.get('effective_auth', 'password'),
             'auth_mode': req.get('auth_mode', 'password_only'),
             'duration_hours': req.get('duration_hours', 2),

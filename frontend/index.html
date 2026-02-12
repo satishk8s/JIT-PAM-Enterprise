@@ -40,7 +40,7 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=14" rel="stylesheet">
+    <link href="databases.css?v=15" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
     <link href="performance.css?v=12" rel="stylesheet">
 </head>
@@ -287,6 +287,10 @@
                     <div class="nav-item" onclick="showPage('databases')">
                         <i class="fas fa-database"></i>
                         <span>Databases</span>
+                    </div>
+                    <div class="nav-item" onclick="openStructuredDatabaseAccess()">
+                        <i class="fas fa-sliders"></i>
+                        <span>Database Access (Structured)</span>
                     </div>
                     
                     <div class="nav-category">Terminal</div>
@@ -1008,6 +1012,14 @@
                     <h2><img src="assets/logos/rds.png" alt="" class="page-title-logo"> Database Access (JIT)</h2>
                 </div>
                 <div class="page-content db-page-layout">
+                    <div class="db-access-mode-tabs" role="tablist" aria-label="Database access mode">
+                        <button type="button" id="dbModeAiBtn" class="db-access-mode-tab is-active" role="tab" aria-selected="true" onclick="setDbAccessMode('ai')">
+                            <i class="fas fa-wand-magic-sparkles"></i> AI Guided
+                        </button>
+                        <button type="button" id="dbModeStructuredBtn" class="db-access-mode-tab" role="tab" aria-selected="false" onclick="setDbAccessMode('structured')">
+                            <i class="fas fa-list-check"></i> Structured
+                        </button>
+                    </div>
                     <!-- Top: Single info box with full description -->
                     <div class="db-page-info-banner">
                         <div class="db-info-hero-head">
@@ -1025,7 +1037,7 @@
                             <div class="db-info-section">
                                 <h4>How To Place A Request</h4>
                                 <p>Select engine, account, instance, and database name.</p>
-                                <p>Then chat with NPAMX in plain language with required actions and duration, and submit for approval.</p>
+                                <p>Then use <strong>AI Guided</strong> chat or <strong>Structured</strong> permission selection, add duration and reason, and submit for approval.</p>
                             </div>
                             <div class="db-info-section">
                                 <h4>Approval Matrix</h4>
@@ -1078,6 +1090,44 @@
                                     <button class="btn-secondary" onclick="editDbRequestDuration()"><i class="fas fa-edit"></i> Edit Duration</button>
                                     <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-check-circle"></i> Submit for Approval</button>
                                 </div>
+                            </div>
+                            <div id="dbStructuredPanel" class="db-structured-panel db-structured-panel-hidden">
+                                <div class="db-structured-header">
+                                    <h3>Database Access (Structured) — <span id="dbStructuredEngineLabel">Select an engine</span></h3>
+                                    <button class="btn-icon" onclick="closeDbStructuredPanel()" title="Close"><i class="fas fa-times"></i></button>
+                                </div>
+                                <div class="db-structured-body">
+                                    <div class="db-structured-section">
+                                        <h4>Select Required Query Permissions</h4>
+                                        <div id="dbStructuredPermGroups" class="db-perm-groups"></div>
+                                    </div>
+                                    <div class="db-structured-section">
+                                        <h4>Selected Permissions</h4>
+                                        <div id="dbStructuredSelected" class="db-perm-selected"></div>
+                                    </div>
+                                    <div class="db-structured-form">
+                                        <div class="db-structured-field">
+                                            <label for="dbStructuredDuration">Duration (hours)</label>
+                                            <div class="db-structured-duration-row">
+                                                <input type="number" id="dbStructuredDuration" min="1" max="24" step="1" value="2">
+                                                <div class="db-structured-duration-chips">
+                                                    <button type="button" class="db-duration-chip" onclick="setStructuredDuration(2)">2h</button>
+                                                    <button type="button" class="db-duration-chip" onclick="setStructuredDuration(4)">4h</button>
+                                                    <button type="button" class="db-duration-chip" onclick="setStructuredDuration(8)">8h</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="db-structured-field">
+                                            <label for="dbStructuredJustification">Business justification</label>
+                                            <textarea id="dbStructuredJustification" rows="3" placeholder="One line is enough (example: Debugging application errors)"></textarea>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="db-structured-actions">
+                                    <button class="btn-secondary" onclick="resetStructuredDbRequest()"><i class="fas fa-rotate-left"></i> Reset</button>
+                                    <button class="btn-primary" onclick="submitStructuredDbRequest()"><i class="fas fa-check-circle"></i> Submit for Approval</button>
+                                </div>
+                                <div id="dbStructuredSummary" class="db-structured-summary" style="display:none;"></div>
                             </div>
                     </div>
                 </div>
@@ -2685,7 +2735,7 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=20"></script>
+    <script src="databases.js?v=21"></script>
     <script src="terminal-page.js?v=7"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js?v=2"></script>
