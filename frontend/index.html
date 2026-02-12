@@ -24,7 +24,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="enterprise-theme.css?v=11" as="style">
+    <link rel="preload" href="enterprise-theme.css?v=12" as="style">
     <link rel="preload" href="styles.css?v=11" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
@@ -32,7 +32,7 @@
     <link href="instances.css" rel="stylesheet">
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
-    <link href="enterprise-theme.css?v=11" rel="stylesheet">
+    <link href="enterprise-theme.css?v=12" rel="stylesheet">
     <link href="styles.css?v=11" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
@@ -40,7 +40,7 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=11" rel="stylesheet">
+    <link href="databases.css?v=12" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
     <link href="performance.css?v=12" rel="stylesheet">
 </head>
@@ -505,6 +505,26 @@
                         </div>
                         <div id="dbRequestsList" class="requests-list">
                             <div class="requests-empty">No database requests</div>
+                        </div>
+                        <div class="requests-approved-db">
+                            <h4 class="requests-approved-db-title"><i class="fas fa-check-circle"></i> My Approved Databases</h4>
+                            <div class="requests-approved-db-table-wrap">
+                                <table class="instances-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Engine</th>
+                                            <th>Endpoint</th>
+                                            <th>Username</th>
+                                            <th>Role</th>
+                                            <th>Expires</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="approvedDatabasesTableBody">
+                                        <tr><td colspan="6" style="text-align: center; padding: 24px; color: var(--text-secondary);">No approved databases</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
 
@@ -1006,7 +1026,6 @@
                                 <h4>How To Place A Request</h4>
                                 <p>Select engine, account, instance, and database name.</p>
                                 <p>Then chat with NPAMX in plain language with required actions and duration, and submit for approval.</p>
-                                <p class="db-info-flow"><strong>Fast path:</strong> Keep your message short: environment + actions + duration.</p>
                             </div>
                             <div class="db-info-section">
                                 <h4>Approval Matrix</h4>
@@ -1041,16 +1060,13 @@
                             </div>
                             <div id="dbAiPanel" class="db-ai-panel db-ai-panel-hidden">
                                 <div class="db-ai-header">
-                                    <h3><span class="db-mermaid-icon db-mermaid-header" aria-hidden="true">🧜‍♀️</span> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
+                                    <h3>NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
                                     <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
                                 </div>
                                 <div id="dbAiChat" class="db-ai-chat"></div>
                                 <div id="dbAiThinking" class="db-ai-thinking" style="display: none;">
-                                    <div class="db-ai-mermaid-thinking" aria-hidden="true">
-                                        <span class="db-ai-mermaid-swimmer">🧜‍♀️</span>
-                                        <span class="db-ai-mermaid-water"></span>
-                                    </div>
-                                    <span>NPAMX mermaid is thinking...</span>
+                                    <span class="db-ai-spinner" aria-hidden="true"></span>
+                                    <span>NPAMX is thinking...</span>
                                 </div>
                                 <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
@@ -1063,26 +1079,6 @@
                                     <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-check-circle"></i> Submit for Approval</button>
                                 </div>
                             </div>
-                        <!-- Approved + Query Terminal -->
-                        <div class="db-section card">
-                            <h3><i class="fas fa-check-circle"></i> My Approved Databases</h3>
-                            <table class="instances-table">
-                                <thead>
-                                    <tr>
-                                        <th>Engine</th>
-                                        <th>Endpoint</th>
-                                        <th>Username</th>
-                                        <th>Role</th>
-                                        <th>Expires</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="approvedDatabasesTableBody">
-                                    <tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--text-secondary);">No approved databases</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <!-- Connect to Terminal: available from My Approved Databases row after approval -->
                     </div>
                 </div>
             </div>
@@ -2689,13 +2685,13 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=12"></script>
+    <script src="databases.js?v=13"></script>
     <script src="terminal-page.js?v=7"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js?v=2"></script>
     <script src="unified-assistant.js"></script>
     <script src="workflow-designer.js"></script>
-    <script src="app.js?v=12"></script>
+    <script src="app.js?v=13"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

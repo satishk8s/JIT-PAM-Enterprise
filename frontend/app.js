@@ -1135,6 +1135,9 @@ function loadRequestsPage() {
     if (typeof loadDbRequests === 'function') {
         loadDbRequests();
     }
+    if (typeof refreshApprovedDatabases === 'function') {
+        refreshApprovedDatabases();
+    }
     // Load storage and workloads (placeholders for now)
     loadStorageRequests();
     loadWorkloadsRequests();

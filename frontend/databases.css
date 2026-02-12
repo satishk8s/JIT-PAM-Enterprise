@@ -1155,18 +1155,6 @@
     gap: 8px;
 }
 
-.db-mermaid-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-    filter: drop-shadow(0 2px 4px rgba(2, 132, 199, 0.35));
-}
-
-.db-mermaid-header {
-    font-size: 17px;
-}
-
 .db-ai-chat {
     height: 360px;
     overflow-y: auto;
@@ -1183,73 +1171,25 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 11px 14px;
+    padding: 10px 14px;
     margin: 0 16px 12px;
-    background: linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(14, 165, 233, 0.08) 100%);
+    background: rgba(56, 189, 248, 0.1);
     border: 1px solid color-mix(in srgb, var(--border-color) 74%, #38bdf8 26%);
-    border-radius: 14px;
+    border-radius: 12px;
     font-size: 13px;
     color: var(--text-secondary);
 }
 
-.db-ai-mermaid-thinking {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
+.db-ai-spinner {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px dotted color-mix(in srgb, var(--primary-color) 78%, #ffffff 22%);
+    animation: db-spinner-rotate 0.9s linear infinite;
 }
 
-.db-ai-mermaid-swimmer {
-    position: relative;
-    z-index: 2;
-    font-size: 18px;
-    line-height: 1;
-    animation: db-mermaid-dive 1.9s ease-in-out infinite;
-}
-
-.db-ai-mermaid-water {
-    position: absolute;
-    left: 2px;
-    right: 2px;
-    bottom: 1px;
-    height: 10px;
-    border-radius: 999px;
-    background: linear-gradient(90deg, rgba(14, 165, 233, 0.7) 0%, rgba(56, 189, 248, 0.9) 50%, rgba(14, 165, 233, 0.7) 100%);
-    overflow: hidden;
-}
-
-.db-ai-mermaid-water::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image: repeating-linear-gradient(120deg, rgba(255, 255, 255, 0.18) 0 7px, transparent 7px 14px);
-    animation: db-wave-shift 1.3s linear infinite;
-}
-
-@keyframes db-mermaid-dive {
-    0%, 100% {
-        transform: translateY(-6px) scale(1);
-        opacity: 1;
-    }
-    35% {
-        transform: translateY(5px) scale(0.95);
-        opacity: 0.76;
-    }
-    55% {
-        transform: translateY(9px) scale(0.92);
-        opacity: 0.62;
-    }
-    78% {
-        transform: translateY(-2px) scale(0.98);
-        opacity: 0.9;
-    }
-}
-
-@keyframes db-wave-shift {
-    0% { transform: translateX(0); }
-    100% { transform: translateX(14px); }
+@keyframes db-spinner-rotate {
+    to { transform: rotate(360deg); }
 }
 
 .db-ai-quick-prompts {
@@ -1318,8 +1258,15 @@
     margin-top: 4px;
 }
 
-.db-ai-msg-avatar-mermaid .db-mermaid-icon {
-    font-size: 18px;
+.db-ai-msg-avatar-assistant {
+    background: linear-gradient(145deg, #0f172a 0%, #1e293b 100%);
+    color: #ffffff;
+}
+
+.db-ai-avatar-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
 }
 
 .db-ai-msg-content {
@@ -1698,4 +1645,34 @@
 
 .btn-icon:hover {
     color: var(--text-primary);
+}
+
+.requests-approved-db {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 78%, #38bdf8 22%);
+}
+
+.requests-approved-db-title {
+    margin: 0 0 10px 0;
+    font-size: 14px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+}
+
+.requests-approved-db-title i {
+    color: var(--success, #22c55e);
+}
+
+.requests-approved-db-table-wrap {
+    overflow-x: auto;
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, #38bdf8 20%);
+    border-radius: 10px;
+    background: var(--bg-primary);
+}
+
+.requests-approved-db-table-wrap .instances-table {
+    margin: 0;
 }

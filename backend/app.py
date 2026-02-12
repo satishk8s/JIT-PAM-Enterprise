@@ -3775,6 +3775,10 @@ def database_ai_chat():
 
         def fast_fallback_reply(msg):
             msg_lower = (msg or '').lower().strip()
+            is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
+            if is_greeting:
+                return "Hey hi, how are you today? How can I help you with the database you selected?"
+
             has_env = any(x in msg_lower for x in ['dev', 'development', 'staging', 'prod', 'production', 'uat'])
             has_target = any(x in msg_lower for x in ['database', ' db ', 'rds', 'endpoint', 'host', 'instance', 'schema', 'cluster'])
             has_actions = any(x in msg_lower for x in [
@@ -3799,7 +3803,8 @@ def database_ai_chat():
             'dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
             'create', 'alter', 'drop', 'grant', 'revoke', 'database', 'rds', 'hour', '2', '4', '8'
         ]
-        if any(x in msg_lower for x in fast_keywords) and len(msg_lower) < 90:
+        is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
+        if (is_greeting or any(x in msg_lower for x in fast_keywords)) and len(msg_lower) < 90:
             ai_response = fast_fallback_reply(message)
 
         if not ai_response:
@@ -3816,9 +3821,10 @@ Collect only what is missing:
 - duration in hours
 
 Response style:
-- Keep it concise: max 3 short sentences.
+- Keep it concise: max 2 short sentences.
 - Friendly, natural tone (not robotic).
 - Ask at most one clarifying question.
+- Do not use bullets or long explanations.
 - If enough details exist, summarize briefly and ask user to click Submit for Approval.
 
 Conversation so far:

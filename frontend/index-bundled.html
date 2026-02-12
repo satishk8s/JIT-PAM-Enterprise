@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=19" as="style">
+    <link rel="preload" href="bundle.css?v=20" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=19" rel="stylesheet">
+    <link href="bundle.css?v=20" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -489,6 +489,26 @@
                         </div>
                         <div id="dbRequestsList" class="requests-list">
                             <div class="requests-empty">No database requests</div>
+                        </div>
+                        <div class="requests-approved-db">
+                            <h4 class="requests-approved-db-title"><i class="fas fa-check-circle"></i> My Approved Databases</h4>
+                            <div class="requests-approved-db-table-wrap">
+                                <table class="instances-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Engine</th>
+                                            <th>Endpoint</th>
+                                            <th>Username</th>
+                                            <th>Role</th>
+                                            <th>Expires</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="approvedDatabasesTableBody">
+                                        <tr><td colspan="6" style="text-align: center; padding: 24px; color: var(--text-secondary);">No approved databases</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
 
@@ -990,7 +1010,6 @@
                                 <h4>How To Place A Request</h4>
                                 <p>Select engine, account, instance, and database name.</p>
                                 <p>Then chat with NPAMX in plain language with required actions and duration, and submit for approval.</p>
-                                <p class="db-info-flow"><strong>Fast path:</strong> Keep your message short: environment + actions + duration.</p>
                             </div>
                             <div class="db-info-section">
                                 <h4>Approval Matrix</h4>
@@ -1025,16 +1044,13 @@
                             </div>
                             <div id="dbAiPanel" class="db-ai-panel db-ai-panel-hidden">
                                 <div class="db-ai-header">
-                                    <h3><span class="db-mermaid-icon db-mermaid-header" aria-hidden="true">🧜‍♀️</span> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
+                                    <h3>NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
                                     <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
                                 </div>
                                 <div id="dbAiChat" class="db-ai-chat"></div>
                                 <div id="dbAiThinking" class="db-ai-thinking" style="display: none;">
-                                    <div class="db-ai-mermaid-thinking" aria-hidden="true">
-                                        <span class="db-ai-mermaid-swimmer">🧜‍♀️</span>
-                                        <span class="db-ai-mermaid-water"></span>
-                                    </div>
-                                    <span>NPAMX mermaid is thinking...</span>
+                                    <span class="db-ai-spinner" aria-hidden="true"></span>
+                                    <span>NPAMX is thinking...</span>
                                 </div>
                                 <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
@@ -1047,26 +1063,6 @@
                                     <button class="btn-primary" onclick="submitDbRequestViaAi()"><i class="fas fa-check-circle"></i> Submit for Approval</button>
                                 </div>
                             </div>
-                        <!-- Approved + Query Terminal -->
-                        <div class="db-section card">
-                            <h3><i class="fas fa-check-circle"></i> My Approved Databases</h3>
-                            <table class="instances-table">
-                                <thead>
-                                    <tr>
-                                        <th>Engine</th>
-                                        <th>Endpoint</th>
-                                        <th>Username</th>
-                                        <th>Role</th>
-                                        <th>Expires</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="approvedDatabasesTableBody">
-                                    <tr><td colspan="6" style="text-align: center; padding: 40px; color: var(--text-secondary);">No approved databases</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        <!-- Connect to Terminal: available from My Approved Databases row after approval -->
                     </div>
                 </div>
             </div>
@@ -3232,7 +3228,7 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=19"></script>
+    <script src="bundle.js?v=20"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
