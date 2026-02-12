@@ -850,6 +850,47 @@ function hideDbQuickPrompts() {
     if (el) el.style.display = 'none';
 }
 
+function buildDbAiContext() {
+    const selectedInstance = dbRequestDraft?._selectedInstance || null;
+    const databases = (selectedDatabases || []).map(db => ({
+        name: db?.name || '',
+        host: db?.host || '',
+        port: db?.port || '',
+        engine: db?.engine || selectedEngine?.engine || ''
+    })).slice(0, 6);
+
+    return {
+        engine: selectedEngine?.engine || '',
+        engine_label: selectedEngine?.label || '',
+        account_id: dbRequestDraft?.account_id || '',
+        selected_instance: selectedInstance ? {
+            id: selectedInstance.id || '',
+            name: selectedInstance.name || '',
+            host: selectedInstance.host || '',
+            port: selectedInstance.port || '',
+            engine: selectedInstance.engine || selectedEngine?.engine || ''
+        } : null,
+        databases
+    };
+}
+
+function getDbRoleLabel(role) {
+    return ({
+        read_only: 'Read-only',
+        read_limited_write: 'Limited Write',
+        read_full_write: 'Full Write',
+        admin: 'Admin'
+    })[role] || 'Custom (NPAMX)';
+}
+
+function shouldShowDbRequestSummary() {
+    if (!dbRequestDraft || !selectedEngine || !selectedDatabases?.length) return false;
+    const permissionsText = String(dbRequestDraft.permissions || '').trim();
+    const role = String(dbRequestDraft.role || '').trim();
+    const knownRoles = ['read_only', 'read_limited_write', 'read_full_write', 'admin'];
+    return permissionsText.length > 0 || knownRoles.includes(role);
+}
+
 async function sendDbAiMessage() {
     const input = document.getElementById('dbAiInput');
     const message = input.value.trim();
@@ -864,13 +905,13 @@ async function sendDbAiMessage() {
     chat.scrollTop = chat.scrollHeight;
 
     try {
-        const ctx = selectedEngine ? `User is requesting ${selectedEngine.label}. ` : '';
         const response = await fetch(`${DB_API_BASE}/api/databases/ai-chat`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                message: ctx + message,
-                conversation_id: dbConversationId
+                message,
+                conversation_id: dbConversationId,
+                context: buildDbAiContext()
             })
         });
         const text = await response.text();
@@ -930,17 +971,35 @@ function escapeAttr(s) {
 }
 
 function showDbRequestSummaryIfReady() {
-    if (!dbRequestDraft || !selectedEngine) return;
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
-    const role = dbRequestDraft.role || 'Pending NPAMX suggestion';
+    if (!summary || !actions) return;
+
+    if (!shouldShowDbRequestSummary()) {
+        summary.style.display = 'none';
+        actions.style.display = 'none';
+        return;
+    }
+
+    const role = getDbRoleLabel(dbRequestDraft.role || '');
+    const permissionsText = String(dbRequestDraft.permissions || '').trim();
     const duration = dbRequestDraft.duration_hours || 2;
     const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
+    const operations = permissionsText || (dbRequestDraft.role === 'read_only'
+        ? 'SELECT'
+        : dbRequestDraft.role === 'read_limited_write'
+            ? 'SELECT, INSERT, UPDATE, DELETE'
+            : dbRequestDraft.role === 'read_full_write'
+                ? 'SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE'
+                : dbRequestDraft.role === 'admin'
+                    ? 'ALL PRIVILEGES'
+                    : 'Custom (NPAMX)');
     summary.innerHTML = `
         <p><strong>Draft ready for approval</strong></p>
         <div class="db-ai-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine.label)}</span>
             <span><strong>Databases:</strong> ${escapeHtml(databases)}</span>
+            <span><strong>Operations:</strong> ${escapeHtml(operations)}</span>
             <span><strong>Role:</strong> ${escapeHtml(role)}</span>
             <span><strong>Duration:</strong> ${escapeHtml(String(duration))} hour(s)</span>
         </div>`;
@@ -963,6 +1022,10 @@ function editDbRequestDuration() {
 async function submitDbRequestViaAi() {
     if (!selectedEngine || !dbRequestDraft) {
         alert('Please complete the NPAMX conversation first. Select account and database.');
+        return;
+    }
+    if (!shouldShowDbRequestSummary()) {
+        alert('Please continue chatting with NPAMX so it can finalize required operations before submission.');
         return;
     }
     const userEmail = localStorage.getItem('userEmail') || 'user@company.com';

@@ -3706,6 +3706,13 @@ def database_ai_chat():
             return jsonify({'error': 'JSON body required'}), 400
         message = data.get('message', '')
         conversation_id = data.get('conversation_id')
+        chat_context = data.get('context') if isinstance(data.get('context'), dict) else {}
+        context_databases = chat_context.get('databases') if isinstance(chat_context.get('databases'), list) else []
+        context_databases = [d for d in context_databases if isinstance(d, dict)][:8]
+        context_engine_label = str(chat_context.get('engine_label') or chat_context.get('engine') or '').strip()
+        context_account = str(chat_context.get('account_id') or '').strip()
+        context_db_names = [str(d.get('name')).strip() for d in context_databases if d.get('name')]
+        context_hosts = [str(d.get('host')).strip() for d in context_databases if d.get('host')]
         
         if not message:
             return jsonify({'error': 'Message required'}), 400
@@ -3750,9 +3757,9 @@ def database_ai_chat():
             if not suggested:
                 if re.search(r'\b(admin|dba|owner|full access|all access)\b', text_lower):
                     suggested.append('ALL')
-                if re.search(r'\b(read|query|view|analytics|diagnostic|troubleshoot)\b', text_lower):
+                if re.search(r'\b(read|query|view|analytics|diagnostic|troubleshoot|debug|error|issue|investigate|check)\b', text_lower):
                     suggested.append('SELECT')
-                if re.search(r'\b(write|modify|edit|correction|update data|insert data)\b', text_lower):
+                if re.search(r'\b(write|modify|edit|correction|update data|insert data|fix|resolve)\b', text_lower):
                     for perm in ['INSERT', 'UPDATE', 'DELETE']:
                         if perm not in suggested:
                             suggested.append(perm)
@@ -3773,27 +3780,37 @@ def database_ai_chat():
 
             return suggested, role
 
-        def fast_fallback_reply(msg):
+        def fast_fallback_reply(msg, context=None):
             msg_lower = (msg or '').lower().strip()
+            context = context if isinstance(context, dict) else {}
+            dbs = context.get('databases') if isinstance(context.get('databases'), list) else []
+            dbs = [d for d in dbs if isinstance(d, dict)]
+            db_names = [str(d.get('name')).strip() for d in dbs if d.get('name')]
+            db_hosts = [str(d.get('host')).strip() for d in dbs if d.get('host')]
+            target_hint = ', '.join(db_names[:2]) or (db_hosts[0] if db_hosts else 'the selected database')
+
             is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
             if is_greeting:
-                return "Hey hi, how are you today? How can I help you with the database you selected?"
+                return f"Hey hi, how are you today? How can I help you with {target_hint}?"
 
             has_env = any(x in msg_lower for x in ['dev', 'development', 'staging', 'prod', 'production', 'uat'])
-            has_target = any(x in msg_lower for x in ['database', ' db ', 'rds', 'endpoint', 'host', 'instance', 'schema', 'cluster'])
+            has_target = bool(db_names or db_hosts) or any(x in msg_lower for x in ['database', ' db ', 'rds', 'endpoint', 'host', 'instance', 'schema', 'cluster'])
             has_actions = any(x in msg_lower for x in [
                 'read', 'write', 'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'grant', 'revoke', 'admin'
             ])
+            has_troubleshoot = any(x in msg_lower for x in ['error', 'issue', 'unable', 'failed', 'failure', 'debug', 'troubleshoot', 'problem'])
             has_duration = bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower) or msg_lower in ('2', '4', '8'))
 
             if has_actions and has_duration and (has_env or has_target):
                 return "Perfect, I captured that. If this looks right, click Submit for Approval."
+            if has_troubleshoot and has_target and not has_actions:
+                return "Understood. Do you want read/debug access to investigate this issue? Share duration too (2h, 4h, or 8h)."
             if has_actions and not has_duration:
                 return "Got it. How long do you need this access (for example 2h, 4h, or 8h)?"
             if has_env and not has_actions:
                 return "Understood. What operations do you need on the DB (for example SELECT, UPDATE, schema changes, or admin)?"
             if has_target and not has_actions:
-                return "Thanks. What exact operations do you need, and for how long?"
+                return "Got it. What operations do you need, and for how long?"
             return "Share the target DB, required operations, and duration. I'll prepare the request."
 
         # Fast path: keep latency low for short messages.
@@ -3801,16 +3818,29 @@ def database_ai_chat():
         msg_lower = message.lower().strip()
         fast_keywords = [
             'dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
-            'create', 'alter', 'drop', 'grant', 'revoke', 'database', 'rds', 'hour', '2', '4', '8'
+            'create', 'alter', 'drop', 'grant', 'revoke', 'database', 'rds', 'hour', '2', '4', '8',
+            'error', 'issue', 'unable', 'failed', 'failure', 'debug', 'troubleshoot', 'problem'
         ]
         is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
         if (is_greeting or any(x in msg_lower for x in fast_keywords)) and len(msg_lower) < 90:
-            ai_response = fast_fallback_reply(message)
+            ai_response = fast_fallback_reply(message, chat_context)
 
         if not ai_response:
             # Build compact conversation history for Bedrock.
             recent_msgs = db_conversations[conversation_id][-8:]
             history = "\n".join([f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in recent_msgs])
+            context_lines = []
+            if context_engine_label:
+                context_lines.append(f"- Engine: {context_engine_label}")
+            if context_db_names:
+                context_lines.append(f"- Selected databases: {', '.join(context_db_names[:5])}")
+            if context_hosts:
+                context_lines.append(f"- Selected endpoint(s): {', '.join(context_hosts[:3])}")
+            if context_account:
+                context_lines.append(f"- Account: {context_account}")
+            if not context_lines:
+                context_lines.append("- No preselected DB context provided.")
+            context_block = "\n".join(context_lines)
             prompt = f"""You are NPAMX, a friendly database access assistant in a JIT access platform.
 
 Goal: help users quickly submit a database access request.
@@ -3819,6 +3849,14 @@ Collect only what is missing:
 - target database/endpoint
 - requested operations/permissions (free-form; do not force predefined role templates)
 - duration in hours
+
+Known UI context (already selected in the product):
+{context_block}
+
+Behavior rules:
+- If UI context already has selected database/endpoint, do not ask for endpoint again unless user asks to change target.
+- If the user describes an application incident/error, infer troubleshooting intent and ask a practical follow-up (for example read checks vs write fix).
+- Understand natural human language and map intent to least required DB operations.
 
 Response style:
 - Keep it concise: max 2 short sentences.
@@ -3847,7 +3885,7 @@ Reply to the latest user message only."""
                 ai_response = result['content'][0]['text']
             except Exception as bedrock_err:
                 print(f"Bedrock unavailable ({bedrock_err}), using fallback")
-                ai_response = fast_fallback_reply(message)
+                ai_response = fast_fallback_reply(message, chat_context)
 
         # Store assistant response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
