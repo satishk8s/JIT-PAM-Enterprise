@@ -3782,6 +3782,22 @@ def database_ai_chat():
 
             return suggested, role
 
+        def normalize_db_ai_reply(text):
+            """Keep assistant reply concise and user-facing."""
+            cleaned = str(text or '').strip()
+            if not cleaned:
+                return ''
+            cleaned = re.sub(r'[`*_#>-]+', '', cleaned)
+            cleaned = re.sub(r'^(assistant|npamx)\s*:\s*', '', cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if s.strip()]
+            if not sentences:
+                return cleaned[:260].strip()
+            concise = " ".join(sentences[:2]).strip()
+            if len(concise) > 260:
+                concise = concise[:257].rstrip() + "..."
+            return concise
+
         context_lines = []
         if context_engine_label:
             context_lines.append(f"Engine: {context_engine_label}")
@@ -3803,16 +3819,24 @@ Current UI context:
 {context_block}
 
 Rules:
-- Respond naturally and concisely in max 2 short sentences.
-- Ask at most one clarifying question.
+- Reply in 1-2 short, natural sentences (human tone, not robotic).
+- Keep each sentence compact and easy to scan.
+- Ask at most one clarifying question, and only if truly needed.
 - Never repeat the same question if the answer is already in chat history or UI context.
+- Before replying, check the previous assistant turn and avoid repeating the same wording or opener.
 - If database or instance is already selected in UI context, do not ask for it again unless the user asks to change it.
 - Infer intent from plain language (including troubleshooting narratives) and guide the user toward a usable DB access request.
+- When the user asks a direct question, answer it first, then ask one follow-up only if needed.
 - If user asks something outside database/JIT scope, gently redirect to database assistance in one short sentence.
 - Avoid bullet points, markdown, or template-like wording.
-- Keep tone friendly and practical, not robotic.
+- Keep tone friendly, brief, and practical.
 
-When enough details are available (operations and duration), confirm briefly and ask the user to submit for approval."""
+If details are missing, ask only the next most important missing detail:
+1) operations needed
+2) duration
+3) environment/account (if not already known)
+
+If enough details are available (operations and duration), confirm briefly and ask the user to submit for approval."""
 
         bedrock_cfg = ConversationManager.bedrock_config if isinstance(ConversationManager.bedrock_config, dict) else {}
         region = str(
@@ -3822,8 +3846,10 @@ When enough details are available (operations and duration), confirm briefly and
             or 'ap-south-1'
         )
         model_id = str(bedrock_cfg.get('model_id') or 'anthropic.claude-3-sonnet-20240229-v1:0')
-        max_tokens = int(bedrock_cfg.get('max_tokens') or 260)
-        temperature = float(bedrock_cfg.get('temperature') if bedrock_cfg.get('temperature') is not None else 0.4)
+        configured_max_tokens = int(bedrock_cfg.get('max_tokens') or 260)
+        max_tokens = max(80, min(configured_max_tokens, 220))
+        configured_temperature = float(bedrock_cfg.get('temperature') if bedrock_cfg.get('temperature') is not None else 0.4)
+        temperature = max(0.2, min(configured_temperature, 0.6))
 
         bedrock_client = ConversationManager.bedrock_client
         if not bedrock_client:
@@ -3868,6 +3894,8 @@ When enough details are available (operations and duration), confirm briefly and
         except Exception as bedrock_err:
             print(f"Bedrock chat failed: {bedrock_err}")
             ai_response = "NPAMX is temporarily unavailable. Please retry in a few seconds."
+
+        ai_response = normalize_db_ai_reply(ai_response)
 
         if not ai_response:
             ai_response = "I can help with your database access request. Please share the required operations and duration."
