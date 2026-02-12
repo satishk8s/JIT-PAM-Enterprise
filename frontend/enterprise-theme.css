@@ -216,13 +216,13 @@ code, .code, .session-id, .request-id {
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    width: calc(100% - 24px);
-    margin: 10px 12px 14px;
-    min-height: 44px;
-    padding: 10px 12px;
-    border-radius: 14px;
+    justify-content: center;
+    gap: 10px;
+    width: fit-content;
+    margin: 12px auto 16px;
+    min-height: 38px;
+    padding: 8px 14px;
+    border-radius: 999px;
     border: 1px solid rgba(125, 211, 252, 0.35);
     background: linear-gradient(135deg, rgba(56, 189, 248, 0.2) 0%, rgba(59, 130, 246, 0.15) 48%, rgba(139, 92, 246, 0.18) 100%);
     color: var(--text-primary);
@@ -240,17 +240,17 @@ code, .code, .session-id, .request-id {
     pointer-events: none;
 }
 .sidebar-toggle-edge i {
-    width: 24px;
-    height: 24px;
-    min-width: 24px;
-    border-radius: 8px;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    border-radius: 10px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: rgba(11, 18, 32, 0.26);
-    border: 1px solid rgba(148, 163, 184, 0.28);
+    background: rgba(11, 18, 32, 0.18);
+    border: 1px solid rgba(148, 163, 184, 0.22);
     color: var(--primary);
-    font-size: 12px;
+    font-size: 13px;
 }
 .sidebar-toggle-edge:hover {
     transform: translateY(-1px);
@@ -262,8 +262,8 @@ code, .code, .session-id, .request-id {
 }
 .sidebar-toggle-label {
     white-space: nowrap;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 700;
     letter-spacing: 0.02em;
     text-transform: none;
 }

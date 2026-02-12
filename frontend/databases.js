@@ -791,25 +791,94 @@ function transitionToDbChatUI() {
     initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
 }
 
-function dbAssistantAvatar() {
-    return '<div class="db-ai-msg-avatar db-ai-msg-avatar-assistant"><i class="fas fa-comments"></i></div>';
+function dbAssistantAvatar(variant = 'avatar') {
+    return `<div class="db-ai-msg-avatar db-ai-msg-avatar-assistant">${dbMermaidSvg({ variant })}</div>`;
+}
+
+function dbMermaidSvg(opts = {}) {
+    const variant = opts.variant || 'avatar'; // 'avatar' | 'loader'
+    const extraClass = opts.className ? ` ${opts.className}` : '';
+    const aria = variant === 'loader' ? 'aria-label="NPAMX thinking"' : 'aria-label="NPAMX"';
+    // Custom lightweight vector mermaid (no external assets).
+    // Generate unique ids per SVG instance to avoid <defs> id collisions.
+    const uid = `npamx-${variant}-${Math.random().toString(16).slice(2, 10)}`;
+    const ids = {
+        bg: `${uid}-bg`,
+        glow: `${uid}-glow`,
+        water: `${uid}-water`,
+        hair: `${uid}-hair`,
+        skin: `${uid}-skin`,
+        clip: `${uid}-clip`
+    };
+    return `
+<svg class="npamx-mermaid-svg npamx-mermaid-${escapeAttr(variant)}${escapeAttr(extraClass)}" viewBox="0 0 64 64" width="40" height="40" role="img" ${aria} focusable="false">
+  <defs>
+    <linearGradient id="${escapeAttr(ids.bg)}" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="0.55" stop-color="#0f1d33"/>
+      <stop offset="1" stop-color="#0a1424"/>
+    </linearGradient>
+    <linearGradient id="${escapeAttr(ids.glow)}" x1="10" y1="10" x2="54" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="rgba(56,189,248,0.55)"/>
+      <stop offset="1" stop-color="rgba(20,184,166,0.22)"/>
+    </linearGradient>
+    <linearGradient id="${escapeAttr(ids.water)}" x1="6" y1="38" x2="60" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="rgba(56,189,248,0.22)"/>
+      <stop offset="0.55" stop-color="rgba(20,184,166,0.16)"/>
+      <stop offset="1" stop-color="rgba(14,165,233,0.08)"/>
+    </linearGradient>
+    <linearGradient id="${escapeAttr(ids.hair)}" x1="18" y1="16" x2="46" y2="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.6" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="${escapeAttr(ids.skin)}" x1="24" y1="18" x2="40" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="rgba(255,255,255,0.92)"/>
+      <stop offset="1" stop-color="rgba(226,232,240,0.78)"/>
+    </linearGradient>
+    <clipPath id="${escapeAttr(ids.clip)}">
+      <circle cx="32" cy="32" r="29"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#${escapeAttr(ids.clip)})">
+    <circle cx="32" cy="32" r="30" fill="url(#${escapeAttr(ids.bg)})"/>
+    <circle class="npamx-ring" cx="32" cy="32" r="29" fill="none" stroke="url(#${escapeAttr(ids.glow)})" stroke-width="2"/>
+
+    <g class="npamx-mermaid-body">
+      <path class="npamx-hair" d="M22 30C18 22 20 14 28 12C35 10 41 12 45 17C48 21 48 28 44 33C41 36 37 36 35 33C34 31 33 29 32 27C31 29 30 31 29 33C27 36 23 36 22 33C21 32 21 31 22 30Z" fill="url(#${escapeAttr(ids.hair)})"/>
+      <circle class="npamx-face" cx="32" cy="26" r="10" fill="url(#${escapeAttr(ids.skin)})"/>
+      <path class="npamx-fin" d="M36 34C39 34 42 36 44 39C41 40 38 40 36 38C35 37 35 35 36 34Z" fill="rgba(56,189,248,0.35)"/>
+      <path class="npamx-tail" d="M28 36C26 40 27 44 30 46C33 48 35 50 36 54C33 53 30 52 28 50C24 47 23 41 26 36Z" fill="rgba(20,184,166,0.28)"/>
+      <path class="npamx-eye" d="M28.6 26.6C29.6 25.6 30.8 25.6 31.8 26.6" stroke="rgba(15,23,42,0.55)" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+      <path class="npamx-eye" d="M32.2 26.6C33.2 25.6 34.4 25.6 35.4 26.6" stroke="rgba(15,23,42,0.55)" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+    </g>
+
+    <g class="npamx-water">
+      <path class="npamx-water-fill" d="M6 40C14 36 18 44 26 40C34 36 38 44 46 40C54 36 58 44 60 40L60 64L6 64Z" fill="url(#${escapeAttr(ids.water)})"/>
+      <path class="npamx-water-line" d="M6 40C14 36 18 44 26 40C34 36 38 44 46 40C54 36 58 44 60 40" stroke="rgba(226,232,240,0.35)" stroke-width="2" stroke-linecap="round" fill="none"/>
+      <path class="npamx-ripple" d="M12 47C20 43 24 51 32 47C40 43 44 51 52 47" stroke="rgba(56,189,248,0.35)" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+      <g class="npamx-typing-dots" opacity="0.9">
+        <circle class="npamx-dot npamx-dot1" cx="24" cy="52" r="1.6" fill="rgba(226,232,240,0.72)"/>
+        <circle class="npamx-dot npamx-dot2" cx="32" cy="52" r="1.6" fill="rgba(226,232,240,0.72)"/>
+        <circle class="npamx-dot npamx-dot3" cx="40" cy="52" r="1.6" fill="rgba(226,232,240,0.72)"/>
+      </g>
+    </g>
+  </g>
+</svg>`;
 }
 
 function initDbAiChat(label, engine) {
     const chat = document.getElementById('dbAiChat');
-    chat.innerHTML = `<div class="db-ai-msg db-ai-bot db-ai-welcome">
-        ${dbAssistantAvatar()}
-        <div class="db-ai-msg-content">
-            <p><strong>Hey hi, how are you today?</strong> How can I help you with ${escapeHtml(label)} database access?</p>
-            <p>Tell me your use case in plain language and I will guide the next steps.</p>
-        </div>
-    </div>`;
-    chat.scrollTop = chat.scrollHeight;
+    if (chat) chat.innerHTML = '';
+    const msg = `Hey hi. What do you need to do on ${label} (debug errors, check schema, or fix data)?`;
+    appendDbChatMessage({ role: 'assistant', rawText: msg, htmlContent: renderDbRichText(msg), cssClass: 'db-ai-welcome' });
     const quickPrompts = document.getElementById('dbAiQuickPrompts');
     if (quickPrompts) {
         quickPrompts.style.display = 'none';
         quickPrompts.innerHTML = '';
     }
+    const thinkingEl = document.getElementById('dbAiThinking');
+    if (thinkingEl) thinkingEl.style.display = 'none';
     document.getElementById('dbAiRequestSummary').style.display = 'none';
     document.getElementById('dbAiActions').style.display = 'none';
 }
@@ -820,19 +889,15 @@ function initDbChatWithPrompts(label, engine) {
     const chat = document.getElementById('dbAiChat');
     const quickPrompts = document.getElementById('dbAiQuickPrompts');
     const dbNames = selectedDatabases?.map(d => d.name).join(', ') || 'database';
-    chat.innerHTML = `
-        <div class="db-ai-msg db-ai-bot db-ai-welcome">
-            ${dbAssistantAvatar()}
-            <div class="db-ai-msg-content">
-                <p><strong>Great, ${escapeHtml(dbNames)} is selected.</strong></p>
-                <p>Tell me what you want to do, and I will figure out the right access request.</p>
-            </div>
-        </div>`;
-    chat.scrollTop = chat.scrollHeight;
+    if (chat) chat.innerHTML = '';
+    const msg = `Great, ${dbNames} is selected. What do you need to do (debug errors, check schema, or fix data)?`;
+    appendDbChatMessage({ role: 'assistant', rawText: msg, htmlContent: renderDbRichText(msg), cssClass: 'db-ai-welcome' });
     if (quickPrompts) {
         quickPrompts.style.display = 'none';
         quickPrompts.innerHTML = '';
     }
+    const thinkingEl = document.getElementById('dbAiThinking');
+    if (thinkingEl) thinkingEl.style.display = 'none';
     document.getElementById('dbAiRequestSummary').style.display = 'none';
     document.getElementById('dbAiActions').style.display = 'none';
 }
@@ -840,6 +905,191 @@ function initDbChatWithPrompts(label, engine) {
 function sendDbAiPrompt(message) {
     document.getElementById('dbAiInput').value = message;
     sendDbAiMessage();
+}
+
+function renderDbRichText(rawText) {
+    const raw = String(rawText || '');
+    const trimmed = raw.trim();
+
+    // Auto-render standalone JSON as code for readability.
+    const looksLikeJson = (trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'));
+    if (looksLikeJson && trimmed.length >= 2) {
+        return `<pre class="db-ai-code" data-lang="json"><code>${escapeHtml(raw)}</code></pre>`;
+    }
+
+    const chunks = raw.split('```');
+    let html = '';
+    for (let i = 0; i < chunks.length; i++) {
+        const part = chunks[i];
+        const isCode = i % 2 === 1;
+        if (!part) continue;
+        if (isCode) {
+            let lang = '';
+            let code = part;
+            const m = part.match(/^\s*([a-zA-Z0-9_-]{1,18})\s*\n/);
+            if (m) {
+                lang = m[1];
+                code = part.slice(m[0].length);
+            }
+            html += `<pre class="db-ai-code" data-lang="${escapeAttr(lang)}"><code>${escapeHtml(code)}</code></pre>`;
+        } else {
+            html += `<div class="db-ai-text">${escapeHtml(part)}</div>`;
+        }
+    }
+    return html || `<div class="db-ai-text">${escapeHtml(raw)}</div>`;
+}
+
+function attachDbChatLongToggle(messageEl, rawText) {
+    const raw = String(rawText || '');
+    const lineCount = raw.split(/\r?\n/).length;
+    const isLong = lineCount > 5 || raw.length > 400;
+    if (!isLong) return;
+
+    const body = messageEl.querySelector('.db-ai-bubble-body');
+    const toggle = messageEl.querySelector('.db-ai-expand-btn');
+    if (!body || !toggle) return;
+
+    // Ensure we measure expanded height before constraining it.
+    body.style.maxHeight = 'none';
+    const expanded = body.scrollHeight;
+
+    const style = window.getComputedStyle(body);
+    let lineHeight = parseFloat(style.lineHeight);
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0) lineHeight = 20;
+    const collapsed = Math.min(expanded, Math.ceil(lineHeight * 5.1));
+
+    if (expanded <= collapsed + 4) return;
+
+    body.classList.add('db-ai-bubble-collapsible', 'is-collapsed');
+    body.style.maxHeight = `${collapsed}px`;
+    body.dataset.expandedMax = String(expanded);
+    body.dataset.collapsedMax = String(collapsed);
+
+    toggle.style.display = 'inline-flex';
+    toggle.dataset.expanded = 'false';
+    toggle.innerHTML = 'Show more <span aria-hidden="true">↓</span>';
+}
+
+function toggleDbChatLongMessage(btn) {
+    const content = btn.closest('.db-ai-msg-content');
+    if (!content) return;
+    const body = content.querySelector('.db-ai-bubble-body');
+    if (!body) return;
+
+    const collapsedMax = parseInt(body.dataset.collapsedMax || '0', 10);
+    const isExpanded = btn.dataset.expanded === 'true';
+
+    if (isExpanded) {
+        body.classList.add('is-collapsed');
+        body.style.maxHeight = `${collapsedMax || 120}px`;
+        btn.dataset.expanded = 'false';
+        btn.innerHTML = 'Show more <span aria-hidden="true">↓</span>';
+    } else {
+        body.classList.remove('is-collapsed');
+        const expanded = body.scrollHeight;
+        body.dataset.expandedMax = String(expanded);
+        body.style.maxHeight = `${expanded || 600}px`;
+        btn.dataset.expanded = 'true';
+        btn.innerHTML = 'Show less <span aria-hidden="true">↑</span>';
+    }
+}
+
+function ensureDbChatDelegates() {
+    const chat = document.getElementById('dbAiChat');
+    if (!chat || chat.dataset.delegatesReady === 'true') return;
+    chat.dataset.delegatesReady = 'true';
+    chat.addEventListener('click', (e) => {
+        const btn = e.target.closest('.db-ai-expand-btn');
+        if (btn) {
+            e.preventDefault();
+            toggleDbChatLongMessage(btn);
+        }
+    });
+}
+
+function appendDbChatMessage({ role, rawText, htmlContent, cssClass = '', isTyping = false, avatarHtml = null }) {
+    const chat = document.getElementById('dbAiChat');
+    if (!chat) return null;
+    ensureDbChatDelegates();
+
+    const baseClass = role === 'user' ? 'db-ai-user' : role === 'error' ? 'db-ai-error' : 'db-ai-bot';
+    const extra = cssClass ? ` ${cssClass}` : '';
+    const typingClass = isTyping ? ' db-ai-typing' : '';
+    const avatar = avatarHtml || (role === 'user'
+        ? '<div class="db-ai-msg-avatar"><i class="fas fa-user"></i></div>'
+        : dbAssistantAvatar());
+
+    chat.insertAdjacentHTML('beforeend', `
+      <div class="db-ai-msg ${baseClass}${typingClass}${extra}">
+        ${avatar}
+        <div class="db-ai-msg-content">
+          <div class="db-ai-bubble-body">${htmlContent || ''}</div>
+          <button class="db-ai-expand-btn" type="button" style="display:none"></button>
+        </div>
+      </div>
+    `);
+
+    const el = chat.lastElementChild;
+    if (role !== 'user' && role !== 'error') {
+        attachDbChatLongToggle(el, rawText || '');
+    }
+    chat.scrollTop = chat.scrollHeight;
+    return el;
+}
+
+function showDbTypingIndicator() {
+    return appendDbChatMessage({
+        role: 'assistant',
+        rawText: 'Thinking...',
+        isTyping: true,
+        cssClass: 'db-ai-typing',
+        avatarHtml: dbAssistantAvatar('loader'),
+        htmlContent: `
+          <div class="db-ai-typing-row">
+            <div class="db-ai-typing-text">Thinking...</div>
+          </div>
+        `
+    });
+}
+
+function hideDbTypingIndicator(typingEl) {
+    if (!typingEl) return;
+    typingEl.classList.add('db-ai-typing-exit');
+    window.setTimeout(() => {
+        try { typingEl.remove(); } catch (_) {}
+    }, 320);
+}
+
+function finalizeDbTypingIndicator(typingEl, assistantText) {
+    const raw = String(assistantText || '').trim();
+    const safeText = raw.length ? raw : '...';
+
+    // If typing bubble is missing, fall back to a normal assistant message.
+    if (!typingEl) {
+        appendDbChatMessage({ role: 'assistant', rawText: safeText, htmlContent: renderDbRichText(safeText) });
+        return;
+    }
+
+    const body = typingEl.querySelector('.db-ai-bubble-body');
+    const toggle = typingEl.querySelector('.db-ai-expand-btn');
+    const avatar = typingEl.querySelector('.db-ai-msg-avatar');
+
+    if (body) body.innerHTML = renderDbRichText(safeText);
+    if (toggle) {
+        toggle.style.display = 'none';
+        toggle.dataset.expanded = 'false';
+        toggle.innerHTML = '';
+    }
+
+    // Sink the mermaid back into the water, then swap to the static avatar state.
+    typingEl.classList.add('db-ai-typing-to-message');
+    window.setTimeout(() => {
+        if (avatar) avatar.innerHTML = dbMermaidSvg({ variant: 'avatar' });
+        typingEl.classList.remove('db-ai-typing', 'db-ai-typing-to-message');
+        attachDbChatLongToggle(typingEl, safeText);
+        const chat = document.getElementById('dbAiChat');
+        if (chat) chat.scrollTop = chat.scrollHeight;
+    }, 360);
 }
 
 function hideDbQuickPrompts() {
@@ -915,21 +1165,20 @@ function shouldShowDbRequestSummary() {
 
 async function sendDbAiMessage() {
     const input = document.getElementById('dbAiInput');
-    const rawMessage = input.value.trim();
+    const rawMessage = (input?.value || '').trim();
     if (!rawMessage) return;
     const message = redactSensitiveChatInput(rawMessage);
     const wasRedacted = message !== rawMessage;
     hideDbQuickPrompts();
-    const chat = document.getElementById('dbAiChat');
-    const thinkingEl = document.getElementById('dbAiThinking');
-    chat.innerHTML += `<div class="db-ai-msg db-ai-user"><div class="db-ai-msg-avatar"><i class="fas fa-user"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(message)}</p></div></div>`;
+    appendDbChatMessage({ role: 'user', rawText: message, htmlContent: renderDbRichText(message) });
     if (wasRedacted) {
-        chat.innerHTML += `<div class="db-ai-msg db-ai-bot">${dbAssistantAvatar()}<div class="db-ai-msg-content"><p>Sensitive values were masked for safety.</p></div></div>`;
+        const notice = "For security reasons, credentials must never be shared in chat. Access will be issued automatically after approval.";
+        appendDbChatMessage({ role: 'assistant', rawText: notice, htmlContent: renderDbRichText(notice), cssClass: 'db-ai-system' });
     }
-    input.value = '';
-    chat.scrollTop = chat.scrollHeight;
-    if (thinkingEl) thinkingEl.style.display = 'flex';
-    chat.scrollTop = chat.scrollHeight;
+    if (input) input.value = '';
+
+    const startedAt = Date.now();
+    const typingEl = showDbTypingIndicator();
 
     try {
         const response = await fetch(`${DB_API_BASE}/api/databases/ai-chat`, {
@@ -946,22 +1195,29 @@ async function sendDbAiMessage() {
         try {
             data = JSON.parse(text);
         } catch (parseErr) {
-            if (thinkingEl) thinkingEl.style.display = 'none';
+            hideDbTypingIndicator(typingEl);
             if (!response.ok || text.trim().startsWith('<')) {
-                chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>Server returned an error (${response.status}). Ensure the backend is running and reachable.</p><small style="opacity:0.8">API: ${escapeHtml((typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '') + '/api/databases/ai-chat')}</small></div></div>`;
-            } else {
-                throw parseErr;
+                const apiUrl = (typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '?') + '/api/databases/ai-chat';
+                const msg = `Server returned an error (${response.status}). Ensure the backend is running and reachable.\nAPI: ${apiUrl}`;
+                appendDbChatMessage({ role: 'error', rawText: msg, htmlContent: renderDbRichText(msg), avatarHtml: '<div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div>' });
+                return;
             }
-            chat.scrollTop = chat.scrollHeight;
-            return;
+            throw parseErr;
         }
-        if (thinkingEl) thinkingEl.style.display = 'none';
+
+        // Avoid a flash if the response is extremely fast.
+        const minThinkMs = 450;
+        const elapsed = Date.now() - startedAt;
+        if (elapsed < minThinkMs) {
+            await new Promise(r => window.setTimeout(r, minThinkMs - elapsed));
+        }
+
         if (data.conversation_id) dbConversationId = data.conversation_id;
         if (data.error) {
-            chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(data.error)}</p></div></div>`;
+            hideDbTypingIndicator(typingEl);
+            appendDbChatMessage({ role: 'error', rawText: data.error, htmlContent: renderDbRichText(data.error), avatarHtml: '<div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div>' });
         } else {
-            const safeResponse = escapeHtml(data.response || '').replace(/\n/g, '<br>');
-            chat.innerHTML += `<div class="db-ai-msg db-ai-bot">${dbAssistantAvatar()}<div class="db-ai-msg-content"><p>${safeResponse}</p></div></div>`;
+            finalizeDbTypingIndicator(typingEl, data.response || '');
             if (data.draft && typeof data.draft === 'object') {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.draft.db_name) dbRequestDraft.db_name = data.draft.db_name;
@@ -1002,14 +1258,12 @@ async function sendDbAiMessage() {
                 await submitDbRequestViaAi({ skipPrompt: true, fromChat: true });
             }
         }
-        chat.scrollTop = chat.scrollHeight;
         showDbRequestSummaryIfReady();
     } catch (err) {
-        const thinkingEl = document.getElementById('dbAiThinking');
-        if (thinkingEl) thinkingEl.style.display = 'none';
-        var apiUrl = (typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '?') + '/api/databases/ai-chat';
-        chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>Error: ${escapeHtml(err.message)}</p><small style="opacity:0.8">API: ${escapeHtml(apiUrl)}</small></div></div>`;
-        chat.scrollTop = chat.scrollHeight;
+        hideDbTypingIndicator(typingEl);
+        const apiUrl = (typeof DB_API_BASE !== 'undefined' ? DB_API_BASE : '?') + '/api/databases/ai-chat';
+        const msg = `Error: ${err.message}\nAPI: ${apiUrl}`;
+        appendDbChatMessage({ role: 'error', rawText: msg, htmlContent: renderDbRichText(msg), avatarHtml: '<div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div>' });
     }
 }
 
