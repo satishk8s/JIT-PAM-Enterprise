@@ -2192,6 +2192,74 @@
     font-weight: 500;
 }
 
+.db-cred-inline {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, #38bdf8 18%);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bg-primary) 78%, transparent);
+}
+
+.db-cred-inline-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+}
+
+.db-cred-k {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.db-cred-v {
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.db-cred-password {
+    margin-top: 12px;
+}
+
+.db-cred-password-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 8px;
+}
+
+.db-cred-password-row input {
+    flex: 1;
+    min-width: 220px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.db-cred-loading,
+.db-cred-error,
+.db-cred-note {
+    margin-top: 10px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.db-cred-error {
+    color: color-mix(in srgb, #ef4444 80%, var(--text-primary) 20%);
+}
+
+@media (max-width: 720px) {
+    .db-cred-inline-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 .db-requests-empty {
     padding: 24px;
     text-align: center;

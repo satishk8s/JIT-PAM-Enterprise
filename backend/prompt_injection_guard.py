@@ -81,10 +81,10 @@ def validate_ai_input(user_input, check_sql=False):
 
 # MVP 2: Role-based SQL enforcement
 ROLE_ALLOWED_KEYWORDS = {
-    'read_only': ['SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC'],
-    'read_limited_write': ['SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC', 'INSERT', 'UPDATE', 'DELETE'],
+    'read_only': ['SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC', 'ANALYZE'],
+    'read_limited_write': ['SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC', 'ANALYZE', 'INSERT', 'UPDATE', 'DELETE', 'MERGE'],
     'read_full_write': ['SELECT', 'EXPLAIN', 'SHOW', 'DESCRIBE', 'DESC', 'INSERT', 'UPDATE', 'DELETE',
-                        'TRUNCATE', 'CREATE', 'ALTER', 'DROP'],
+                        'MERGE', 'ANALYZE', 'TRUNCATE', 'CREATE', 'ALTER', 'DROP', 'RENAME'],
     'admin': None,  # All allowed (except always-blocked)
 }
 ALWAYS_BLOCKED = [
@@ -124,6 +124,9 @@ def validate_sql_query(query, role='read_only'):
     
     for pattern, msg in ALWAYS_BLOCKED:
         if pattern in query_upper:
+            # Allow GRANT/REVOKE only for admin role (still blocked for others).
+            if role == 'admin' and pattern in ('GRANT ', 'REVOKE '):
+                continue
             return False, f"❌ SECURITY: {msg}"
     
     if role == 'admin':

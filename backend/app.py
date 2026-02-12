@@ -23,9 +23,10 @@ CORS(app)
 def load_org_policies():
     """Load organizational policies from config file"""
     try:
-        with open('org_policies.json', 'r') as f:
+        config_path = os.path.join(os.path.dirname(__file__), 'org_policies.json')
+        with open(config_path, 'r') as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}  # Fallback to empty policies
 
 # Configuration - will be populated from AWS (fallback avoids blocking on first request)
@@ -707,8 +708,8 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
     if mode == 'password_only':
         return 'password'
     if mode == 'iam_and_password' and not preferred:
-        # Prefer IAM by default when available (more secure).
-        return 'iam'
+        # Default to Vault password-based dynamic credentials unless user explicitly requests IAM.
+        return 'password'
     if preferred in ('iam', 'password'):
         return preferred
     return 'password'
@@ -1411,13 +1412,22 @@ def request_access():
 
 @app.route('/api/requests', methods=['GET'])
 def get_requests():
-    return jsonify(list(requests_db.values()))
+    out = []
+    for r in requests_db.values():
+        if isinstance(r, dict) and r.get('type') == 'database_access':
+            out.append(_sanitize_database_request_for_client(r))
+        else:
+            out.append(r)
+    return jsonify(out)
 
 @app.route('/api/request/<request_id>', methods=['GET'])
 def get_request_details(request_id):
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
-    return jsonify(requests_db[request_id])
+    req = requests_db[request_id]
+    if isinstance(req, dict) and req.get('type') == 'database_access':
+        return jsonify(_sanitize_database_request_for_client(req))
+    return jsonify(req)
 
 @app.route('/api/databases/requests', methods=['GET'])
 def get_database_requests():
@@ -1427,35 +1437,47 @@ def get_database_requests():
     if not user_email:
         return jsonify({'error': 'user_email required'}), 400
     db_requests = []
+    proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
     for req_id, req in requests_db.items():
         if req.get('type') != 'database_access' or req.get('user_email') != user_email:
             continue
-        s = req.get('status', '')
-        expires_at = req.get('expires_at', '')
-        is_expired = False
-        if expires_at:
-            try:
-                exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00').replace('+00:00', ''))
-                is_expired = datetime.now() >= exp
-            except Exception:
-                pass
+        s = str(req.get('status', '') or '').strip().lower()
+        expires_at = str(req.get('expires_at', '') or '').strip()
+        is_expired = _is_db_request_expired(req)
         # Map to UI status
         if s == 'pending':
             ui_status = 'pending'
-        elif s == 'denied':
+        elif s in ('denied', 'rejected'):
             ui_status = 'rejected'
-        elif s == 'approved' and not is_expired:
+        elif s in ('active', 'approved') and not is_expired:
             ui_status = 'in_progress'
-        elif s == 'approved' and is_expired:
+        elif s in ('expired',) or (s in ('active', 'approved') and is_expired):
             ui_status = 'completed'
+        elif s == 'failed':
+            ui_status = 'rejected'
         else:
             ui_status = s
         if status_filter and status_filter != 'all' and ui_status != status_filter:
             continue
+        safe_dbs = []
+        for db in (req.get('databases') or []):
+            if not isinstance(db, dict):
+                continue
+            safe_dbs.append({
+                'id': db.get('id', ''),
+                'name': db.get('name', ''),
+                'engine': db.get('engine', ''),
+                'host': proxy_host,
+                'port': proxy_port,
+            })
         db_requests.append({
             'request_id': req_id,
             'status': ui_status,
-            'databases': req.get('databases', []),
+            'lifecycle_status': str(req.get('status') or ''),
+            'is_expired': bool(is_expired),
+            'databases': safe_dbs,
+            'proxy_host': proxy_host,
+            'proxy_port': proxy_port,
             'role': req.get('role', 'read_only'),
             'permissions': req.get('permissions', []),
             'query_types': req.get('query_types', []),
@@ -1465,6 +1487,8 @@ def get_database_requests():
             'justification': req.get('justification', ''),
             'created_at': req.get('created_at', ''),
             'expires_at': expires_at,
+            'expiry_time': str(req.get('expiry_time') or expires_at or ''),
+            'db_username': str(req.get('db_username') or ''),
         })
     return jsonify({'requests': db_requests})
 
@@ -1490,7 +1514,8 @@ def update_database_request_duration(request_id):
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid duration'}), 400
     req['duration_hours'] = duration
-    req['expires_at'] = (datetime.now() + timedelta(hours=duration)).isoformat()
+    # TTL starts at activation (after approvals). Do not set expires_at while pending.
+    req['expires_at'] = ''
     req['modified_at'] = datetime.now().isoformat()
     return jsonify({'status': 'updated', 'request_id': request_id, 'duration_hours': duration})
 
@@ -1513,13 +1538,24 @@ def modify_request(request_id):
                 d = int(data['duration_hours'])
                 if 1 <= d <= 24:
                     access_request['duration_hours'] = d
-                    access_request['expires_at'] = (datetime.now() + timedelta(hours=d)).isoformat()
+                    # TTL starts at activation (after approvals). Do not set expires_at while pending.
+                    access_request['expires_at'] = ''
             except (TypeError, ValueError):
                 pass
         if 'justification' in data:
             access_request['justification'] = data['justification']
         access_request['modified_at'] = datetime.now().isoformat()
-        return jsonify({'status': 'modified', 'request': access_request})
+        return jsonify({
+            'status': 'modified',
+            'request': {
+                'id': access_request.get('id', request_id),
+                'type': 'database_access',
+                'status': access_request.get('status', 'pending'),
+                'duration_hours': access_request.get('duration_hours', 2),
+                'justification': access_request.get('justification', ''),
+                'modified_at': access_request.get('modified_at', '')
+            }
+        })
     
     # Update justification
     if 'justification' in data:
@@ -1680,81 +1716,44 @@ def approve_request(request_id):
     
     access_request = requests_db[request_id]
     
-    # Handle database_access requests (self-approve for testing; ciso for prod)
+    # Handle database_access requests
     if access_request.get('type') == 'database_access':
-        required = set(access_request.get('approval_required', ['self']))
-        received = {approver_role}
-        # For testing: allow 'self' to satisfy 'ciso' on database requests
-        if approver_role == 'self':
-            received.add('ciso')
+        role_norm = str(approver_role or 'self').strip().lower()
+
+        # Track approvals per request
+        if request_id not in approvals_db:
+            approvals_db[request_id] = []
+        approvals_db[request_id].append({
+            'approver_role': role_norm,
+            'approved_at': datetime.now().isoformat()
+        })
+
+        required = set([str(r).strip().lower() for r in (access_request.get('approval_required') or []) if str(r).strip()]) or {'self'}
+        received = set([str(a.get('approver_role') or '').strip().lower() for a in approvals_db.get(request_id, [])])
+
         if required.issubset(received):
-            access_request['status'] = 'approved'
-            access_request['approved_at'] = datetime.now().isoformat()
+            # Activate (mint Vault credentials / IAM assignment) once approvals are complete.
+            activate_result = _activate_database_access_request(request_id)
+            if activate_result.get('error'):
+                return jsonify({'status': 'failed', 'error': activate_result['error']}), 500
+
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
-            create_error = None
+            approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
             if effective_auth == 'iam':
-                profile = {
-                    'auth_mode': access_request.get('auth_mode', 'iam_and_password'),
-                    'region': access_request.get('db_region', os.getenv('AWS_REGION') or 'ap-south-1'),
-                    'db_resource_id': access_request.get('db_resource_id', ''),
-                    'instance_id': access_request.get('db_instance_id', '')
-                }
-                assignment = _create_and_assign_dbconnect_access(
-                    user_email=access_request.get('user_email'),
-                    account_id=access_request.get('account_id'),
-                    db_username=access_request.get('db_username'),
-                    db_name=(access_request.get('databases') or [{}])[0].get('name', 'database'),
-                    duration_hours=access_request.get('duration_hours', 2),
-                    auth_profile=profile,
-                    request_id=request_id
-                )
-                if assignment.get('error'):
-                    access_request['status'] = 'failed'
-                    return jsonify({'status': 'failed', 'error': f"IAM DB access assignment failed: {assignment['error']}"})
-                access_request['iam_permission_set_name'] = assignment.get('permission_set_name', '')
-                access_request['iam_permission_set_arn'] = assignment.get('permission_set_arn', '')
-                access_request['db_connect_arn'] = assignment.get('db_connect_arn', '')
-            else:
-                # Password flow: create DB user and temporary password
-                admin_user = os.getenv('DB_ADMIN_USER', 'admin')
-                admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-                role = access_request.get('role', 'read_only')
-                if role == 'admin':
-                    sql_perms = 'ALL PRIVILEGES'
-                elif role == 'read_full_write':
-                    sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
-                elif role == 'read_limited_write':
-                    sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
-                else:
-                    sql_perms = 'SELECT'
-                pwd = access_request.get('db_password') or generate_password()
-                access_request['db_password'] = pwd
-                for db in access_request.get('databases', []):
-                    result = create_database_user(
-                        host=db['host'],
-                        port=int(db.get('port', 3306)),
-                        admin_user=admin_user,
-                        admin_password=admin_password,
-                        new_user=access_request.get('db_username'),
-                        new_password=pwd,
-                        database=db.get('name', ''),
-                        permissions=sql_perms
-                    )
-                    if result.get('error'):
-                        create_error = result['error']
-                        break
-                if create_error:
-                    access_request['status'] = 'failed'
-                    return jsonify({'status': 'failed', 'error': f'DB user creation failed: {create_error}'})
-            _save_requests()
-            approved_msg = '✅ Database access approved! Go to Databases tab to connect.'
-            if effective_auth == 'iam':
-                approved_msg = '✅ Database IAM access approved! Use IAM token flow from My Requests in Databases.'
+                approved_msg = '✅ Database IAM access is active. Use IAM token authentication via the approved permission set.'
             return jsonify({
-                'status': 'approved',
-                'message': approved_msg
+                'status': access_request.get('status', 'active'),
+                'message': approved_msg,
+                'expires_at': access_request.get('expires_at', '')
             })
-        return jsonify({'status': 'partial_approval', 'message': 'More approvals needed', 'pending': list(required - received)})
+
+        _save_requests()
+        return jsonify({
+            'status': 'partial_approval',
+            'message': 'More approvals needed',
+            'pending': list(required - received),
+            'received': sorted(list(received))
+        })
     
     # Handle instance access requests differently
     if access_request.get('type') == 'instance_access':
@@ -2751,7 +2750,10 @@ def background_cleanup():
             
             # Cleanup expired database access - revoke DB users
             for request_id, access_request in list(requests_db.items()):
-                if access_request.get('type') != 'database_access' or access_request.get('status') != 'approved':
+                if access_request.get('type') != 'database_access':
+                    continue
+                status = str(access_request.get('status') or '').lower()
+                if status not in ('active', 'approved'):
                     continue
                 expires_at_str = access_request.get('expires_at', '')
                 if not expires_at_str:
@@ -2759,22 +2761,30 @@ def background_cleanup():
                 expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
                 if expires_at <= now:
                     try:
-                        admin_user = os.getenv('DB_ADMIN_USER', 'admin')
-                        admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-                        for db in access_request.get('databases', []):
-                            revoke_result = revoke_database_access(
-                                host=db['host'],
-                                port=int(db.get('port', 3306)),
-                                admin_user=admin_user,
-                                admin_password=admin_password,
-                                username=access_request.get('db_username', '')
-                            )
-                            if not revoke_result.get('error'):
-                                print(f"✅ Revoked DB access: {access_request.get('db_username')} from {db.get('name')}")
-                        access_request['status'] = 'expired'
-                        access_request['revoked_at'] = now.isoformat()
+                        # Vault handles revocation automatically via lease TTL. We only:
+                        # 1) best-effort revoke the lease early (optional)
+                        # 2) mark request expired in NPAMX and clear sensitive fields
+                        lease_id = str(access_request.get('vault_lease_id') or '').strip()
+                        if lease_id:
+                            try:
+                                VaultManager.revoke_lease(lease_id)
+                            except Exception:
+                                pass
+
+                        access_request['status'] = 'EXPIRED'
+                        access_request['expired_at'] = now.isoformat()
+                        access_request['vault_token'] = ''
+                        access_request['password'] = ''
+                        access_request['db_password'] = ''
+                        # Optional: delete the per-request Vault role (best-effort).
+                        role_name = str(access_request.get('role_name') or access_request.get('vault_role_name') or '').strip()
+                        if role_name:
+                            try:
+                                VaultManager.delete_database_role(role_name)
+                            except Exception:
+                                pass
                     except Exception as db_err:
-                        print(f"❌ DB revoke error: {db_err}")
+                        print(f"❌ DB expiry handling error: {db_err}")
 
             # Cleanup stale in-memory DB chat conversations/state to prevent unbounded growth.
             try:
@@ -3833,6 +3843,100 @@ def _mask_secret(value, visible=2):
         return '*' * len(raw)
     return raw[:visible] + ('*' * max(4, len(raw) - visible))
 
+def _sanitize_database_request_for_client(req: dict) -> dict:
+    """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
+    safe = dict(req or {})
+    proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+
+    # Remove secrets
+    for k in ('db_password', 'vault_token', 'password'):
+        safe.pop(k, None)
+
+    # Replace DB endpoints with proxy endpoint (users must never see real endpoints).
+    dbs = []
+    for db in (req or {}).get('databases', []) or []:
+        if not isinstance(db, dict):
+            continue
+        dbs.append({
+            'id': db.get('id', ''),
+            'name': db.get('name', ''),
+            'engine': db.get('engine', ''),
+            'host': proxy_host,
+            'port': proxy_port,
+        })
+    safe['databases'] = dbs
+    safe['proxy_host'] = proxy_host
+    safe['proxy_port'] = proxy_port
+
+    # Useful masked fields for display
+    safe['masked_db_username'] = _mask_secret((req or {}).get('db_username', ''), visible=2)
+    safe['masked_vault_token'] = _mask_secret((req or {}).get('password') or (req or {}).get('vault_token', ''), visible=1)
+
+    return safe
+
+def _resolve_db_connect_proxy_endpoint():
+    """
+    Public-facing endpoint users should use (proxy, not the real DB endpoint).
+
+    Set:
+      DB_CONNECT_PROXY_HOST, DB_CONNECT_PROXY_PORT
+
+    Fallbacks:
+      DB_PROXY_HOST, DB_CONNECT_PROXY_PORT, DB_PROXY_PORT, DB_PROXY_URL
+    """
+    host = str(os.getenv('DB_CONNECT_PROXY_HOST') or os.getenv('DB_PROXY_HOST') or '').strip()
+    port_raw = os.getenv('DB_CONNECT_PROXY_PORT') or os.getenv('DB_PROXY_PORT') or ''
+    try:
+        port = int(str(port_raw).strip()) if str(port_raw).strip() else 3306
+    except Exception:
+        port = 3306
+
+    if not host:
+        proxy_url = str(os.getenv('DB_PROXY_URL') or '').strip()
+        # Example: http://127.0.0.1:5002
+        m = re.match(r'^(?:https?://)?([^:/]+)(?::(\d+))?$', proxy_url.replace('/execute', '').rstrip('/'))
+        if m:
+            host = m.group(1) or host
+            # Do NOT infer a user-facing DB connect port from DB_PROXY_URL (often HTTP like :5002).
+            # Prefer DB_CONNECT_PROXY_PORT / DB_PROXY_PORT for the actual database proxy listener (typically 3306/5432).
+
+    host = host or 'proxy-not-configured'
+    if port <= 0:
+        port = 3306
+    return host, port
+
+def _normalize_permissions_list(value):
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        return [p.strip() for p in value.split(',') if p.strip()]
+    return []
+
+def _is_read_only_ops(perms_upper):
+    read_ops = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
+    # Anything outside read ops is treated as non-read.
+    return bool(perms_upper) and all(p in read_ops for p in perms_upper)
+
+def _compute_db_approval_requirements(account_env, is_pii, perms_upper):
+    """
+    Approval rules (user-facing policy):
+    - NON-PROD: Read-only is auto-approved; any write/schema/admin needs Manager approval.
+    - PROD: Manager approval for both read and write.
+    - PII (any env): Manager + DB Owner + CISO approval for any access.
+    """
+    env = str(account_env or 'nonprod').strip().lower()
+    pii = bool(is_pii)
+    is_read = _is_read_only_ops(perms_upper)
+
+    if pii:
+        return 'pending', ['manager', 'db_owner', 'ciso'], 'PII database access requires Manager + DB Owner + CISO approval'
+    if env == 'prod':
+        return 'pending', ['manager'], 'Production database access requires Manager approval'
+    # nonprod/sandbox
+    if is_read:
+        return 'approved', ['self'], 'Auto-approved for non-production read-only access'
+    return 'pending', ['manager'], 'Non-production write/schema access requires Manager approval'
+
 def _normalize_auth_choice(value):
     v = str(value or '').strip().lower()
     if v in ('iam', 'iam_token', 'token', 'identity_center'):
@@ -3873,6 +3977,8 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         'iam_auth_enabled': False,
         'password_auth_enabled': True,
         'auth_mode': 'password_only',
+        'is_pii': False,
+        'data_classification': '',
         'source': 'default',
         'error': None
     }
@@ -3904,12 +4010,34 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         password_enabled = True
         auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
         arn = instance.get('DBInstanceArn')
+        tags = []
         if arn:
             try:
                 tags = rds.list_tags_for_resource(ResourceName=arn).get('TagList', [])
                 auth_mode = _apply_auth_mode_override_from_tags(auth_mode, tags)
             except Exception:
-                pass
+                tags = []
+
+        # Tag-based data classification (best-effort; conservative defaults).
+        is_pii = False
+        classification = ''
+        for tag in tags or []:
+            k = str(tag.get('Key') or '').strip().lower()
+            v = str(tag.get('Value') or '').strip().lower()
+            if not (k or v):
+                continue
+            if 'pii' in k or 'pii' in v:
+                is_pii = True
+                classification = 'pii'
+                break
+            if k in (
+                'data-classification', 'data_classification', 'dataclassification',
+                'classification', 'sensitivity', 'npamx:data-classification', 'npamx:classification'
+            ):
+                if any(x in v for x in ('pii', 'phi', 'pci', 'sensitive', 'restricted', 'confidential')):
+                    is_pii = True
+                    classification = v or 'sensitive'
+                    break
 
         profile.update({
             'instance_id': str(instance.get('DBInstanceIdentifier') or instance_id or ''),
@@ -3919,6 +4047,8 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
             'iam_auth_enabled': auth_mode in ('iam_only', 'iam_and_password'),
             'password_auth_enabled': auth_mode in ('password_only', 'iam_and_password'),
             'auth_mode': auth_mode,
+            'is_pii': bool(is_pii),
+            'data_classification': classification,
             'source': 'rds_metadata'
         })
         return profile
@@ -3942,6 +4072,166 @@ def _auth_mode_user_hint(profile):
         "This RDS instance uses password-based access in NPAMX. After approval, time-limited credentials will appear in My Requests under Database Access."
     )
 
+def _resolve_account_environment(account_id):
+    """Resolve account environment (prod/nonprod/sandbox) from config/policies; default to nonprod."""
+    acct = str(account_id or '').strip()
+    if not acct:
+        return 'nonprod'
+
+    # org_policies.json overrides (preferred)
+    try:
+        policies = load_org_policies() or {}
+        env = ((policies.get('accounts') or {}).get(acct) or {}).get('environment')
+        if env:
+            return str(env).strip().lower()
+    except Exception:
+        pass
+
+    # CONFIG entry
+    cfg_env = ((CONFIG.get('accounts') or {}).get(acct) or {}).get('environment')
+    if cfg_env:
+        return str(cfg_env).strip().lower()
+
+    # Infer from account name as fallback
+    name = str(((CONFIG.get('accounts') or {}).get(acct) or {}).get('name') or '').lower()
+    if 'prod' in name or 'production' in name:
+        return 'prod'
+    if 'sandbox' in name:
+        return 'sandbox'
+    return 'nonprod'
+
+
+def _is_db_request_expired(req, now=None):
+    """DB access TTL starts at activation; pending requests should not be treated as expired."""
+    if not isinstance(req, dict):
+        return False
+    expires_at_str = str(req.get('expires_at') or '').strip()
+    if not expires_at_str:
+        return False
+    try:
+        exp = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
+        return (now or datetime.now()) >= exp
+    except Exception:
+        return False
+
+
+def _activate_database_access_request(request_id: str) -> dict:
+    """
+    Activate an approved DB access request by minting time-bound credentials.
+
+    For password-based auth: creates a Vault DB secrets lease and stores username + token (DB password).
+    For IAM auth: creates and assigns a DB connect permission set (best-effort) and marks the request active.
+
+    Returns: { "status": "...", "error": "..."? }
+    """
+    rid = str(request_id or '').strip()
+    if not rid:
+        return {'error': 'request_id required'}
+    if rid not in requests_db:
+        return {'error': 'Request not found'}
+
+    req = requests_db[rid]
+    if req.get('type') != 'database_access':
+        return {'error': 'Not a database request'}
+
+    # Idempotency: if already ACTIVE and not expired, do nothing.
+    if str(req.get('status') or '').strip().lower() == 'active' and not _is_db_request_expired(req):
+        return {'status': 'ACTIVE'}
+
+    effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+    duration_hours = req.get('duration_hours', 2)
+    try:
+        duration_hours = int(duration_hours)
+    except Exception:
+        duration_hours = 2
+    if duration_hours < 1:
+        duration_hours = 1
+    if duration_hours > 24:
+        duration_hours = 24
+
+    now = datetime.now()
+    req['approved_at'] = req.get('approved_at') or now.isoformat()
+    req['activated_at'] = now.isoformat()
+
+    # Collect database names (within the selected instance) for grants.
+    dbs = req.get('databases', []) if isinstance(req.get('databases'), list) else []
+    db_names = []
+    for db in dbs:
+        if isinstance(db, dict):
+            n = str(db.get('name') or '').strip()
+            if n and n not in db_names:
+                db_names.append(n)
+    if not db_names:
+        db_names = [str(req.get('db_name') or 'default').strip() or 'default']
+
+    # Engine hint for Vault role templates.
+    engine = ''
+    if dbs and isinstance(dbs[0], dict):
+        engine = str(dbs[0].get('engine') or '').strip()
+    engine = engine or str(req.get('engine') or 'mysql').strip()
+
+    allowed_ops = _normalize_permissions_list(req.get('permissions'))
+
+    try:
+        if effective_auth == 'iam':
+            # IAM DB auth: assign a scoped rds-db:connect permission set (best-effort).
+            profile = {
+                'auth_mode': req.get('auth_mode', 'iam_and_password'),
+                'region': req.get('db_region', os.getenv('AWS_REGION') or 'ap-south-1'),
+                'db_resource_id': req.get('db_resource_id', ''),
+                'instance_id': req.get('db_instance_id', '')
+            }
+            username = str(req.get('requested_db_username') or '').strip() or str(req.get('user_email') or '').split('@')[0]
+            assignment = _create_and_assign_dbconnect_access(
+                user_email=req.get('user_email'),
+                account_id=req.get('account_id'),
+                db_username=username,
+                db_name=db_names[0],
+                duration_hours=duration_hours,
+                auth_profile=profile,
+                request_id=rid
+            )
+            if assignment.get('error'):
+                raise RuntimeError(str(assignment.get('error')))
+            req['iam_permission_set_name'] = assignment.get('permission_set_name', '')
+            req['iam_permission_set_arn'] = assignment.get('permission_set_arn', '')
+            req['db_connect_arn'] = assignment.get('db_connect_arn', '')
+            req['db_username'] = username
+            req['expires_at'] = (now + timedelta(hours=duration_hours)).isoformat()
+            req['expiry_time'] = req['expires_at']
+            req['status'] = 'ACTIVE'
+        else:
+            # Password flow: mint dynamic user/password via Vault DB secrets engine.
+            vault_creds = VaultManager.create_database_session(
+                request_id=rid,
+                engine=engine,
+                db_names=db_names,
+                allowed_ops=allowed_ops,
+                duration_hours=duration_hours,
+            )
+            role_name = vault_creds.get('vault_role_name', '')
+            lease_id = vault_creds.get('lease_id', '')
+            password = vault_creds.get('vault_token', '')
+            req['vault_role_name'] = role_name
+            req['role_name'] = role_name
+            req['vault_lease_id'] = lease_id
+            req['lease_id'] = lease_id
+            req['vault_token'] = password
+            req['password'] = password
+            req['db_username'] = vault_creds.get('db_username', '')
+            req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
+            req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
+            req['expiry_time'] = req['expires_at']
+            req['status'] = 'ACTIVE'
+    except Exception as e:
+        req['status'] = 'failed'
+        req['activation_error'] = str(e)
+        _save_requests()
+        return {'status': 'failed', 'error': str(e)}
+
+    _save_requests()
+    return {'status': req.get('status', 'ACTIVE')}
+
 @app.route('/api/databases/ai-chat', methods=['POST'])
 def database_ai_chat():
     """AI chat for database access requests."""
@@ -3956,6 +4246,7 @@ def database_ai_chat():
         context_databases = [d for d in context_databases if isinstance(d, dict)][:8]
         context_engine_label = str(chat_context.get('engine_label') or chat_context.get('engine') or '').strip()
         context_account = str(chat_context.get('account_id') or '').strip()
+        context_account_env = _resolve_account_environment(context_account)
         context_db_names = [str(d.get('name')).strip() for d in context_databases if d.get('name')]
         context_hosts = [str(d.get('host')).strip() for d in context_databases if d.get('host')]
         selected_instance = chat_context.get('selected_instance') if isinstance(chat_context.get('selected_instance'), dict) else {}
@@ -3980,6 +4271,7 @@ def database_ai_chat():
             'instance_id': selected_instance_id,
             'host': selected_host,
             'region': context_region,
+            'account_env': context_account_env,
             'engine': str(selected_instance.get('engine') or context_engine_label or ''),
             'db_resource_id': str(selected_instance.get('db_resource_id') or ''),
             'iam_auth_enabled': bool(context_iam_enabled) if context_iam_enabled is not None else False,
@@ -4000,6 +4292,11 @@ def database_ai_chat():
                     auth_profile['iam_auth_enabled'],
                     auth_profile['password_auth_enabled']
                 )
+        # Preserve account environment (not provided by RDS metadata helper).
+        if 'account_env' not in auth_profile:
+            auth_profile['account_env'] = context_account_env
+        if 'is_pii' not in auth_profile:
+            auth_profile['is_pii'] = False
         if not auth_profile.get('auth_mode'):
             auth_profile['auth_mode'] = 'password_only'
         auth_profile['preferred_auth'] = _normalize_auth_choice(chat_context.get('preferred_auth') or '')
@@ -4025,6 +4322,9 @@ def database_ai_chat():
             db_conversation_states[conversation_id] = {
                 'intent': None,               # 'db_access_request'
                 'purpose': None,              # 'debug_app' | 'inspect_schema' | 'data_fix' | 'schema_change'
+                'account_id': context_account or '',
+                'account_env': context_account_env,
+                'is_pii': bool(auth_profile.get('is_pii')),
                 'db_name': (context_db_names[0] if context_db_names else ''),
                 'instance_id': selected_instance_id or '',
                 'instance_name': selected_instance_name or '',
@@ -4045,6 +4345,12 @@ def database_ai_chat():
         state = db_conversation_states[conversation_id]
         state['last_seen'] = datetime.now().isoformat()
         # Keep UI context in sync (user may change selection without restarting the chat).
+        if context_account:
+            state['account_id'] = context_account
+            state['account_env'] = context_account_env
+        elif not state.get('account_env'):
+            state['account_env'] = context_account_env
+        state['is_pii'] = bool(auth_profile.get('is_pii'))
         if context_db_names:
             state['db_name'] = context_db_names[0]
         if selected_instance_id:
@@ -4066,7 +4372,7 @@ def database_ai_chat():
 
         def is_out_of_scope_request(msg):
             msg_lower = (msg or '').lower()
-            non_db_terms = ['movie', 'ticket', 'flight', 'hotel', 'food', 'restaurant', 'cab', 'weather']
+            non_db_terms = ['movie', 'ticket', 'flight', 'hotel', 'food', 'restaurant', 'cab', 'weather', 'hometown', 'joke']
             db_terms = ['db', 'database', 'rds', 'sql', 'table', 'schema', 'instance', 'mysql', 'postgres']
             return any(t in msg_lower for t in non_db_terms) and not any(t in msg_lower for t in db_terms)
 
@@ -4147,7 +4453,7 @@ def database_ai_chat():
 
         def user_facing_process_answer():
             return (
-                "Tell NPAMX what you need to do and for how long, then click Submit for Approval. "
+                "Tell me what you need to do in the database and how long you need access. "
                 "After approval, check My Requests > Database Access."
             )
 
@@ -4155,29 +4461,24 @@ def database_ai_chat():
             mode = str((profile or {}).get('auth_mode') or 'password_only')
             if mode == 'iam_only':
                 return (
-                    "You won't get a password for this instance; after approval, My Requests > Database Access shows IAM token sign-in steps. "
-                    "What do you need to do and for how long?"
+                    "You won't get a password for this instance. After approval, My Requests > Database Access shows IAM token sign-in steps."
                 )
             if mode == 'iam_and_password':
                 return (
-                    "After approval, My Requests > Database Access will show IAM token steps or time-limited credentials (your choice). "
-                    "What do you need to do and for how long?"
+                    "After approval, My Requests > Database Access can show IAM token steps or time-limited credentials (your choice)."
                 )
             return (
-                "After approval, My Requests > Database Access shows time-limited credentials (masked). "
-                "What do you need to do and for how long?"
+                "After approval, My Requests > Database Access shows time-limited credentials (masked)."
             )
 
         def vault_user_facing_answer(user_msg):
             msg_lower = (user_msg or '').lower()
             if 'hashicorp' in msg_lower or 'hashi' in msg_lower:
                 return (
-                    "Yes, NPAMX uses HashiCorp Vault to issue time-limited database access. "
-                    "You never share passwords in chat; after approval, My Requests shows what you need."
+                    "I can't share internal architecture details here. I can help you submit a database access request."
                 )
             return (
-                "Vault is the secure credential system NPAMX uses to issue time-limited database access. "
-                "You never share passwords in chat; after approval, My Requests shows what you need."
+                "I can't share internal architecture details here. I can help you submit a database access request."
             )
 
         def is_auth_mode_question(msg):
@@ -4205,7 +4506,8 @@ def database_ai_chat():
             return any(x in msg_lower for x in [
                 'read', 'write', 'select', 'show', 'describe', 'insert', 'update', 'delete',
                 'create', 'alter', 'drop', 'truncate', 'grant', 'revoke', 'admin', 'debug',
-                'troubleshoot', 'investigate', 'migration', 'schema'
+                'troubleshoot', 'investigate', 'migration', 'schema',
+                'app', 'application', 'service', 'api', 'endpoint', 'timeout', 'exception'
             ])
 
         def has_duration_hint(msg):
@@ -4302,10 +4604,10 @@ def database_ai_chat():
             access_label = _format_access_label(state.get('access_level'))
             reason = (state.get('business_reason') or '').strip() or 'N/A'
             dur = state.get('duration_hours') or 2
-            return (
-                f"Please confirm: Database: {dbname}, Access: {access_label}, Reason: {reason}, Duration: {dur}h. "
-                "Shall I submit this request for approval?"
-            )
+            env = str(state.get('account_env') or 'nonprod').lower()
+            pii = bool(state.get('is_pii'))
+            policy_note = " (sensitive policy)" if pii else " (production policy)" if env == 'prod' else ""
+            return f"Quick confirm{policy_note}: {dbname} \u2022 {access_label} \u2022 {dur}h \u2022 {reason}. Submit for approval?"
 
         def _draft_from_state():
             role, perms, query_types = _role_perms_for_access(state.get('access_level') or 'read')
@@ -4327,29 +4629,45 @@ def database_ai_chat():
                 return ''
             if candidate == last:
                 variants = {
-                    'ask_purpose': [
-                        "Is this for debugging an application issue related to the database?",
-                        "Are you trying to troubleshoot an app issue that might be related to the database?"
-                    ],
+	                    'ask_purpose': [
+	                        "What are you trying to do on the database: debug an app issue, check schema, or fix data?",
+	                        "What's the goal: troubleshoot an app issue, inspect schema, or correct data?"
+	                    ],
                     'suggest_read': [
-                        "For app errors, I recommend READ-only access for a short time. Should I proceed with READ-only?",
-                        "To investigate errors, READ-only access is usually enough. Want me to request READ-only access?"
+                        "For debugging, READ-only is usually enough. Want me to request READ-only access?",
+                        "To investigate safely, I recommend starting with READ-only. Should I proceed with READ-only?"
                     ],
                     'ask_access': [
-                        "Should I request READ-only access or WRITE access?",
-                        "Do you need READ-only (investigate) or WRITE (change data) access?"
+                        "Do you need READ-only access (investigate) or WRITE access (change data)?",
+                        "Should I request READ-only, WRITE, or schema-change access?"
                     ],
-                    'ask_reason': [
-                        "What short reason should I include for this request?",
-                        "What business reason should I write (one line is enough)?"
-                    ],
-                    'ask_duration': [
-                        "How many hours do you need? If unsure, I can set 2h.",
-                        "How long should I set this for (hours)? If you want, I can default to 2h."
-                    ],
+	                    'ask_reason': [
+	                        "What short reason should I include (one line is enough)?",
+	                        "What's the reason for this access?"
+	                    ],
+	                    'ask_duration': [
+	                        "How many hours do you need? If you're unsure, I can start with 2h.",
+	                        "How long do you need access for (hours)?"
+	                    ],
                     'confirm': [
                         _build_confirmation_summary(),
-                        _build_confirmation_summary().replace("Please confirm:", "Confirm this request:")
+                        _build_confirmation_summary().replace("Quick confirm", "Just to confirm")
+                    ],
+                    'confirm_nudge': [
+                        "Reply Yes to submit, or tell me what you want to change.",
+                        "Just reply Yes to submit, or say what you want to adjust (access, reason, or duration)."
+                    ],
+                    'creds': [
+                        "After approval, credentials will appear automatically in My Requests > Database Access.",
+                        "You don't need to share credentials here. After approval, check My Requests > Database Access."
+                    ],
+                    'cant_connect': [
+                        "I can't connect to or query the database from chat. I can help you request temporary access instead.",
+                        "I can't run queries from chat, but I can help you submit an access request."
+                    ],
+                    'no_arch': [
+                        "I can't share internal architecture details here. I can help you submit a database access request.",
+                        "I can't help with internal architecture here. Tell me what you need to do in the database and for how long."
                     ],
                     'redirect': [
                         "This assistant only handles database access requests. How can I help with database access?",
@@ -4372,6 +4690,28 @@ def database_ai_chat():
             msg = str(user_msg or '').strip()
             msg_lower = msg.lower().strip()
             combined_lower = (_combined_recent_user_text() or msg).lower()
+
+            def _next_prompt():
+                # Keep it to a single, next-best question (prevents loops).
+                if state.get('awaiting') == 'confirm' or (
+                    state.get('access_level') and state.get('business_reason') and state.get('duration_hours') and not state.get('confirmed')
+                ):
+                    return _avoid_repeat("Reply Yes to submit, or tell me what you want to change.", 'confirm_nudge')
+                if not state.get('purpose'):
+                    return _avoid_repeat("What are you trying to do on the database: debug an app issue, check schema, or fix data?", 'ask_purpose')
+                if not state.get('access_level'):
+                    return _avoid_repeat("Do you need READ-only, WRITE, or schema-change access?", 'ask_access')
+                if not state.get('business_reason'):
+                    return _avoid_repeat("What short reason should I include (one line is enough)?", 'ask_reason')
+                if not state.get('duration_hours'):
+                    env = str(state.get('account_env') or 'nonprod').lower()
+                    pii = bool(state.get('is_pii'))
+                    if env == 'prod' or pii:
+                        return _avoid_repeat("How many hours do you need? For production, I recommend keeping it short (1-2h).", 'ask_duration')
+                    return _avoid_repeat("How many hours do you need? If you're unsure, we can start with 2h.", 'ask_duration')
+                if not state.get('confirmed'):
+                    return _avoid_repeat("Reply Yes to submit, or tell me what you want to change.", 'confirm_nudge')
+                return ""
 
             # If already submitted, don't restart.
             if state.get('submitted'):
@@ -4421,25 +4761,48 @@ def database_ai_chat():
                     'ready_to_submit': False
                 }
             if is_architecture_question(msg):
-                return {'response': "I can't share internal architecture here. Tell me what you need to do and for how long, and I'll draft the access request.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                base = _avoid_repeat("I can't share internal architecture details here. I can help you submit a database access request.", 'no_arch')
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if is_approved_channels_question(msg):
                 return {'response': user_facing_process_answer(), 'draft': _draft_from_state(), 'ready_to_submit': False}
             if is_vault_question(msg):
-                return {'response': vault_user_facing_answer(msg), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                base = _avoid_repeat(vault_user_facing_answer(msg), 'no_arch')
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if is_credential_flow_question(msg):
-                return {'response': credential_flow_user_answer(auth_profile), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                base = _avoid_repeat(credential_flow_user_answer(auth_profile), 'creds')
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if is_auth_mode_question(msg):
-                return {'response': _auth_mode_user_hint(auth_profile), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                base = _auth_mode_user_hint(auth_profile)
+                follow = _next_prompt() if ('?' not in base and 'tell me' not in base.lower()) else ''
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if asks_for_password_path(msg):
                 if auth_profile.get('auth_mode') == 'iam_only':
-                    return {'response': "This instance uses IAM database authentication, so password flow isn't used. Tell me what you need to do and for how long.", 'draft': _draft_from_state(), 'ready_to_submit': False}
-                return {'response': "After approval, My Requests > Database Access will show time-limited credentials (masked).", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                    base = "This instance uses IAM database authentication, so password flow isn't used."
+                else:
+                    base = "After approval, My Requests > Database Access will show time-limited credentials (masked)."
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if asks_for_iam_path(msg):
                 if auth_profile.get('auth_mode') == 'password_only':
-                    return {'response': "This instance uses password-based access in NPAMX. Tell me what you need to do and for how long.", 'draft': _draft_from_state(), 'ready_to_submit': False}
-                return {'response': "After approval, My Requests > Database Access will show IAM token sign-in steps.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                    base = "This instance uses password-based access in NPAMX."
+                else:
+                    base = "After approval, My Requests > Database Access will show IAM token sign-in steps."
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
             if is_db_connection_execution_request(msg):
-                return {'response': "I can't connect to or query databases from chat. Tell me what you need to do and for how long, and I'll draft the access request.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                base = _avoid_repeat("I can't connect to or query the database from chat. I can help you request temporary access instead.", 'cant_connect')
+                follow = _next_prompt()
+                resp = base if not follow else f"{base} {follow}"
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
 
             # Handle confirmation step first (prevents looping on summary).
             if state.get('awaiting') == 'confirm':
@@ -4454,7 +4817,7 @@ def database_ai_chat():
             # If we're in the middle of submitting, don't restart the flow.
             if state.get('awaiting') == 'submitting' and not state.get('submitted'):
                 return {
-                    'response': "Submitting your request now. Please check My Requests > Database Access in a moment.",
+                    'response': "Submitting your request now. You can track it in My Requests > Database Access.",
                     'draft': _draft_from_state(),
                     'ready_to_submit': False
                 }
@@ -4513,7 +4876,7 @@ def database_ai_chat():
                     state['purpose'] = inferred
                 else:
                     state['awaiting'] = 'purpose'
-                    resp = _avoid_repeat("Is this for debugging an application issue related to the database?", 'ask_purpose')
+                    resp = _avoid_repeat("What are you trying to do on the database: debug an app issue, check schema, or fix data?", 'ask_purpose')
                     return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
 
             # If we asked purpose and user answered yes/no.
@@ -4530,9 +4893,22 @@ def database_ai_chat():
                 state['suggested_access_level'] = suggested
                 state['awaiting'] = 'access_confirm'
                 if suggested == 'read':
-                    resp = _avoid_repeat("For app errors, I recommend READ-only access for a short time. Should I proceed with READ-only?", 'suggest_read')
+                    env = str(state.get('account_env') or 'nonprod').lower()
+                    pii = bool(state.get('is_pii'))
+                    if pii:
+                        base = "Since this is a sensitive database, I recommend starting with READ-only. Should I proceed with READ-only?"
+                    elif env == 'prod':
+                        base = "Since this is production, I recommend starting with READ-only for a short window. Should I proceed with READ-only?"
+                    else:
+                        base = "For debugging, READ-only is usually enough. Want me to request READ-only access?"
+                    resp = _avoid_repeat(base, 'suggest_read')
                 else:
-                    resp = _avoid_repeat("I can request WRITE access if you need to change data. Should I proceed with WRITE access?", 'ask_access')
+                    env = str(state.get('account_env') or 'nonprod').lower()
+                    if env == 'prod':
+                        base = "If you need to change data in production, I can request WRITE access. Do you want WRITE access?"
+                    else:
+                        base = "If you need to change data, I can request WRITE access. Do you want WRITE access?"
+                    resp = _avoid_repeat(base, 'ask_access')
                 return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'suggested_access_level': suggested}
 
             # Handle access confirmation step.
@@ -4567,13 +4943,24 @@ def database_ai_chat():
                 return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
 
             if not state.get('duration_hours'):
+                env = str(state.get('account_env') or 'nonprod').lower()
+                pii = bool(state.get('is_pii'))
+                default_hours = 1 if (env == 'prod' or pii) else 2
                 if is_user_uncertain(msg_lower):
-                    state['suggested_duration_hours'] = 2
+                    state['suggested_duration_hours'] = default_hours
                     state['awaiting'] = 'duration_confirm'
-                    resp = _avoid_repeat("2 hours is usually enough for debugging. Should I set 2h?", 'ask_duration')
-                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'suggested_duration_hours': 2}
+                    if env == 'prod' or pii:
+                        base = f"For safety, I recommend keeping this short. Should I set {default_hours}h?"
+                    else:
+                        base = f"{default_hours} hours is usually enough to start. Should I set {default_hours}h?"
+                    resp = _avoid_repeat(base, 'ask_duration')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'suggested_duration_hours': default_hours}
                 state['awaiting'] = 'duration'
-                resp = _avoid_repeat("How many hours do you need? If unsure, I can set 2h.", 'ask_duration')
+                if env == 'prod' or pii:
+                    base = "How many hours do you need? For production, I recommend keeping it short (1-2h)."
+                else:
+                    base = "How many hours do you need? If you're unsure, we can start with 2h."
+                resp = _avoid_repeat(base, 'ask_duration')
                 return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
 
             if state.get('awaiting') == 'duration_confirm':
@@ -4599,7 +4986,7 @@ def database_ai_chat():
             # STEP 6: after confirmation, tell UI it's ready to submit.
             # (In this app, the UI submits to /api/databases/request-access.)
             state['awaiting'] = 'submitting'
-            resp = "Submitting your access request for approval now. You'll see it under My Requests > Database Access."
+            resp = "Got it. Submitting your access request for approval now. You'll see it under My Requests > Database Access."
             return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': True, 'confirmed': True}
 
         def build_request_only_followup(msg):
@@ -4761,9 +5148,9 @@ def database_ai_chat():
             if greeting:
                 return f"Hey hi, I am here. How can I help with {target_hint}?"
             if 'are you there' in msg_lower or 'what happened' in msg_lower:
-                return "I am here. Tell me required access, business reason, and duration, and I will prepare your request."
+                return "I'm here. What do you need to do in the database, and for how long?"
             if is_out_of_scope_request(msg_lower):
-                return "I can help only with database access in NPAMX. Tell me your DB task and duration."
+                return "I can only help with database access requests here. What do you need to do, and for how long?"
             if is_destructive_execution_request(msg_lower):
                 return "I cannot execute destructive actions through chat. I can help you submit a controlled access request instead."
             return build_request_only_followup(msg_lower)
@@ -4776,7 +5163,7 @@ def database_ai_chat():
         db_conversations[conversation_id].append({'role': 'user', 'content': message_for_ai})
 
         if shared_secret:
-            ai_response = "Please do not share usernames, passwords, tokens, or keys in chat. Tell me what you need to do and for how long, and I will prepare your request."
+            ai_response = "For security reasons, credentials must never be shared in chat. What do you need to do on the database, and for how long?"
             db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
             return jsonify({
                 'response': ai_response,
@@ -4827,166 +5214,6 @@ def database_ai_chat():
             'request_id': strict.get('request_id'),
             'action': action_payload,
             'auth_mode': auth_profile.get('auth_mode'),
-            'recommended_auth': recommended_auth
-        })
-
-        context_lines = []
-        if context_engine_label:
-            context_lines.append(f"Engine: {context_engine_label}")
-        if context_account:
-            context_lines.append(f"Account: {context_account}")
-        if selected_instance_name:
-            context_lines.append(f"Selected instance: {selected_instance_name}")
-        if context_db_names:
-            context_lines.append(f"Selected database(s): {', '.join(context_db_names[:5])}")
-        if context_hosts:
-            context_lines.append(f"Selected endpoint(s): {', '.join(context_hosts[:3])}")
-        if auth_profile.get('auth_mode'):
-            context_lines.append(f"Detected auth mode: {auth_profile.get('auth_mode')}")
-        if not context_lines:
-            context_lines.append("No DB target is preselected in UI context.")
-        context_block = "\n".join(context_lines)
-
-        system_prompt = f"""You are NPAMX, the database JIT access assistant.
-
-Current UI context:
-{context_block}
-
-Rules:
-- Reply in 1-2 short, natural sentences (human tone, not robotic).
-- Keep each sentence compact and easy to scan.
-- Ask at most one clarifying question, and only if truly needed.
-- Never repeat the same question if the answer is already in chat history or UI context.
-- Before replying, check the previous assistant turn and avoid repeating the same wording or opener.
-- If database or instance is already selected in UI context, do not ask for it again unless the user asks to change it.
-- Infer intent from plain language (including troubleshooting narratives) and guide the user toward a usable DB access request.
-- When the user asks a direct question, answer it first, then ask one follow-up only if needed.
-- If user asks something outside database/JIT scope, gently redirect to database assistance in one short sentence.
-- Never ask for usernames, passwords, API keys, tokens, or any secret.
-- If a user shares a secret, tell them not to share secrets and continue without it.
-- You do not have direct DB console/query execution ability; never say you will connect or run queries yourself.
-- If user asks about credentials, keep it user-facing: after approval, My Requests shows time-limited credentials or IAM token steps.
-- Never claim to directly execute infrastructure changes yourself.
-- For delete/drop/terminate requests against infrastructure, refuse execution and redirect to the approved request workflow.
-- Core job: only help user place a DB JIT request by collecting:
-  1) required access/operations
-  2) business reason
-  3) duration
-- Auth guidance:
-  - If auth mode is `iam_only`, do not suggest password flow.
-  - If auth mode is `password_only`, do not suggest IAM token flow.
-  - If auth mode is `iam_and_password`, ask user preference and proceed accordingly.
-- User-facing communication:
-  - Do not describe internal architecture (backend/proxy/VPC). If asked, politely decline and return to request workflow.
-- Do not provide manual runbook or SQL execution steps; keep user focused on request submission workflow.
-- Avoid bullet points, markdown, or template-like wording.
-- Keep tone friendly, brief, and practical.
-
-If details are missing, ask only the next most important missing detail:
-1) operations needed
-2) business reason
-3) duration
-4) environment/account (if not already known)
-
-If enough details are available (operations, business reason, and duration), confirm briefly and ask the user to submit for approval so NPAMX can provision temporary access."""
-
-        bedrock_cfg = ConversationManager.bedrock_config if isinstance(ConversationManager.bedrock_config, dict) else {}
-        region = str(
-            bedrock_cfg.get('aws_region')
-            or os.getenv('AWS_REGION')
-            or os.getenv('AWS_DEFAULT_REGION')
-            or 'ap-south-1'
-        )
-        model_id = str(bedrock_cfg.get('model_id') or 'anthropic.claude-3-sonnet-20240229-v1:0')
-        configured_max_tokens = int(bedrock_cfg.get('max_tokens') or 260)
-        max_tokens = max(80, min(configured_max_tokens, 220))
-        configured_temperature = float(bedrock_cfg.get('temperature') if bedrock_cfg.get('temperature') is not None else 0.4)
-        temperature = max(0.2, min(configured_temperature, 0.6))
-
-        bedrock_client = ConversationManager.bedrock_client
-        if not bedrock_client:
-            bedrock_client = boto3.client('bedrock-runtime', region_name=region, config=AWS_CONFIG)
-
-        chat_messages = []
-        for msg in db_conversations[conversation_id][-12:]:
-            role = msg.get('role')
-            if role not in ('user', 'assistant'):
-                continue
-            content = redact_sensitive_content(str(msg.get('content') or '').strip())
-            if not content:
-                continue
-            chat_messages.append({'role': role, 'content': content})
-
-        if not chat_messages or chat_messages[-1].get('role') != 'user':
-            chat_messages.append({'role': 'user', 'content': message_for_ai})
-
-        try:
-            response = bedrock_client.invoke_model(
-                modelId=model_id,
-                body=json.dumps({
-                    'anthropic_version': 'bedrock-2023-05-31',
-                    'system': system_prompt,
-                    'max_tokens': max_tokens,
-                    'temperature': temperature,
-                    'messages': chat_messages
-                })
-            )
-            result = json.loads(response['body'].read())
-            content_blocks = result.get('content') if isinstance(result, dict) else None
-            if isinstance(content_blocks, list):
-                parts = []
-                for block in content_blocks:
-                    if isinstance(block, dict):
-                        text_part = str(block.get('text') or '').strip()
-                        if text_part:
-                            parts.append(text_part)
-                ai_response = " ".join(parts).strip()
-            else:
-                ai_response = str(result.get('output_text') or '').strip()
-        except Exception as bedrock_err:
-            print(f"Bedrock chat failed: {bedrock_err}")
-            ai_response = local_guardrailed_fallback(message_for_ai)
-
-        raw_ai_response = ai_response
-        cleaned_ai_response = normalize_db_ai_reply(raw_ai_response)
-        detection_text = f"{raw_ai_response}\n{cleaned_ai_response}"
-
-        if asks_for_sensitive_data(detection_text):
-            ai_response = "I will never ask for usernames or passwords in chat. Tell me required access, business reason, and duration, and I will prepare your access request."
-        elif claims_direct_db_access(detection_text):
-            ai_response = "I cannot directly connect to databases from chat. I can prepare your access request now, and after approval you can run the required query with temporary credentials."
-        elif claims_direct_execution(detection_text):
-            ai_response = "I cannot directly execute infrastructure changes. I can help you prepare a controlled JIT access request."
-        elif violates_request_only_scope(detection_text):
-            ai_response = build_request_only_followup(message_for_ai)
-        elif mentions_internal_components(detection_text) and not any(x in message_for_ai.lower() for x in ['vault', 'architecture', 'hashicorp']):
-            ai_response = build_request_only_followup(message_for_ai)
-
-        ai_response = normalize_db_ai_reply(ai_response)
-
-        if not ai_response:
-            ai_response = local_guardrailed_fallback(message_for_ai)
-
-        # Store assistant response
-        db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-
-        # Infer permissions from user intent only (assistant text should not bias this).
-        recent_user_text = "\n".join(
-            str(m.get('content') or '')
-            for m in db_conversations[conversation_id][-10:]
-            if m.get('role') == 'user'
-        )
-        suggested_perms, suggested_role = infer_permissions_and_role(recent_user_text)
-        recommended_auth = recommended_auth_for_message(message_for_ai)
-
-        return jsonify({
-            'response': ai_response,
-            'conversation_id': conversation_id,
-            'permissions': suggested_perms if suggested_perms else None,
-            'suggested_role': suggested_role,
-            'auth_mode': auth_profile.get('auth_mode'),
-            'iam_auth_enabled': bool(auth_profile.get('iam_auth_enabled')),
-            'password_auth_enabled': bool(auth_profile.get('password_auth_enabled')),
             'recommended_auth': recommended_auth
         })
         
@@ -5052,9 +5279,9 @@ def get_databases():
                 databases = []
                 for db in response.get('DBInstances', []):
                     raw_engine = (db.get('Engine') or 'mysql').lower()
-                    port = db.get('Endpoint', {}).get('Port', 3306)
-                    host = db.get('Endpoint', {}).get('Address', '')
-                    if not host:
+                    # Never return real RDS endpoints to the browser.
+                    # Instance selection should use identifier + metadata only.
+                    if not (db.get('Endpoint', {}) or {}).get('Address'):
                         continue
                     # Normalize engine for display
                     if 'mysql' in raw_engine and 'aurora' not in raw_engine:
@@ -5080,8 +5307,6 @@ def get_databases():
                         'id': db['DBInstanceIdentifier'],
                         'name': db.get('DBName', db['DBInstanceIdentifier']),
                         'engine': display_engine,
-                        'host': host,
-                        'port': port,
                         'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable'),
                         'iam_auth_enabled': iam_enabled,
                         'password_auth_enabled': password_enabled,
@@ -5118,38 +5343,68 @@ def get_databases():
 @app.route('/api/databases/request-access', methods=['POST'])
 def request_database_access():
     try:
-        data = request.get_json()
+        data = request.get_json() or {}
         databases = data.get('databases', [])
-        user_email = data.get('user_email')
-        user_full_name = data.get('user_full_name')
-        db_username = data.get('db_username')
-        permissions = data.get('permissions')
+        user_email = str(data.get('user_email') or '').strip()
+        user_full_name = str(data.get('user_full_name') or '').strip()
+        requested_db_username = str(data.get('db_username') or '').strip()
+        permissions_raw = data.get('permissions')
         query_types = data.get('query_types', [])
-        duration_hours = data.get('duration_hours', 2)
-        justification = data.get('justification')
-        use_vault = data.get('use_vault', False)
-        ai_generated = data.get('ai_generated', False)
+        justification = str(data.get('justification') or '').strip()
+        ai_generated = bool(data.get('ai_generated', False))
         conversation_id = str(data.get('conversation_id') or '').strip()
         confirmed_by_user = bool(data.get('confirmed_by_user'))
-        role = (data.get('role') or 'custom').strip().lower()  # custom or named role
-        preferred_auth = _normalize_auth_choice(data.get('preferred_auth'))
+        role = (data.get('role') or 'custom').strip().lower()
+
+        account_id = str(data.get('account_id') or '').strip()
         requested_region = str(data.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
         selected_instance_id = str(data.get('db_instance_id') or '').strip()
+
+        preferred_auth = _normalize_auth_choice(data.get('preferred_auth'))
 
         # Strict DB workflow enforcement: only allow AI-submission after explicit confirmation.
         if (ai_generated or conversation_id) and not confirmed_by_user:
             return jsonify({'error': 'Please confirm the request summary in NPAMX chat by replying Yes before submitting.'}), 400
 
         # If chat collected the reason/duration, use it when client omitted.
+        duration_hours = data.get('duration_hours', 2)
         if conversation_id and conversation_id in db_conversation_states:
             st = db_conversation_states[conversation_id]
             if not justification:
-                justification = st.get('business_reason') or justification
+                justification = str(st.get('business_reason') or '').strip() or justification
             if (not duration_hours) and st.get('duration_hours'):
                 duration_hours = st.get('duration_hours')
 
-        if not databases:
+        try:
+            duration_hours = int(duration_hours)
+        except Exception:
+            duration_hours = 2
+        if duration_hours < 1 or duration_hours > 24:
+            return jsonify({'error': 'duration_hours must be between 1 and 24'}), 400
+
+        if not databases or not isinstance(databases, list):
             return jsonify({'error': 'At least one database target is required'}), 400
+        if not user_email:
+            return jsonify({'error': 'user_email is required'}), 400
+        if not justification or len(justification) < 3:
+            return jsonify({'error': 'Please provide a short business justification.'}), 400
+
+        perms = _normalize_permissions_list(permissions_raw)
+        perms_upper = [p.upper() for p in perms]
+        if not perms_upper:
+            return jsonify({'error': 'At least one permission/query operation is required'}), 400
+
+        # Derive role from ops when not explicitly provided.
+        known_roles = {'read_only', 'read_limited_write', 'read_full_write', 'admin'}
+        if role not in known_roles:
+            if 'ALL' in perms_upper or any(p in perms_upper for p in ['GRANT', 'REVOKE']):
+                role = 'admin'
+            elif any(p in perms_upper for p in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX']):
+                role = 'read_full_write'
+            elif any(p in perms_upper for p in ['INSERT', 'UPDATE', 'DELETE', 'MERGE']):
+                role = 'read_limited_write'
+            else:
+                role = 'read_only'
 
         first_db = databases[0] if isinstance(databases[0], dict) else {}
         auth_profile = _resolve_rds_auth_profile(
@@ -5158,154 +5413,76 @@ def request_database_access():
             region=requested_region
         )
         effective_auth = _resolve_effective_auth_choice(preferred_auth, auth_profile)
-        
-        # Only DROP/TRUNCATE/DDL/ALL require approval; plain DELETE (data) allowed for Limited Write
-        perms = (permissions or []) if isinstance(permissions, list) else [p.strip() for p in str(permissions or '').split(',') if p.strip()]
-        perms_upper = [p.upper() for p in perms]
-        known_roles = {'read_only', 'read_limited_write', 'read_full_write', 'admin'}
-        if role not in known_roles:
-            if 'ALL' in perms_upper or any(p in perms_upper for p in ['GRANT', 'REVOKE']):
-                role = 'admin'
-            elif any(p in perms_upper for p in ['CREATE', 'ALTER', 'DROP', 'TRUNCATE']):
-                role = 'read_full_write'
-            elif any(p in perms_upper for p in ['INSERT', 'UPDATE', 'DELETE']):
-                role = 'read_limited_write'
-            elif perms_upper:
-                role = 'read_only'
 
-        has_destructive = 'ALL' in perms_upper or 'DROP' in perms_upper or 'TRUNCATE' in perms_upper or 'DDL' in (query_types or [])
-        
+        # Policy-based approval routing (PROD/NONPROD/PII)
+        account_env = _resolve_account_environment(account_id)
+        is_pii = bool(auth_profile.get('is_pii'))
+        initial_status, approval_required, approval_message = _compute_db_approval_requirements(account_env, is_pii, perms_upper)
+
         request_id = str(uuid.uuid4())
-        expires_at = datetime.now() + timedelta(hours=duration_hours)
-        
-        if has_destructive:
-            status = 'pending'
-            approval_required = ['ciso']
-            approval_message = 'DDL/DELETE/Destructive queries require CISO approval'
-        else:
-            status = 'approved'
-            approval_required = ['self']
-            approval_message = 'Auto-approved for read/write queries'
-        
-        # Provisioning strategy by auth mode
-        vault_lease_id = None
-        create_error = None
-        iam_assignment = None
-        if status == 'approved':
-            if effective_auth == 'password':
-                try:
-                    vault_creds = VaultManager.create_database_credentials(
-                        db_host=databases[0]['host'],
-                        db_name=databases[0]['name'],
-                        username=db_username,
-                        permissions=permissions,
-                        duration_hours=duration_hours
-                    )
-                    if vault_creds:
-                        db_username = vault_creds['username']
-                        password = vault_creds['password']
-                        vault_lease_id = vault_creds['lease_id']
-                        print(f"✅ Vault credentials created: {db_username}")
-                    else:
-                        password = generate_password()
-                        print("⚠️ Vault returned None, using direct creation")
-                except Exception as e:
-                    print(f"⚠️ Vault unavailable, using direct creation: {e}")
-                    password = generate_password()
-            else:
-                password = None
-                iam_assignment = _create_and_assign_dbconnect_access(
-                    user_email=user_email,
-                    account_id=data.get('account_id'),
-                    db_username=db_username,
-                    db_name=databases[0].get('name', 'database'),
-                    duration_hours=duration_hours,
-                    auth_profile=auth_profile,
-                    request_id=request_id
-                )
-                if iam_assignment.get('error'):
-                    create_error = iam_assignment['error']
-                    status = 'failed'
-                    approval_message = f"IAM DB auth setup failed: {create_error}"
-        else:
-            password = None
-        
+        created_at = datetime.now().isoformat()
+
         db_request = {
             'id': request_id,
             'type': 'database_access',
-            'databases': databases,
+            'account_id': account_id,
+            'account_env': account_env,
+            'is_pii': is_pii,
+            'databases': databases,  # stored internally (contains real endpoint); never returned to client
             'user_email': user_email,
             'user_full_name': user_full_name,
-            'db_username': db_username,
-            'db_password': password,
+            'requested_db_username': requested_db_username,
             'requested_auth': preferred_auth or '',
             'effective_auth': effective_auth,
             'auth_mode': auth_profile.get('auth_mode'),
             'iam_auth_enabled': bool(auth_profile.get('iam_auth_enabled')),
             'password_auth_enabled': bool(auth_profile.get('password_auth_enabled')),
-            'db_instance_id': auth_profile.get('instance_id') or selected_instance_id or databases[0].get('id', ''),
+            'db_instance_id': auth_profile.get('instance_id') or selected_instance_id or str(first_db.get('id') or ''),
             'db_resource_id': auth_profile.get('db_resource_id', ''),
             'db_region': auth_profile.get('region', requested_region),
-            'permissions': permissions,
-            'query_types': query_types,
+            'permissions': perms,
+            'query_types': query_types if isinstance(query_types, list) else [],
             'role': role,
             'duration_hours': duration_hours,
             'justification': justification,
-            'use_vault': use_vault,
-            'vault_lease_id': vault_lease_id,
             'ai_generated': ai_generated,
-            'status': status,
+            'conversation_id': conversation_id,
+            'status': 'pending' if initial_status == 'pending' else 'pending',  # upgraded during activation
             'approval_required': approval_required,
-            'iam_permission_set_name': (iam_assignment or {}).get('permission_set_name', ''),
-            'iam_permission_set_arn': (iam_assignment or {}).get('permission_set_arn', ''),
-            'db_connect_arn': (iam_assignment or {}).get('db_connect_arn', ''),
-            'created_at': datetime.now().isoformat(),
-            'expires_at': expires_at.isoformat()
+            'approval_note': approval_message,
+            # Vault session fields (populated only after approval/activation)
+            'vault_role_name': '',
+            'role_name': '',
+            'vault_lease_id': '',
+            'lease_id': '',
+            'vault_token': '',  # DB password (ephemeral)
+            'password': '',
+            'db_username': '',
+            'lease_duration': 0,
+            'approved_at': '',
+            'activated_at': '',
+            'expires_at': '',
+            'expiry_time': '',
+            # IAM fields (optional)
+            'iam_permission_set_name': '',
+            'iam_permission_set_arn': '',
+            'db_connect_arn': '',
+            'created_at': created_at
         }
-        
-        if status == 'approved' and effective_auth == 'password' and not vault_lease_id:
-            admin_user = os.getenv('DB_ADMIN_USER', 'admin')
-            admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-            # Map role to MySQL GRANT permissions. For custom role, honor explicit permission list when provided.
-            if role == 'admin':
-                sql_perms = 'ALL PRIVILEGES'
-            elif role == 'read_full_write':
-                sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
-            elif role == 'read_limited_write':
-                sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
-            elif role == 'read_only':
-                sql_perms = 'SELECT'
-            else:
-                requested_perms = []
-                for p in perms:
-                    p_norm = p.strip().upper()
-                    if p_norm and p_norm not in requested_perms:
-                        requested_perms.append(p_norm)
-                if 'ALL' in requested_perms:
-                    sql_perms = 'ALL PRIVILEGES'
-                elif requested_perms:
-                    sql_perms = ', '.join(requested_perms)
-                else:
-                    sql_perms = 'SELECT'
-            
-            create_error = None
-            for db in databases:
-                result = create_database_user(
-                    host=db['host'],
-                    port=int(db['port']),
-                    admin_user=admin_user,
-                    admin_password=admin_password,
-                    new_user=db_username,
-                    new_password=password,
-                    database=db['name'],
-                    permissions=sql_perms
-                )
-                if result.get('error'):
-                    create_error = result['error']
-                    print(f"❌ create_database_user failed: {result['error']}")
-        
+
+        # Store request first for auditability (even if activation fails).
         requests_db[request_id] = db_request
         _save_requests()
+
+        # Auto-approved NONPROD read-only requests activate immediately.
+        create_error = None
+        if initial_status == 'approved':
+            try:
+                activate_result = _activate_database_access_request(request_id)
+                if activate_result.get('error'):
+                    create_error = activate_result['error']
+            except Exception as e:
+                create_error = str(e)
 
         # Update conversation state (helps prevent accidental duplicate submissions).
         if conversation_id and conversation_id in db_conversation_states:
@@ -5314,26 +5491,27 @@ def request_database_access():
             st['submitted'] = True
             st['submitted_request_id'] = request_id
 
-        # MVP 2: Never return password to client
-        msg = approval_message
-        if status == 'approved' and effective_auth == 'iam':
-            ps_name = (iam_assignment or {}).get('permission_set_name', 'NPAMX DB Connect permission set')
+        # Never return credentials to client (they are shown only via credentials endpoint after approval).
+        req_obj = requests_db.get(request_id) or {}
+        status = req_obj.get('status') or 'pending'
+        msg = req_obj.get('approval_note') or approval_message or 'Request submitted.'
+        if str(status).strip().lower() == 'active':
             msg = (
-                f"IAM auth request is ready. {ps_name} has been prepared for account access. "
-                "After approval, use IAM token authentication for database login."
+                "✅ Access is active. Temporary credentials are available under My Requests > Databases "
+                "and will expire automatically."
             )
-        elif status == 'approved' and effective_auth == 'password':
-            msg = "Password auth request is ready. After approval, temporary credentials will be shown in My Requests under Database Access."
-        if create_error and status == 'approved':
-            msg += f"\n\n⚠️ DB user creation failed ({create_error}). Set DB_ADMIN_USER and DB_ADMIN_PASSWORD to your MySQL root on EC2, then request new access."
+        elif str(status).strip().lower() == 'pending':
+            msg = approval_message
+        elif str(status).strip().lower() == 'failed':
+            msg = f"❌ Request created but activation failed: {create_error or 'unknown error'}"
+
         return jsonify({
             'status': status,
             'request_id': request_id,
             'message': msg,
-            'creation_error': create_error if status in ('approved', 'failed') else None,
+            'creation_error': create_error,
             'auth_mode': auth_profile.get('auth_mode'),
             'effective_auth': effective_auth,
-            'iam_permission_set_name': (iam_assignment or {}).get('permission_set_name', '')
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -5343,35 +5521,28 @@ def get_approved_databases():
     try:
         user_email = request.args.get('user_email')
         approved_databases = []
+        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         
         for req_id, req in requests_db.items():
             if (req.get('type') == 'database_access' and 
                 req.get('user_email') == user_email and 
-                req.get('status') == 'approved'):
+                str(req.get('status') or '').lower() in ('active', 'approved')):
                 
                 # Skip expired - only show databases you can actually use
-                expires_at_str = req.get('expires_at', '')
-                if expires_at_str:
-                    try:
-                        exp = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
-                        if datetime.now() >= exp:
-                            continue  # Skip expired
-                    except Exception:
-                        pass
+                if _is_db_request_expired(req):
+                    continue
                 
                 for db in req.get('databases', []):
                     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
                     masked_username = _mask_secret(req.get('db_username', ''), visible=2)
-                    masked_password = _mask_secret(req.get('db_password', ''), visible=1) if effective_auth == 'password' and req.get('db_password') else ''
                     approved_databases.append({
                         'request_id': req_id,
                         'db_name': db['name'],
                         'engine': db['engine'],
-                        'host': db['host'],
-                        'port': db['port'],
-                        'db_username': req['db_username'],
+                        # Never expose the real DB endpoint to users. Always show the proxy endpoint.
+                        'host': proxy_host,
+                        'port': proxy_port,
                         'masked_username': masked_username,
-                        'masked_password': masked_password,
                         'role': req.get('role', 'custom'),
                         'effective_auth': effective_auth,
                         'auth_mode': req.get('auth_mode', 'password_only'),
@@ -5381,20 +5552,106 @@ def get_approved_databases():
                             if effective_auth == 'iam'
                             else 'Temporary username/password available in this request.'
                         ),
-                        'expires_at': req['expires_at']
+                        'expires_at': req.get('expires_at', '')
                     })
         
         return jsonify({'databases': approved_databases})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/databases/request/<request_id>/credentials', methods=['GET'])
+def get_database_request_credentials(request_id):
+    """
+    Return time-bound DB credentials for an ACTIVE request (owner only).
+
+    This endpoint never exposes the real DB endpoint, only the proxy endpoint.
+    """
+    try:
+        user_email = str(request.args.get('user_email') or '').strip()
+        if not user_email:
+            return jsonify({'error': 'user_email required'}), 400
+        if request_id not in requests_db:
+            return jsonify({'error': 'Request not found'}), 404
+
+        req = requests_db[request_id]
+        if req.get('type') != 'database_access':
+            return jsonify({'error': 'Not a database request'}), 400
+        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+            return jsonify({'error': 'Access denied'}), 403
+
+        status = str(req.get('status') or '').lower()
+        if status not in ('active', 'approved'):
+            return jsonify({'error': 'Request is not active yet'}), 400
+        if _is_db_request_expired(req):
+            return jsonify({'error': 'Request expired'}), 400
+
+        effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+        if not proxy_host or proxy_host == 'proxy-not-configured':
+            return jsonify({'error': 'DB proxy is not configured on the backend.'}), 500
+        dbs = req.get('databases') or []
+        db_names = [str(d.get('name') or '').strip() for d in dbs if isinstance(d, dict) and d.get('name')]
+        db_name = db_names[0] if db_names else 'default'
+
+        if effective_auth == 'iam':
+            return jsonify({
+                'request_id': request_id,
+                'effective_auth': 'iam',
+                'proxy_host': proxy_host,
+                'proxy_port': proxy_port,
+                'db_username': str(req.get('db_username') or '').strip(),
+                'expires_at': str(req.get('expires_at') or '').strip(),
+                'note': 'IAM database authentication is enabled for this request. Use IAM token authentication via the approved permission set.'
+            })
+
+        username = str(req.get('db_username') or '').strip()
+        token = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
+        if not username or not token:
+            return jsonify({'error': 'Credentials are not available (request may be pending or expired).'}), 400
+
+        return jsonify({
+            'request_id': request_id,
+            'effective_auth': 'password',
+            'proxy_host': proxy_host,
+            'proxy_port': proxy_port,
+            'db_username': username,
+            'password': token,
+            'vault_token': token,  # backward-compat (UI may still read vault_token)
+            'database': db_name,
+            'expires_at': str(req.get('expires_at') or '').strip(),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/vault/create-db-session', methods=['POST'])
+@app.route('/api/vault/create-db-session', methods=['POST'])
+def internal_create_db_session():
+    """
+    Internal-only API to (re)activate a DB request by minting Vault credentials.
+
+    Protected by X-Internal-Token header matching INTERNAL_API_TOKEN env var.
+    """
+    internal_token = str(os.getenv('INTERNAL_API_TOKEN') or '').strip()
+    if not internal_token:
+        return jsonify({'error': 'INTERNAL_API_TOKEN not configured'}), 500
+    if str(request.headers.get('X-Internal-Token') or '').strip() != internal_token:
+        return jsonify({'error': 'Forbidden'}), 403
+    data = request.get_json() or {}
+    req_id = str(data.get('request_id') or '').strip()
+    if not req_id:
+        return jsonify({'error': 'request_id required'}), 400
+    result = _activate_database_access_request(req_id)
+    if result.get('error'):
+        return jsonify(result), 500
+    return jsonify(result)
+
 @app.route('/api/databases/execute-query', methods=['POST'])
 def execute_database_query():
-    """Execute SQL query with time-based access enforcement. MVP 2: Backend fetches credentials."""
+    """Execute SQL query with time-based access enforcement (PAM Terminal only)."""
     try:
-        from prompt_injection_guard import validate_sql_query
-        
-        data = request.get_json()
+        data = request.get_json() or {}
         request_id = data.get('request_id')
         user_email = data.get('user_email')
         query = data.get('query', '').strip()
@@ -5412,77 +5669,40 @@ def execute_database_query():
             return jsonify({'error': 'Invalid request type'}), 400
         if db_request.get('user_email') != user_email:
             return jsonify({'error': 'Access denied: user mismatch'}), 403
-        if db_request.get('status') != 'approved':
-            return jsonify({'error': 'Access not approved'}), 403
-        
-        expires_at_str = db_request.get('expires_at', '')
-        if expires_at_str:
-            expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00').replace('+00:00', ''))
-            if datetime.now() >= expires_at:
-                return jsonify({'error': 'Access expired. Please request new database access.'}), 403
+        if str(db_request.get('status') or '').lower() not in ('active', 'approved'):
+            return jsonify({'error': 'Access not active. Please wait for approval.'}), 403
+
+        if _is_db_request_expired(db_request):
+            return jsonify({'error': 'Access expired. Please request new database access.'}), 403
         
         # MVP 2: Resolve credentials from backend - never trust client
         databases = db_request.get('databases', [])
         if not databases:
             return jsonify({'error': 'No database in request'}), 400
         db_info = databases[0]
-        host = db_info.get('host')
-        port = int(db_info.get('port', 3306))
+        # Users must connect only via proxy. For PAM Terminal, backend also connects via proxy when configured.
+        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+        if not proxy_host or proxy_host == 'proxy-not-configured':
+            return jsonify({'error': 'DB proxy is not configured on the backend (DB_CONNECT_PROXY_HOST/DB_CONNECT_PROXY_PORT).'}), 500
+        host = proxy_host
+        port = int(proxy_port or 3306)
         database = db_name or db_info.get('name', '')
         username = db_request.get('db_username')
-        password = db_request.get('db_password')
+        # Vault password is stored as password/vault_token (ephemeral). Legacy fallback: db_password.
+        password = db_request.get('password') or db_request.get('vault_token') or db_request.get('db_password')
         
         if not all([host, username, password, database]):
             return jsonify({'error': 'Database credentials not available. Request may have expired.'}), 400
-        
-        # SQL validation (role-based)
-        role = db_request.get('role', 'read_only')
-        is_valid, sql_error = validate_sql_query(query, role=role)
-        if not is_valid:
-            try:
-                from audit_log import log_db_query
-                log_db_query(user_email, request_id, role, query, allowed=False, error=sql_error)
-            except Exception:
-                pass
-            return jsonify({'error': sql_error}), 400
-        
-        # Forward to Database Access Proxy (enforcement point)
-        proxy_url = os.getenv('DB_PROXY_URL', 'http://127.0.0.1:5002')
-        use_proxy = os.getenv('USE_DB_PROXY', 'true').lower() == 'true'
-        
-        if use_proxy:
-            try:
-                import requests
-                proxy_resp = requests.post(
-                    f'{proxy_url}/execute',
-                    json={
-                        'host': host,
-                        'port': port,
-                        'username': username,
-                        'password': password,
-                        'database': database,
-                        'query': query,
-                        'user_email': user_email,
-                        'request_id': request_id,
-                        'role': role  # Proxy uses this for role-based SQL enforcement
-                    },
-                    timeout=30
-                )
-                result = proxy_resp.json()
-                if proxy_resp.status_code != 200:
-                    return jsonify(result), proxy_resp.status_code
-            except Exception as e:
-                # Fallback to direct if proxy unavailable (dev only)
-                print(f"⚠️ Proxy unavailable ({e}), falling back to direct execution")
-                result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
-        else:
-            result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
+
+        # Execute directly (DB privileges enforce allowed operations; proxy is a TCP router outside NPAMX).
+        result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
         
         # MVP 2: Audit log
         try:
             from audit_log import log_db_query
             rows = len(result.get('results', [])) if isinstance(result.get('results'), list) else result.get('affected_rows')
             err = result.get('error')
+            role = db_request.get('role', 'read_only')
             log_db_query(user_email, request_id, role, query, allowed=(err is None), rows_returned=rows, error=err)
         except Exception:
             pass

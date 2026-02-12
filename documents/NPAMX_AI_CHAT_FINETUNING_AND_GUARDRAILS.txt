@@ -10,7 +10,7 @@ In simple terms:
 - We improved how NPAMX talks so it sounds natural and asks fewer repeated questions.
 - We added security guardrails so NPAMX does not ask for passwords or secrets.
 - We added safety checks so NPAMX refuses destructive execution requests like deleting RDS from chat.
-- We added fallback behavior so chat still responds even when Bedrock is temporarily unavailable.
+- We made DB chat deterministic (server-side workflow), so it stays responsive even if Bedrock is unavailable.
 - We masked sensitive values in frontend chat before sending to backend.
 
 Important note: this is prompt/behavior tuning and guardrail engineering, not model-weight finetuning.
@@ -45,40 +45,42 @@ Goal:
 - Make NPAMX concise, friendly, and context-aware.
 - Avoid asking the same question again if already answered.
 
-How:
-- Added a stronger system prompt with explicit behavior rules.
-- Forced concise output style (1-2 short sentences).
-- Added response normalizer to keep answers short and clean.
+How (current implementation):
+- Implemented a strict, server-side conversation state machine (`strict_db_workflow_reply`) that:
+  - Tracks purpose/access/reason/duration across turns
+  - Suggests least-privilege access first (READ-only for debugging)
+  - Asks exactly the next missing detail (no repeated loops)
+  - Requires an explicit "Yes" confirmation before allowing request submission
+- Added wording variation (`_avoid_repeat`) so NPAMX does not repeat the exact same sentence twice.
 
-Code snippet:
+Code snippet (state initialization):
 ```python
-system_prompt = f"""You are NPAMX, the database JIT access assistant.
-
-Current UI context:
-{context_block}
-
-Rules:
-- Reply in 1-2 short, natural sentences (human tone, not robotic).
-- Keep each sentence compact and easy to scan.
-- Ask at most one clarifying question, and only if truly needed.
-- Never repeat the same question if the answer is already in chat history or UI context.
-- If database or instance is already selected in UI context, do not ask for it again unless the user asks to change it.
-- When the user asks a direct question, answer it first, then ask one follow-up only if needed.
-..."""
+db_conversation_states[conversation_id] = {
+  "intent": None,
+  "purpose": None,
+  "account_env": context_account_env,
+  "is_pii": bool(auth_profile.get("is_pii")),
+  "db_name": (context_db_names[0] if context_db_names else ""),
+  "access_level": None,
+  "business_reason": None,
+  "duration_hours": None,
+  "awaiting": None,
+  "confirmed": False,
+  "submitted": False
+}
 ```
 
-Code snippet (output shaping):
+Code snippet (workflow enforcement in the API route):
 ```python
-def normalize_db_ai_reply(text):
-    cleaned = str(text or '').strip()
-    cleaned = re.sub(r'[`*_#>-]+', '', cleaned)
-    cleaned = re.sub(r'^(assistant|npamx)\s*:\s*', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', cleaned) if s.strip()]
-    concise = " ".join(sentences[:2]).strip()
-    if len(concise) > 260:
-        concise = concise[:257].rstrip() + "..."
-    return concise
+strict = strict_db_workflow_reply(message_for_ai) or {}
+ai_response = str(strict.get("response") or "").strip()
+
+return jsonify({
+  "response": ai_response,
+  "draft": strict.get("draft") or {},
+  "needs_confirmation": bool(strict.get("needs_confirmation")),
+  "ready_to_submit": bool(strict.get("ready_to_submit"))
+})
 ```
 
 ## 4.2 Security Guardrails (Credentials and Secrets)
@@ -156,29 +158,20 @@ if is_destructive_execution_request(message_for_ai):
     return jsonify({...})
 ```
 
-## 4.4 Reliability: Local Fallback if Bedrock Fails
+## 4.4 Reliability: Always-Responsive DB Chat
 
 Goal:
-- Keep chat responsive when Bedrock/API has transient issues.
+- Keep the DB assistant responsive even if an LLM provider is unavailable.
 
 How:
-- Replaced generic outage loop with local, guardrailed fallback responses.
+- DB chat does not depend on Bedrock/LLM calls. The workflow and guardrails are enforced server-side.
+- A small deterministic fallback (`local_guardrailed_fallback`) is used only if something unexpected happens.
 
 Code snippet:
 ```python
-def local_guardrailed_fallback(msg):
-    msg_lower = (msg or '').lower().strip()
-    if 'are you there' in msg_lower or 'what happened' in msg_lower:
-        return "I am here. Tell me the operations and duration, and I will prepare your request."
-    if is_out_of_scope_request(msg_lower):
-        return "I can help only with database access in NPAMX. Tell me your DB task and duration."
-    if is_destructive_execution_request(msg_lower):
-        return "I cannot execute destructive actions through chat. I can help you submit a controlled access request instead."
-    return "Tell me the required operations and duration, and I will prepare the request."
-
-try:
-    response = bedrock_client.invoke_model(...)
-except Exception:
+strict = strict_db_workflow_reply(message_for_ai) or {}
+ai_response = str(strict.get("response") or "").strip()
+if not ai_response:
     ai_response = local_guardrailed_fallback(message_for_ai)
 ```
 
@@ -257,8 +250,8 @@ After pull on server:
 4. Hard refresh browser.
 
 Cache-bust versions used:
-- `frontend/index.html`: `enterprise-theme.css?v=13`, `databases.css?v=14`, `databases.js?v=20`
-- `frontend/index-bundled.html`: `bundle.css?v=27`, `bundle.js?v=27`
+- `frontend/index.html`: `enterprise-theme.css?v=13`, `performance.css?v=12`, `databases.css?v=15`, `databases.js?v=22`
+- `frontend/index-bundled.html`: `bundle.css?v=29`, `bundle.js?v=29`
 
 ## 7) Quick Validation Checklist
 
@@ -277,7 +270,7 @@ Run these tests:
 
 4. Recovery check
 - Input: "are you there?"
-- Expected: immediate response from fallback if AI provider fails.
+- Expected: immediate response (no "temporarily unavailable" loops).
 
 5. Normal DB flow
 - Input: "Need read access for debugging for 2h"
@@ -292,7 +285,7 @@ Current limitations:
 Recommended next improvements:
 1. Add structured intent schema output from model (JSON mode) and validate server-side.
 2. Add audit log events for guardrail triggers (secret shared, destructive request denied).
-3. Add policy-aware approval guidance (non-prod/prod/PII approvals) inside request summary logic.
+3. (Partially done) Policy-aware advisory tone (prod vs nonprod + PII tags) is implemented in chat. Next: align backend approval routing with the same policy.
 4. Add automated tests for all chat guardrail scenarios.
 
 ## 9) Round-2 Hotfixes (After Live User Testing)
@@ -730,6 +723,43 @@ confirmed_by_user = bool(data.get('confirmed_by_user'))
 
 if (ai_generated or conversation_id) and not confirmed_by_user:
     return jsonify({'error': 'Please confirm the request summary in NPAMX chat by replying Yes before submitting.'}), 400
+```
+
+### 12.10 PROD vs NON-PROD Advisory (And PII Tag Awareness)
+
+What NPAMX uses:
+- Account environment is resolved from `backend/org_policies.json` (`accounts.<id>.environment`) or inferred from account name.
+- PII / sensitive database is detected best-effort from RDS instance tags:
+  - Any tag key/value containing "pii"
+  - Or a classification tag like `DataClassification=pii`
+
+How it changes chat behavior:
+- PROD or PII: NPAMX recommends READ-only first and suggests a shorter default duration (1h) if the user is unsure.
+- NON-PROD: NPAMX still uses least privilege, but defaults to 2h when the user is unsure.
+
+Code snippet (account environment resolution):
+```python
+def _resolve_account_environment(account_id):
+    acct = str(account_id or '').strip()
+    policies = load_org_policies() or {}
+    env = ((policies.get('accounts') or {}).get(acct) or {}).get('environment')
+    if env:
+        return str(env).strip().lower()
+    # fallback: infer from account name
+    ...
+```
+
+Code snippet (PII detection from tags + storing in conversation state):
+```python
+# In _resolve_rds_auth_profile(...)
+profile.update({
+  "is_pii": bool(is_pii),
+  "data_classification": classification
+})
+
+# In database_ai_chat(...) state init/sync
+state["account_env"] = context_account_env
+state["is_pii"] = bool(auth_profile.get("is_pii"))
 ```
 
 ---

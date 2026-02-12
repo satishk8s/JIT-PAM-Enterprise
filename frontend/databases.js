@@ -10,6 +10,7 @@ let dbStatusFilter = 'all';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 let dbAccessMode = 'ai'; // 'ai' | 'structured'
 let dbStructuredPermissions = [];
+const dbCredCache = {}; // requestId -> { data, fetchedAt }
 
 // Structured permission catalog (engine-specific filtering applied at render time)
 const DB_STRUCTURED_PERMISSIONS = [
@@ -284,7 +285,7 @@ async function renderDbStepContent() {
                 dbLastFetchError = null;
             }
             const emptyMsg = result.error
-                ? 'Could not list RDS instances. Check permissions or enter host manually.'
+                ? 'Could not list RDS instances. Check permissions or enter instance ID manually.'
                 : 'No RDS instances found in this account.';
             content.innerHTML = `
                 ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
@@ -296,7 +297,7 @@ async function renderDbStepContent() {
                     </div>
                     <div class="db-step-search">
                         <i class="fas fa-search"></i>
-                        <input type="text" id="dbStepInstanceSearch" placeholder="Type to filter instance ID, endpoint, or engine..." oninput="filterDbStepInstances()">
+                        <input type="text" id="dbStepInstanceSearch" placeholder="Type to filter instance ID, engine, or default DB..." oninput="filterDbStepInstances()">
                     </div>
                 </div>` : ''}
                 <div class="db-step-field">
@@ -309,12 +310,10 @@ async function renderDbStepContent() {
                             ${instances.map(inst => {
                                 const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
                                 const defaultDb = inst.name || 'default';
-                                const searchText = escapeAttr(`${inst.id} ${inst.engine} ${inst.host} ${defaultDb}`.toLowerCase());
+                                const searchText = escapeAttr(`${inst.id} ${inst.engine} ${defaultDb} ${inst.region || ''}`.toLowerCase());
                                 return `<option
                                     value="${escapeAttr(inst.id)}"
                                     data-name="${escapeAttr(defaultDb)}"
-                                    data-host="${escapeAttr(inst.host)}"
-                                    data-port="${escapeAttr(inst.port || 3306)}"
                                     data-engine="${escapeAttr(eng)}"
                                     data-auth-mode="${escapeAttr(inst.auth_mode || '')}"
                                     data-iam-auth-enabled="${escapeAttr(String(!!inst.iam_auth_enabled))}"
@@ -322,7 +321,7 @@ async function renderDbStepContent() {
                                     data-db-resource-id="${escapeAttr(inst.db_resource_id || '')}"
                                     data-region="${escapeAttr(inst.region || '')}"
                                     data-search="${searchText}"
-                                >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | ${escapeHtml(inst.host)}:${escapeHtml(String(inst.port || 3306))}</option>`;
+                                >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | default DB ${escapeHtml(defaultDb)}</option>`;
                             }).join('')}
                         </select>
                     </div>
@@ -331,11 +330,11 @@ async function renderDbStepContent() {
                     ` : `<p class="db-step-empty">${emptyMsg}</p>`}
                 </div>
                 <div class="db-step-manual-toggle">
-                    <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Can't find your instance? Enter host manually</button>
+                    <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Can't find your instance? Enter instance ID manually</button>
                 </div>
                 <div id="dbManualEntry" class="db-manual-entry" style="display:${instances.length ? 'none' : 'block'}">
-                    <div class="db-step-field"><label>Instance Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
-                    <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
+                    <div class="db-step-field"><label>RDS Instance ID</label><input type="text" id="dbStepInstanceId" placeholder="e.g. database-1" class="db-step-input"></div>
+                    <div class="db-step-field"><label>Region (optional)</label><input type="text" id="dbStepInstanceRegion" placeholder="e.g. ap-south-1" class="db-step-input"></div>
                 </div>
             `;
         } else if (step === 3 && useChatFlow) {
@@ -368,7 +367,7 @@ async function renderDbStepContent() {
                 dbLastFetchError = null;
             }
             const emptyMsg = result.error
-                ? 'Could not list databases. Check permissions or enter host manually.'
+                ? 'Could not list databases. Check permissions or enter an identifier manually.'
                 : 'No databases found in this account.';
             content.innerHTML = `
                 ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list databases — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
@@ -380,32 +379,32 @@ async function renderDbStepContent() {
                     </div>
                     <div class="db-step-search">
                         <i class="fas fa-search"></i>
-                        <input type="text" id="dbStepDbSearch" placeholder="Search database name, host, or engine..." oninput="filterDbStepDatabases()">
+                        <input type="text" id="dbStepDbSearch" placeholder="Search database name or engine..." oninput="filterDbStepDatabases()">
                     </div>
                 </div>` : ''}
                 <div class="db-step-field">
                     <label>Select Database(s)</label>
                     <div id="dbStepDbList" class="db-step-db-list">
-                        ${dbs.length ? dbs.map(db => {
-                            const eng = (db.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
-                            const searchText = escapeAttr(`${db.name} ${db.host} ${db.engine}`.toLowerCase());
-                            return `<label class="db-discover-item">
-                                <input type="checkbox" value="${escapeAttr(db.id)}" data-name="${escapeAttr(db.name)}" data-host="${escapeAttr(db.host)}" data-port="${escapeAttr(db.port || 3306)}" data-engine="${escapeAttr(eng)}" onchange="toggleDbStepSelection()">
-                                <span data-search="${searchText}">
-                                    <strong>${escapeHtml(db.name)}</strong>
-                                    <small>${escapeHtml(db.engine)} @ ${escapeHtml(db.host)}:${escapeHtml(String(db.port || 3306))}</small>
-                                </span>
-                            </label>`;
-                        }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
-                        <div class="db-step-manual-toggle">
-                            <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Or enter host manually</button>
-                        </div>
-                        <div id="dbManualEntry" class="db-manual-entry" style="display:none">
-                            <div class="db-step-field"><label>Database Host</label><input type="text" id="dbStepHost" placeholder="e.g. mydb.xxx.us-east-1.rds.amazonaws.com" class="db-step-input"></div>
-                            <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
-                        </div>`}
-                    </div>
-                    <p id="dbStepDbEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No databases match your search.</p>
+	                        ${dbs.length ? dbs.map(db => {
+	                            const eng = (db.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
+	                            const searchText = escapeAttr(`${db.name} ${db.engine}`.toLowerCase());
+	                            return `<label class="db-discover-item">
+	                                <input type="checkbox" value="${escapeAttr(db.id)}" data-name="${escapeAttr(db.name)}" data-engine="${escapeAttr(eng)}" onchange="toggleDbStepSelection()">
+	                                <span data-search="${searchText}">
+	                                    <strong>${escapeHtml(db.name)}</strong>
+	                                    <small>${escapeHtml(db.engine)}</small>
+	                                </span>
+	                            </label>`;
+	                        }).join('') : `<p class="db-step-empty">${emptyMsg}</p>
+	                        <div class="db-step-manual-toggle">
+	                            <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Or enter an identifier manually</button>
+	                        </div>
+	                        <div id="dbManualEntry" class="db-manual-entry" style="display:none">
+	                            <div class="db-step-field"><label>Database Identifier</label><input type="text" id="dbStepInstanceId" placeholder="e.g. database-1" class="db-step-input"></div>
+	                            <div class="db-step-field"><label>Database Name</label><input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input"></div>
+	                        </div>`}
+	                    </div>
+	                    <p id="dbStepDbEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No databases match your search.</p>
                 </div>
             `;
         }
@@ -592,8 +591,6 @@ function onDbStepInstanceSelect(radio) {
     dbRequestDraft._selectedInstance = {
         id: radio.value,
         name: radio.getAttribute('data-name'),
-        host: radio.getAttribute('data-host'),
-        port: radio.getAttribute('data-port') || 3306,
         engine: radio.getAttribute('data-engine'),
         auth_mode: radio.getAttribute('data-auth-mode') || '',
         iam_auth_enabled: String(radio.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
@@ -612,13 +609,11 @@ function renderDbStepSelectedInstanceMeta(sourceEl) {
         return;
     }
 
-    const host = sourceEl.getAttribute('data-host') || '-';
-    const port = sourceEl.getAttribute('data-port') || '3306';
     const engine = (sourceEl.getAttribute('data-engine') || selectedEngine?.engine || 'mysql').toUpperCase();
     const defaultDb = sourceEl.getAttribute('data-name') || 'default';
     meta.innerHTML = `
         <i class="fas fa-circle-check"></i>
-        <span><strong>${escapeHtml(sourceEl.value)}</strong> | ${escapeHtml(engine)} | ${escapeHtml(host)}:${escapeHtml(String(port))} | default DB <strong>${escapeHtml(defaultDb)}</strong></span>
+        <span><strong>${escapeHtml(sourceEl.value)}</strong> | ${escapeHtml(engine)} | default DB <strong>${escapeHtml(defaultDb)}</strong></span>
     `;
     meta.style.display = 'flex';
 }
@@ -641,8 +636,6 @@ function toggleDbStepSelection() {
     selectedDatabases = Array.from(checkboxes).map(cb => ({
         id: cb.value,
         name: cb.getAttribute('data-name'),
-        host: cb.getAttribute('data-host'),
-        port: cb.getAttribute('data-port') || 3306,
         engine: cb.getAttribute('data-engine')
     }));
 }
@@ -767,20 +760,18 @@ async function dbStepNext() {
             const select = document.getElementById('dbStepInstanceSelect');
             const hasDiscoveredInstances = !!(select && Array.from(select.options).some(opt => !!opt.value));
             const selectedOption = (select && select.value) ? select.options[select.selectedIndex] : null;
-            const manualHost = document.getElementById('dbStepHost')?.value?.trim();
-            const manualDbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
-            if (manualHost) {
-                dbRequestDraft._selectedInstance = { id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine };
+            const manualInstanceId = document.getElementById('dbStepInstanceId')?.value?.trim();
+            const manualRegion = document.getElementById('dbStepInstanceRegion')?.value?.trim();
+            if (manualInstanceId) {
+                dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
             } else if (hasDiscoveredInstances) {
                 if (!selectedOption) {
-                    alert('Please select an RDS instance or enter host manually.');
+                    alert('Please select an RDS instance or enter instance ID manually.');
                     return;
                 }
                 dbRequestDraft._selectedInstance = {
                     id: selectedOption.value,
                     name: selectedOption.getAttribute('data-name'),
-                    host: selectedOption.getAttribute('data-host'),
-                    port: selectedOption.getAttribute('data-port') || 3306,
                     engine: selectedOption.getAttribute('data-engine'),
                     auth_mode: selectedOption.getAttribute('data-auth-mode') || '',
                     iam_auth_enabled: String(selectedOption.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
@@ -789,11 +780,11 @@ async function dbStepNext() {
                     region: selectedOption.getAttribute('data-region') || ''
                 };
             } else {
-                if (!manualHost) {
-                    alert('Please enter the instance host.');
+                if (!manualInstanceId) {
+                    alert('Please enter the RDS instance ID.');
                     return;
                 }
-                dbRequestDraft._selectedInstance = { id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine };
+                dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
             }
             dbStepState.step = 3;
             renderDbStepContent();
@@ -806,8 +797,6 @@ async function dbStepNext() {
             selectedDatabases = dbNames.map(name => ({
                 id: inst.id || 'manual',
                 name,
-                host: inst.host,
-                port: parseInt(inst.port, 10) || 3306,
                 engine: inst.engine || selectedEngine.engine
             }));
             if (selectedDatabases.length === 0) {
@@ -820,18 +809,18 @@ async function dbStepNext() {
         if (step === 2 && !useChatFlow) {
             const result = await fetchDatabasesForAccount(dbRequestDraft.account_id, selectedEngine?.engine);
             const dbs = result.databases || [];
-            const manualHost = document.getElementById('dbStepHost')?.value?.trim();
+            const manualInstanceId = document.getElementById('dbStepInstanceId')?.value?.trim();
             const manualDbName = document.getElementById('dbStepDbName')?.value?.trim() || 'default';
-            if (dbs.length && selectedDatabases.length === 0 && !manualHost) {
-                alert('Please select at least one database or enter host manually.');
+            if (dbs.length && selectedDatabases.length === 0 && !manualInstanceId) {
+                alert('Please select at least one database or enter an identifier manually.');
                 return;
             }
-            if (!dbs.length || manualHost) {
-                if (!manualHost) {
-                    alert('Please enter the database host.');
+            if (!dbs.length || manualInstanceId) {
+                if (!manualInstanceId) {
+                    alert('Please enter the database identifier.');
                     return;
                 }
-                selectedDatabases = [{ id: 'manual', name: manualDbName, host: manualHost, port: 3306, engine: selectedEngine.engine }];
+                selectedDatabases = [{ id: manualInstanceId, name: manualDbName, engine: selectedEngine.engine }];
             }
         }
     } else if (provider === 'managed') {
@@ -1668,6 +1657,14 @@ function escapeAttr(s) {
         .replace(/>/g, '&gt;');
 }
 
+function domIdFromRequestId(requestId) {
+    return String(requestId || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '') || 'req';
+}
+
 function showDbRequestSummaryIfReady() {
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
@@ -1747,17 +1744,10 @@ async function submitDbRequestViaAi(opts = {}) {
         const accounts = await fetchAccounts();
         if (accounts.length) accountId = accounts[0].id;
     }
-    const databases = selectedDatabases.length ? selectedDatabases : [{
-        name: dbRequestDraft.db_name || 'default',
-        host: dbRequestDraft.host || 'localhost',
-        port: dbRequestDraft.port || 3306,
-        engine: selectedEngine.engine
-    }];
-    if (!databases[0].host || databases[0].host === 'localhost') {
-        const host = prompt('Database host/endpoint:');
-        const dbName = prompt('Database name:');
-        if (host) databases[0].host = host;
-        if (dbName) databases[0].name = dbName;
+    const databases = selectedDatabases.length ? selectedDatabases : [];
+    if (!databases.length) {
+        alert('Please select an instance and database name first.');
+        return;
     }
     try {
         const inst = dbRequestDraft?._selectedInstance || {};
@@ -1820,16 +1810,26 @@ async function loadDbRequests() {
             const dbNames = Array.isArray(req.databases)
                 ? req.databases.map(d => d?.name).filter(Boolean).join(', ')
                 : '';
+            const firstDbName = (dbNames.split(',')[0] || db?.name || 'default').trim().replace(/'/g, "\\'");
             const perms = Array.isArray(req.permissions)
                 ? req.permissions
                 : (typeof req.permissions === 'string' ? req.permissions.split(',').map(s => s.trim()).filter(Boolean) : []);
             const permsText = perms.length ? perms.join(', ') : '—';
             const expires = req.expires_at ? new Date(req.expires_at).toLocaleString() : '—';
             const justification = String(req.justification || '').trim();
+            const requestIdRaw = String(req.request_id || '');
+            const requestIdEsc = requestIdRaw.replace(/'/g, "\\'");
+            const isActive = req.status === 'in_progress';
+            const statusLabel = req.status === 'in_progress'
+                ? 'active'
+                : req.status === 'completed'
+                    ? 'expired'
+                    : String(req.status || '').replace(/_/g, ' ');
+            const domId = domIdFromRequestId(requestIdRaw);
             return `<div class="db-request-card db-request-${req.status}">
                 <div class="db-request-header">
                     <span class="db-request-id">${(req.request_id || '').slice(0, 8)}</span>
-                    <span class="db-request-status db-status-badge-${req.status}">${req.status.replace('_', ' ')}</span>
+                    <span class="db-request-status db-status-badge-${req.status}">${escapeHtml(statusLabel)}</span>
                 </div>
                 <div class="db-request-body">
                     <p><strong>${escapeHtml(eng)}</strong> • ${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</p>
@@ -1837,12 +1837,18 @@ async function loadDbRequests() {
                     <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
                     <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | Expires: ${escapeHtml(expires)}</p>
                     ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
+                    ${isActive ? `<div class="db-cred-inline" id="dbCredInline-${escapeAttr(domId)}" style="display:none;"></div>` : ''}
                 </div>
                 <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
-                    <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${req.request_id || ''}')"><i class="fas fa-circle-info"></i> View</button>
+                    <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${requestIdEsc}')"><i class="fas fa-circle-info"></i> View</button>
+                    ${isActive ? `
+                        <button class="btn-primary btn-sm" onclick="connectToDatabase('${String(db?.host || '').replace(/'/g, "\\'")}', '${String(db?.port || '').replace(/'/g, "\\'")}', '${eng.replace(/'/g, "\\'")}', '${requestIdEsc}', '${firstDbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
+                        <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Credentials</button>
+                        <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-up-right-from-square"></i> External Tool</button>
+                    ` : ''}
                     ${isAdminUser && req.status === 'pending' ? `
-                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${req.request_id || ''}')"><i class="fas fa-check"></i> Approve</button>
-                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${req.request_id || ''}')"><i class="fas fa-times"></i> Reject</button>
+                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
+                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
                     ` : ''}
                 </div>
             </div>`;
@@ -1877,11 +1883,13 @@ async function denyDbRequest(requestId) {
 
 async function approveDbRequest(requestId) {
     if (!confirm('Approve this database access request?')) return;
+    const role = (prompt('Approve as which role? (manager, db_owner, ciso)', 'manager') || '').trim().toLowerCase();
+    if (!role) return;
     try {
         const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ approver_role: 'self' })
+            body: JSON.stringify({ approver_role: role })
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -1897,6 +1905,173 @@ async function approveDbRequest(requestId) {
 function closeDbRequestDetailsModal() {
     const el = document.getElementById('dbRequestDetailsModal');
     if (el) el.remove();
+}
+
+function closeDbExternalToolModal() {
+    const el = document.getElementById('dbExternalToolModal');
+    if (el) el.remove();
+}
+
+function closeDbCredInline(requestId) {
+    const domId = domIdFromRequestId(requestId);
+    const el = document.getElementById(`dbCredInline-${domId}`);
+    if (!el) return;
+    el.style.display = 'none';
+    el.innerHTML = '';
+}
+
+async function copyToClipboard(text) {
+    try {
+        await navigator.clipboard.writeText(String(text || ''));
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+async function fetchDbCredentials(requestId) {
+    const rid = String(requestId || '').trim();
+    if (!rid) throw new Error('Missing request id');
+    if (dbCredCache[rid]?.data) return dbCredCache[rid].data;
+
+    const userEmail = localStorage.getItem('userEmail') || '';
+    const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(rid)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    dbCredCache[rid] = { data, fetchedAt: Date.now() };
+    return data;
+}
+
+function renderDbCredentialsInline(containerEl, creds) {
+    const proxyHost = creds.proxy_host || '—';
+    const proxyPort = creds.proxy_port || '—';
+    const username = creds.db_username || '—';
+    const expires = creds.expires_at ? new Date(creds.expires_at).toLocaleString() : '—';
+    const password = creds.password || creds.vault_token || '';
+    const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
+
+    containerEl.innerHTML = `
+        <div class="db-cred-inline-grid">
+            <div><div class="db-cred-k">Proxy Host</div><div class="db-cred-v"><code>${escapeHtml(proxyHost)}</code></div></div>
+            <div><div class="db-cred-k">Proxy Port</div><div class="db-cred-v"><code>${escapeHtml(String(proxyPort))}</code></div></div>
+            <div><div class="db-cred-k">DB Username</div><div class="db-cred-v"><code>${escapeHtml(username)}</code></div></div>
+            <div><div class="db-cred-k">Expiry</div><div class="db-cred-v">${escapeHtml(expires)}</div></div>
+        </div>
+        ${isIam ? `
+            <div class="db-cred-note">IAM auth is enabled for this request. Use IAM token authentication via the approved permission set.</div>
+        ` : `
+            <div class="db-cred-password">
+                <div class="db-cred-k">Password</div>
+                <div class="db-cred-password-row">
+                    <input id="dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}" type="password" value="${escapeAttr(password)}" readonly>
+                    <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; el.type = (el.type==='password')?'text':'password';})()">
+                        <i class="fas fa-eye"></i> Show
+                    </button>
+                    <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                        <i class="fas fa-copy"></i> Copy
+                    </button>
+                </div>
+            </div>
+        `}
+    `;
+}
+
+async function toggleDbCredInline(requestId) {
+    const rid = String(requestId || '').trim();
+    if (!rid) return;
+    const domId = domIdFromRequestId(rid);
+    const el = document.getElementById(`dbCredInline-${domId}`);
+    if (!el) return;
+
+    if (el.style.display === 'block') {
+        closeDbCredInline(rid);
+        return;
+    }
+
+    el.style.display = 'block';
+    el.innerHTML = `<div class="db-cred-loading"><i class="fas fa-spinner fa-spin"></i> Loading credentials…</div>`;
+    el.dataset.reqid = domId;
+
+    try {
+        const creds = await fetchDbCredentials(rid);
+        renderDbCredentialsInline(el, creds);
+    } catch (e) {
+        el.innerHTML = `<div class="db-cred-error">Failed to load credentials: ${escapeHtml(e.message || String(e))}</div>`;
+    }
+}
+
+async function openDbExternalToolModal(requestId) {
+    if (!requestId) return;
+    const userEmail = localStorage.getItem('userEmail') || '';
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        closeDbExternalToolModal();
+        const modal = document.createElement('div');
+        modal.id = 'dbExternalToolModal';
+        modal.className = 'db-modal-wrap';
+
+        const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
+        const proxyHost = data.proxy_host || '—';
+        const proxyPort = data.proxy_port || '—';
+        const username = data.db_username || '—';
+        const dbName = data.database || 'default';
+        const isIam = String(data.effective_auth || '').toLowerCase() === 'iam';
+
+        const tokenField = !isIam ? `
+            <div class="db-modal-grid" style="margin-top:14px;">
+                <div style="grid-column: 1 / -1;">
+                    <strong>Password (Vault Token)</strong>
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                        <input id="dbVaultTokenInput" type="password" value="${escapeAttr(data.password || data.vault_token || '')}" readonly
+                               style="flex:1;min-width:240px;padding:10px 12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);">
+                        <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbVaultTokenInput'); if(!el) return; el.type = (el.type==='password') ? 'text' : 'password';})()">
+                            <i class="fas fa-eye"></i> Show
+                        </button>
+                        <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbVaultTokenInput'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                            <i class="fas fa-copy"></i> Copy
+                        </button>
+                    </div>
+                    <small class="db-step-hint" style="display:block;margin-top:8px;">
+                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (proxy only). Credentials expire automatically.
+                    </small>
+                </div>
+            </div>
+        ` : `
+            <div class="db-modal-justification" style="margin-top:14px;">
+                <div class="db-modal-justification-label"><strong>IAM Token Authentication</strong></div>
+                <div class="db-modal-justification-text">This request uses IAM database authentication. Use the approved permission set to generate an IAM DB token and connect via the proxy endpoint.</div>
+            </div>
+        `;
+
+        modal.innerHTML = `
+          <div class="db-modal-backdrop" onclick="closeDbExternalToolModal()"></div>
+          <div class="db-modal">
+            <div class="db-modal-header">
+              <div class="db-modal-title">
+                <span class="db-modal-title-main">External Tool Credentials</span>
+                <span class="db-modal-sub">Request: <code>${escapeHtml(requestId)}</code></span>
+              </div>
+              <button class="btn-icon" onclick="closeDbExternalToolModal()" title="Close"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="db-modal-body">
+              <div class="db-modal-grid">
+                <div><strong>Proxy Host:</strong> <code>${escapeHtml(proxyHost)}</code></div>
+                <div><strong>Proxy Port:</strong> <code>${escapeHtml(String(proxyPort))}</code></div>
+                <div><strong>Database:</strong> <code>${escapeHtml(dbName)}</code></div>
+                <div><strong>Username:</strong> <code>${escapeHtml(username)}</code></div>
+                <div><strong>Expires:</strong> ${escapeHtml(expires)}</div>
+              </div>
+              ${tokenField}
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+    } catch (e) {
+        alert('Failed to load credentials: ' + e.message);
+    }
 }
 
 async function viewDbRequestDetails(requestId) {
@@ -1918,7 +2093,9 @@ async function viewDbRequestDetails(requestId) {
         const role = getDbRoleLabel(String(data.role || 'custom'));
         const justification = String(data.justification || '').trim() || '—';
         const dbNames = dbs.map(d => d?.name).filter(Boolean).join(', ') || '—';
-        const endpoint = (db.host && db.port) ? `${db.host}:${db.port}` : (db.host || '—');
+        const proxyEndpoint = (data.proxy_host && data.proxy_port)
+            ? `${data.proxy_host}:${data.proxy_port}`
+            : ((db.host && db.port) ? `${db.host}:${db.port}` : (db.host || '—'));
 
         closeDbRequestDetailsModal();
         const modal = document.createElement('div');
@@ -1938,7 +2115,7 @@ async function viewDbRequestDetails(requestId) {
               <div class="db-modal-grid">
                 <div><strong>Status:</strong> <span class="badge">${escapeHtml(status)}</span></div>
                 <div><strong>Engine:</strong> ${escapeHtml(String(db.engine || data.engine || '—'))}</div>
-                <div><strong>Endpoint:</strong> <code>${escapeHtml(endpoint)}</code></div>
+                <div><strong>Proxy Endpoint:</strong> <code>${escapeHtml(proxyEndpoint)}</code></div>
                 <div><strong>Database(s):</strong> ${escapeHtml(dbNames)}</div>
                 <div><strong>Selected Queries:</strong> ${escapeHtml(permsText)}</div>
                 <div><strong>Role:</strong> ${escapeHtml(role)}</div>
@@ -2011,10 +2188,13 @@ async function refreshApprovedDatabases() {
             const effectiveAuth = String(db.effective_auth || 'password').toLowerCase();
             const userDisplay = effectiveAuth === 'iam'
                 ? `<span class="badge">IAM token</span>`
-                : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || db.db_username || '')}</code>`;
+                : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`;
             const actionBtn = effectiveAuth === 'iam'
-                ? `<button class="btn-secondary btn-sm" onclick="alert('IAM auth is enabled. After approval, NPAMX assigns DB connect access via an Identity Center permission set. Use IAM token authentication to connect.')"><i class="fas fa-circle-info"></i> IAM Info</button>`
-                : `<button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> Connect & Run Queries</button>`;
+                ? `<button class="btn-secondary btn-sm" onclick="alert('IAM auth is enabled for this request. Use IAM token authentication via the approved permission set.')"><i class="fas fa-circle-info"></i> IAM Info</button>`
+                : `
+                    <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
+                    <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> External Tool</button>
+                `;
             return `<tr>
                 <td>${db.engine}</td>
                 <td><strong>${db.host}:${db.port}</strong></td>
