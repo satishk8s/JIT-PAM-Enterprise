@@ -214,6 +214,11 @@ async function renderDbStepContent() {
                                     data-host="${escapeAttr(inst.host)}"
                                     data-port="${escapeAttr(inst.port || 3306)}"
                                     data-engine="${escapeAttr(eng)}"
+                                    data-auth-mode="${escapeAttr(inst.auth_mode || '')}"
+                                    data-iam-auth-enabled="${escapeAttr(String(!!inst.iam_auth_enabled))}"
+                                    data-password-auth-enabled="${escapeAttr(String(inst.password_auth_enabled !== false))}"
+                                    data-db-resource-id="${escapeAttr(inst.db_resource_id || '')}"
+                                    data-region="${escapeAttr(inst.region || '')}"
                                     data-search="${searchText}"
                                 >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | ${escapeHtml(inst.host)}:${escapeHtml(String(inst.port || 3306))}</option>`;
                             }).join('')}
@@ -487,7 +492,12 @@ function onDbStepInstanceSelect(radio) {
         name: radio.getAttribute('data-name'),
         host: radio.getAttribute('data-host'),
         port: radio.getAttribute('data-port') || 3306,
-        engine: radio.getAttribute('data-engine')
+        engine: radio.getAttribute('data-engine'),
+        auth_mode: radio.getAttribute('data-auth-mode') || '',
+        iam_auth_enabled: String(radio.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
+        password_auth_enabled: String(radio.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
+        db_resource_id: radio.getAttribute('data-db-resource-id') || '',
+        region: radio.getAttribute('data-region') || ''
     };
 }
 
@@ -668,7 +678,12 @@ async function dbStepNext() {
                     name: selectedOption.getAttribute('data-name'),
                     host: selectedOption.getAttribute('data-host'),
                     port: selectedOption.getAttribute('data-port') || 3306,
-                    engine: selectedOption.getAttribute('data-engine')
+                    engine: selectedOption.getAttribute('data-engine'),
+                    auth_mode: selectedOption.getAttribute('data-auth-mode') || '',
+                    iam_auth_enabled: String(selectedOption.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
+                    password_auth_enabled: String(selectedOption.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
+                    db_resource_id: selectedOption.getAttribute('data-db-resource-id') || '',
+                    region: selectedOption.getAttribute('data-region') || ''
                 };
             } else {
                 if (!manualHost) {
@@ -864,8 +879,14 @@ function buildDbAiContext() {
             name: selectedInstance.name || '',
             host: selectedInstance.host || '',
             port: selectedInstance.port || '',
-            engine: selectedInstance.engine || selectedEngine?.engine || ''
+            engine: selectedInstance.engine || selectedEngine?.engine || '',
+            auth_mode: selectedInstance.auth_mode || '',
+            iam_auth_enabled: !!selectedInstance.iam_auth_enabled,
+            password_auth_enabled: selectedInstance.password_auth_enabled !== false,
+            db_resource_id: selectedInstance.db_resource_id || '',
+            region: selectedInstance.region || ''
         } : null,
+        region: selectedInstance?.region || '',
         databases
     };
 }
@@ -944,6 +965,14 @@ async function sendDbAiMessage() {
                 if (data.suggested_role) {
                     dbRequestDraft.role = data.suggested_role;
                 }
+            }
+            if (data.recommended_auth) {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft.preferred_auth = data.recommended_auth;
+            }
+            if (data.auth_mode) {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft.auth_mode = data.auth_mode;
             }
         }
         chat.scrollTop = chat.scrollHeight;
@@ -1052,12 +1081,15 @@ async function submitDbRequestViaAi() {
         if (dbName) databases[0].name = dbName;
     }
     try {
+        const inst = dbRequestDraft?._selectedInstance || {};
         const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 databases,
                 account_id: accountId,
+                region: inst.region || '',
+                db_instance_id: inst.id || '',
                 user_email: userEmail,
                 user_full_name: fullName,
                 db_username: userEmail.split('@')[0],
@@ -1065,6 +1097,7 @@ async function submitDbRequestViaAi() {
                 role: dbRequestDraft.role || 'custom',
                 duration_hours: dbRequestDraft.duration_hours || 2,
                 justification,
+                preferred_auth: dbRequestDraft.preferred_auth || '',
                 conversation_id: dbConversationId
             })
         });
@@ -1216,16 +1249,21 @@ async function refreshApprovedDatabases() {
         tbody.innerHTML = data.databases.map(db => {
             const requestId = (db.request_id || '').replace(/'/g, "\\'");
             const dbName = (db.db_name || db.engine || '').replace(/'/g, "\\'");
+            const effectiveAuth = String(db.effective_auth || 'password').toLowerCase();
+            const userDisplay = effectiveAuth === 'iam'
+                ? `<span class="badge">IAM token</span>`
+                : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || db.db_username || '')}</code>`;
+            const actionBtn = effectiveAuth === 'iam'
+                ? `<button class="btn-secondary btn-sm" onclick="alert('IAM auth is enabled. After approval, NPAMX assigns DB connect access via an Identity Center permission set. Use IAM token authentication to connect.')"><i class="fas fa-circle-info"></i> IAM Info</button>`
+                : `<button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> Connect & Run Queries</button>`;
             return `<tr>
                 <td>${db.engine}</td>
                 <td><strong>${db.host}:${db.port}</strong></td>
-                <td><code>${db.db_username}</code></td>
+                <td>${userDisplay}</td>
                 <td><span class="badge">${roleLabel(db.role)}</span></td>
                 <td>${new Date(db.expires_at).toLocaleString()}</td>
                 <td>
-                    <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')">
-                        <i class="fas fa-terminal"></i> Connect & Run Queries
-                    </button>
+                    ${actionBtn}
                 </td>
             </tr>`;
         }).join('');

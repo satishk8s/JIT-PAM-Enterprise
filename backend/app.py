@@ -683,6 +683,81 @@ def create_custom_permission_set(name, permissions_data):
         print(f"Permission set creation error: {e}")
         return {'error': str(e)}
 
+def _ensure_account_config_key(account_id):
+    account_id = str(account_id or '').strip()
+    if not account_id:
+        return account_id
+    if account_id in CONFIG.get('accounts', {}):
+        return account_id
+    for key, info in CONFIG.get('accounts', {}).items():
+        if str(info.get('id') or '').strip() == account_id:
+            return key
+    CONFIG.setdefault('accounts', {})[account_id] = {
+        'id': account_id,
+        'name': f'Account-{account_id}',
+        'environment': 'nonprod'
+    }
+    return account_id
+
+def _resolve_effective_auth_choice(preferred_auth, auth_profile):
+    preferred = _normalize_auth_choice(preferred_auth)
+    mode = str((auth_profile or {}).get('auth_mode') or 'password_only')
+    if mode == 'iam_only':
+        return 'iam'
+    if mode == 'password_only':
+        return 'password'
+    if preferred in ('iam', 'password'):
+        return preferred
+    return 'password'
+
+def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_name, duration_hours, auth_profile, request_id):
+    """Create DB Connect permission set and assign it to user for IAM DB auth flow."""
+    try:
+        account_key = _ensure_account_config_key(account_id)
+        account_number = CONFIG['accounts'][account_key]['id']
+        region = str((auth_profile or {}).get('region') or os.getenv('AWS_REGION') or 'ap-south-1')
+        db_resource_id = str((auth_profile or {}).get('db_resource_id') or '').strip()
+        if not db_resource_id:
+            return {'error': 'DB resource ID not available for IAM DB connect policy generation.'}
+        safe_user = str(user_email or '').split('@')[0].replace('.', '')[:8] or 'user'
+        ps_name = f"NPAMX_DB_{account_number[-6:]}_{safe_user}_{str(request_id)[:6]}"
+        session_hours = max(1, min(int(duration_hours or 2), 12))
+        db_connect_arn = f"arn:aws:rds-db:{region}:{account_number}:dbuser:{db_resource_id}/{db_username}"
+        permissions_data = {
+            'description': f'NPAMX DB connect access for {db_name} ({region})',
+            'actions': ['rds-db:connect'],
+            'resources': [db_connect_arn]
+        }
+        ps_result = create_custom_permission_set(ps_name, permissions_data)
+        if 'error' in ps_result:
+            return {'error': f"Permission set creation failed: {ps_result['error']}"}
+        # Best-effort duration alignment for IAM session
+        try:
+            sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
+            sso_admin.update_permission_set(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                PermissionSetArn=ps_result['arn'],
+                SessionDuration=f"PT{session_hours}H",
+                Description=permissions_data['description']
+            )
+        except Exception:
+            pass
+        grant_result = grant_access({
+            'user_email': user_email,
+            'account_id': account_key,
+            'permission_set': ps_result['arn']
+        })
+        if 'error' in grant_result:
+            return {'error': f"Permission set assignment failed: {grant_result['error']}"}
+        return {
+            'permission_set_arn': ps_result['arn'],
+            'permission_set_name': ps_name,
+            'db_connect_arn': db_connect_arn,
+            'assignment_status': grant_result.get('status', 'CREATED')
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
 @app.route('/health')
 @app.route('/api/health')
 def health():
@@ -1379,6 +1454,8 @@ def get_database_requests():
             'status': ui_status,
             'databases': req.get('databases', []),
             'role': req.get('role', 'read_only'),
+            'effective_auth': req.get('effective_auth', 'password'),
+            'auth_mode': req.get('auth_mode', 'password_only'),
             'duration_hours': req.get('duration_hours', 2),
             'justification': req.get('justification', ''),
             'created_at': req.get('created_at', ''),
@@ -1608,42 +1685,69 @@ def approve_request(request_id):
         if required.issubset(received):
             access_request['status'] = 'approved'
             access_request['approved_at'] = datetime.now().isoformat()
-            # Create DB user (same as auto-approved flow)
-            admin_user = os.getenv('DB_ADMIN_USER', 'admin')
-            admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
-            role = access_request.get('role', 'read_only')
-            if role == 'admin':
-                sql_perms = 'ALL PRIVILEGES'
-            elif role == 'read_full_write':
-                sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
-            elif role == 'read_limited_write':
-                sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
-            else:
-                sql_perms = 'SELECT'
+            effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
             create_error = None
-            pwd = access_request.get('db_password') or generate_password()
-            access_request['db_password'] = pwd
-            for db in access_request.get('databases', []):
-                result = create_database_user(
-                    host=db['host'],
-                    port=int(db.get('port', 3306)),
-                    admin_user=admin_user,
-                    admin_password=admin_password,
-                    new_user=access_request.get('db_username'),
-                    new_password=pwd,
-                    database=db.get('name', ''),
-                    permissions=sql_perms
+            if effective_auth == 'iam':
+                profile = {
+                    'auth_mode': access_request.get('auth_mode', 'iam_and_password'),
+                    'region': access_request.get('db_region', os.getenv('AWS_REGION') or 'ap-south-1'),
+                    'db_resource_id': access_request.get('db_resource_id', ''),
+                    'instance_id': access_request.get('db_instance_id', '')
+                }
+                assignment = _create_and_assign_dbconnect_access(
+                    user_email=access_request.get('user_email'),
+                    account_id=access_request.get('account_id'),
+                    db_username=access_request.get('db_username'),
+                    db_name=(access_request.get('databases') or [{}])[0].get('name', 'database'),
+                    duration_hours=access_request.get('duration_hours', 2),
+                    auth_profile=profile,
+                    request_id=request_id
                 )
-                if result.get('error'):
-                    create_error = result['error']
-                    break
-            if create_error:
-                access_request['status'] = 'failed'
-                return jsonify({'status': 'failed', 'error': f'DB user creation failed: {create_error}'})
+                if assignment.get('error'):
+                    access_request['status'] = 'failed'
+                    return jsonify({'status': 'failed', 'error': f"IAM DB access assignment failed: {assignment['error']}"})
+                access_request['iam_permission_set_name'] = assignment.get('permission_set_name', '')
+                access_request['iam_permission_set_arn'] = assignment.get('permission_set_arn', '')
+                access_request['db_connect_arn'] = assignment.get('db_connect_arn', '')
+            else:
+                # Password flow: create DB user and temporary password
+                admin_user = os.getenv('DB_ADMIN_USER', 'admin')
+                admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
+                role = access_request.get('role', 'read_only')
+                if role == 'admin':
+                    sql_perms = 'ALL PRIVILEGES'
+                elif role == 'read_full_write':
+                    sql_perms = 'SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE'
+                elif role == 'read_limited_write':
+                    sql_perms = 'SELECT, INSERT, UPDATE, DELETE'
+                else:
+                    sql_perms = 'SELECT'
+                pwd = access_request.get('db_password') or generate_password()
+                access_request['db_password'] = pwd
+                for db in access_request.get('databases', []):
+                    result = create_database_user(
+                        host=db['host'],
+                        port=int(db.get('port', 3306)),
+                        admin_user=admin_user,
+                        admin_password=admin_password,
+                        new_user=access_request.get('db_username'),
+                        new_password=pwd,
+                        database=db.get('name', ''),
+                        permissions=sql_perms
+                    )
+                    if result.get('error'):
+                        create_error = result['error']
+                        break
+                if create_error:
+                    access_request['status'] = 'failed'
+                    return jsonify({'status': 'failed', 'error': f'DB user creation failed: {create_error}'})
             _save_requests()
+            approved_msg = '✅ Database access approved! Go to Databases tab to connect.'
+            if effective_auth == 'iam':
+                approved_msg = '✅ Database IAM access approved! Use IAM token flow from My Requests in Databases.'
             return jsonify({
                 'status': 'approved',
-                'message': '✅ Database access approved! Go to Databases tab to connect.'
+                'message': approved_msg
             })
         return jsonify({'status': 'partial_approval', 'message': 'More approvals needed', 'pending': list(required - received)})
     
@@ -3697,6 +3801,125 @@ from vault_manager import VaultManager
 # Database AI conversation storage
 db_conversations = {}
 
+def _mask_secret(value, visible=2):
+    raw = str(value or '')
+    if not raw:
+        return ''
+    if len(raw) <= visible:
+        return '*' * len(raw)
+    return raw[:visible] + ('*' * max(4, len(raw) - visible))
+
+def _normalize_auth_choice(value):
+    v = str(value or '').strip().lower()
+    if v in ('iam', 'iam_token', 'token', 'identity_center'):
+        return 'iam'
+    if v in ('password', 'pwd', 'vault_password'):
+        return 'password'
+    return ''
+
+def _apply_auth_mode_override_from_tags(base_mode, tags):
+    mode = base_mode
+    for tag in tags or []:
+        key = str(tag.get('Key') or '').strip().lower()
+        val = str(tag.get('Value') or '').strip().lower()
+        if key in ('npamx:auth-mode', 'npamx-auth-mode', 'auth-mode'):
+            if val in ('iam_only', 'iam'):
+                return 'iam_only'
+            if val in ('password_only', 'password'):
+                return 'password_only'
+            if val in ('iam_and_password', 'both', 'dual'):
+                return 'iam_and_password'
+    return mode
+
+def _compute_auth_mode(iam_enabled, password_enabled):
+    if iam_enabled and password_enabled:
+        return 'iam_and_password'
+    if iam_enabled:
+        return 'iam_only'
+    return 'password_only'
+
+def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
+    """Resolve RDS auth capabilities from AWS metadata. Returns safe defaults on failure."""
+    profile = {
+        'instance_id': instance_id or '',
+        'host': host or '',
+        'region': region or 'ap-south-1',
+        'engine': '',
+        'db_resource_id': '',
+        'iam_auth_enabled': False,
+        'password_auth_enabled': True,
+        'auth_mode': 'password_only',
+        'source': 'default',
+        'error': None
+    }
+    try:
+        rds = boto3.client('rds', region_name=profile['region'], config=AWS_CONFIG)
+        instance = None
+        if instance_id and str(instance_id).lower() != 'manual':
+            try:
+                response = rds.describe_db_instances(DBInstanceIdentifier=instance_id)
+                items = response.get('DBInstances', [])
+                if items:
+                    instance = items[0]
+            except Exception:
+                instance = None
+        if not instance:
+            response = rds.describe_db_instances()
+            for item in response.get('DBInstances', []):
+                item_id = str(item.get('DBInstanceIdentifier') or '')
+                item_host = str((item.get('Endpoint') or {}).get('Address') or '')
+                if (instance_id and item_id == str(instance_id)) or (host and item_host == str(host)):
+                    instance = item
+                    break
+        if not instance:
+            profile['source'] = 'not_found'
+            return profile
+
+        iam_enabled = bool(instance.get('IAMDatabaseAuthenticationEnabled'))
+        # For RDS engines in scope, password auth remains available unless explicitly disabled by policy/tag.
+        password_enabled = True
+        auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
+        arn = instance.get('DBInstanceArn')
+        if arn:
+            try:
+                tags = rds.list_tags_for_resource(ResourceName=arn).get('TagList', [])
+                auth_mode = _apply_auth_mode_override_from_tags(auth_mode, tags)
+            except Exception:
+                pass
+
+        profile.update({
+            'instance_id': str(instance.get('DBInstanceIdentifier') or instance_id or ''),
+            'host': str((instance.get('Endpoint') or {}).get('Address') or host or ''),
+            'engine': str(instance.get('Engine') or ''),
+            'db_resource_id': str(instance.get('DbiResourceId') or ''),
+            'iam_auth_enabled': auth_mode in ('iam_only', 'iam_and_password'),
+            'password_auth_enabled': auth_mode in ('password_only', 'iam_and_password'),
+            'auth_mode': auth_mode,
+            'source': 'rds_metadata'
+        })
+        return profile
+    except Exception as e:
+        profile['error'] = str(e)
+        profile['source'] = 'error'
+        return profile
+
+def _auth_mode_user_hint(profile):
+    mode = str((profile or {}).get('auth_mode') or 'password_only')
+    if mode == 'iam_only':
+        return (
+            "This RDS instance is IAM-auth based. NPAMX will prepare DB connect access via backend and Vault, "
+            "and you can use IAM token authentication after approval."
+        )
+    if mode == 'iam_and_password':
+        return (
+            "This RDS instance supports both IAM token and password auth. "
+            "Tell me your preferred method and I will prepare the right request."
+        )
+    return (
+        "This RDS instance is password-auth based for NPAMX workflow. "
+        "After approval, temporary credentials will be available in My Requests under Database Access."
+    )
+
 @app.route('/api/databases/ai-chat', methods=['POST'])
 def database_ai_chat():
     """AI chat for database access requests."""
@@ -3715,9 +3938,49 @@ def database_ai_chat():
         context_hosts = [str(d.get('host')).strip() for d in context_databases if d.get('host')]
         selected_instance = chat_context.get('selected_instance') if isinstance(chat_context.get('selected_instance'), dict) else {}
         selected_instance_name = str(selected_instance.get('name') or selected_instance.get('id') or '').strip()
+        selected_instance_id = str(selected_instance.get('id') or '').strip()
+        selected_host = str(selected_instance.get('host') or '').strip() or (context_hosts[0] if context_hosts else '')
+        context_region = str(
+            chat_context.get('region')
+            or selected_instance.get('region')
+            or os.getenv('AWS_REGION')
+            or os.getenv('AWS_DEFAULT_REGION')
+            or 'ap-south-1'
+        ).strip()
+        context_auth_mode = str(chat_context.get('auth_mode') or selected_instance.get('auth_mode') or '').strip().lower()
+        context_iam_enabled = selected_instance.get('iam_auth_enabled')
+        context_password_enabled = selected_instance.get('password_auth_enabled')
         
         if not message:
             return jsonify({'error': 'Message required'}), 400
+
+        auth_profile = {
+            'instance_id': selected_instance_id,
+            'host': selected_host,
+            'region': context_region,
+            'engine': str(selected_instance.get('engine') or context_engine_label or ''),
+            'db_resource_id': str(selected_instance.get('db_resource_id') or ''),
+            'iam_auth_enabled': bool(context_iam_enabled) if context_iam_enabled is not None else False,
+            'password_auth_enabled': bool(context_password_enabled) if context_password_enabled is not None else True,
+            'auth_mode': context_auth_mode or '',
+            'source': 'chat_context',
+            'error': None
+        }
+        if not auth_profile.get('auth_mode'):
+            if selected_instance_id or selected_host:
+                auth_profile = _resolve_rds_auth_profile(
+                    instance_id=selected_instance_id or None,
+                    host=selected_host or None,
+                    region=context_region
+                )
+            else:
+                auth_profile['auth_mode'] = _compute_auth_mode(
+                    auth_profile['iam_auth_enabled'],
+                    auth_profile['password_auth_enabled']
+                )
+        if not auth_profile.get('auth_mode'):
+            auth_profile['auth_mode'] = 'password_only'
+        auth_profile['preferred_auth'] = _normalize_auth_choice(chat_context.get('preferred_auth') or '')
         
         # Prompt injection guard - validate before sending to AI (skip if module missing)
         try:
@@ -3763,12 +4026,113 @@ def database_ai_chat():
             has_execution = any(marker in msg_lower for marker in execution_markers)
             return has_destructive and has_target and has_execution
 
+        def is_credential_flow_question(msg):
+            msg_lower = (msg or '').lower()
+            credential_words = ['credential', 'credentials', 'creds', 'username', 'password', 'token']
+            asks_who = any(x in msg_lower for x in ['who will', 'who can', 'who gives', 'who provide', 'who provides', 'where do i get'])
+            asks_direct = any(x in msg_lower for x in ['who will give creds', 'who will give credentials', 'who will give me creds'])
+            return (asks_who and any(w in msg_lower for w in credential_words)) or asks_direct
+
+        def is_db_connection_execution_request(msg):
+            msg_lower = (msg or '').lower()
+            connect_words = ['connect', 'login', 'log in', 'run query', 'execute query', 'check tables', 'count tables', 'show tables', 'list tables']
+            db_words = ['db', 'database', 'rds', 'instance', 'schema', 'mydb']
+            asks_assistant = any(x in msg_lower for x in ['i want you to', 'can you', 'please', 'for me', 'right now'])
+            return asks_assistant and any(x in msg_lower for x in connect_words) and any(x in msg_lower for x in db_words)
+
+        def is_auth_mode_question(msg):
+            msg_lower = (msg or '').lower()
+            return any(x in msg_lower for x in [
+                'auth mode', 'authentication', 'iam auth', 'password auth', 'token auth',
+                'which auth', 'supports iam', 'supports password', 'iam enabled'
+            ])
+
+        def asks_for_password_path(msg):
+            msg_lower = (msg or '').lower()
+            return any(x in msg_lower for x in [
+                'need password', 'want password', 'give password', 'provide password', 'share password',
+                'password login', 'password based'
+            ])
+
+        def asks_for_iam_path(msg):
+            msg_lower = (msg or '').lower()
+            return any(x in msg_lower for x in [
+                'use iam', 'iam token', 'token login', 'identity center', 'sso token', 'db connect permission'
+            ])
+
+        def has_access_hint(msg):
+            msg_lower = (msg or '').lower()
+            return any(x in msg_lower for x in [
+                'read', 'write', 'select', 'show', 'describe', 'insert', 'update', 'delete',
+                'create', 'alter', 'drop', 'truncate', 'grant', 'revoke', 'admin', 'debug',
+                'troubleshoot', 'investigate', 'migration', 'schema'
+            ])
+
+        def has_duration_hint(msg):
+            msg_lower = (msg or '').lower()
+            return bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower))
+
+        def has_business_reason_hint(msg):
+            msg_lower = (msg or '').lower()
+            return any(x in msg_lower for x in [
+                'because', 'for', 'to fix', 'to debug', 'to investigate', 'incident', 'issue', 'error',
+                'outage', 'ticket', 'bug', 'release', 'deployment', 'audit', 'compliance', 'report',
+                'validation', 'verification', 'root cause', 'rca'
+            ])
+
+        def build_request_only_followup(msg):
+            msg_lower = (msg or '').lower().strip()
+            access = has_access_hint(msg_lower)
+            duration = has_duration_hint(msg_lower)
+            business = has_business_reason_hint(msg_lower)
+
+            if is_credential_flow_question(msg_lower):
+                return _auth_mode_user_hint(auth_profile) + " Share required access, business reason, and duration so I can prepare your request."
+            if is_auth_mode_question(msg_lower):
+                return _auth_mode_user_hint(auth_profile)
+            if asks_for_password_path(msg_lower):
+                if auth_profile.get('auth_mode') == 'iam_only':
+                    return "This instance is IAM-auth based, so password flow is not used for NPAMX. Share required access, business reason, and duration, and I will prepare IAM access request."
+                return "Password flow is supported. After approvals, temporary credentials will appear in My Requests under Database Access."
+            if asks_for_iam_path(msg_lower):
+                if auth_profile.get('auth_mode') == 'password_only':
+                    return "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
+                return "IAM flow is supported. After approvals, NPAMX will prepare DB connect access; you can use IAM token authentication."
+            if is_db_connection_execution_request(msg_lower):
+                return "I cannot connect to databases from chat. Tell me required access, business reason, and duration, and I will prepare the request for backend/Vault provisioning."
+            if access and duration and business:
+                return "Perfect, I have required access, business reason, and duration. Please click Submit for Approval so backend and Vault can provision temporary DB access."
+            if not access and not duration and not business:
+                return "I can help place your DB access request. Tell me required access, business reason, and duration."
+            if not access:
+                return "What exact DB access do you need (for example read, write, or schema change)?"
+            if not business:
+                return "What business reason should I include for this access request?"
+            if not duration:
+                return "How long do you need this access (for example 2h, 4h, or 8h)?"
+            return "I can prepare your request now. Please confirm and click Submit for Approval."
+
+        def recommended_auth_for_message(msg):
+            mode = str(auth_profile.get('auth_mode') or 'password_only')
+            if mode == 'iam_only':
+                return 'iam'
+            if mode == 'password_only':
+                return 'password'
+            msg_lower = (msg or '').lower()
+            if asks_for_iam_path(msg_lower):
+                return 'iam'
+            if asks_for_password_path(msg_lower):
+                return 'password'
+            return _normalize_auth_choice(auth_profile.get('preferred_auth') or '')
+
         def asks_for_sensitive_data(text):
             t = str(text or '')
             patterns = [
-                r'(?i)\b(share|provide|send|give|tell)\b[^.?!]{0,60}\b(password|passwd|credential|secret|api key|token)\b',
-                r'(?i)\b(master|db)\s+(username|password)\b',
+                r'(?i)\b(share|provide|send|give|tell)\b[^.?!]{0,80}\b(password|passwd|credential|credentials|secret|api key|token|username)\b',
+                r'(?i)\b(master|db)\s+(user|username|password|credentials?)\b',
                 r'(?i)\bwhat\s+is\s+your\s+password\b',
+                r'(?i)\bi\'?ll\s+need[^.?!]{0,80}\b(credentials?|username|password)\b',
+                r'(?i)\bplease\s+provide[^.?!]{0,80}\b(credentials?|username|password)\b',
             ]
             return any(re.search(p, t) for p in patterns)
 
@@ -3777,8 +4141,24 @@ def database_ai_chat():
             if any(x in t for x in ["i can't", "i cannot", "i can not", "unable to"]):
                 return False
             has_commit = any(x in t for x in ['i can', "i'll", 'i will', 'we can', 'we will'])
-            has_action = any(x in t for x in ['delete', 'drop', 'terminate', 'destroy', 'create', 'modify'])
+            has_action = any(x in t for x in ['delete', 'drop', 'terminate', 'destroy', 'create', 'modify', 'connect', 'run query', 'execute query', 'check tables'])
             return has_commit and has_action
+
+        def claims_direct_db_access(text):
+            t = (text or '').lower()
+            if any(x in t for x in ["i can't", "i cannot", "i can not", "unable to", "do not have", "don't have"]):
+                return False
+            has_commit = any(x in t for x in ['i can', "i'll", 'i will', 'we can', 'we will', "i need to"])
+            has_db_action = any(x in t for x in ['connect', 'log in', 'login', 'run query', 'execute query', 'check tables', 'list tables', 'count tables'])
+            return has_commit and has_db_action
+
+        def violates_request_only_scope(text):
+            t = (text or '').lower()
+            forbidden_guidance = [
+                'open aws console', 'use dbeaver', 'use workbench', 'sql client', 'follow these steps',
+                'step 1', 'step 2', 'run show tables', 'run select', 'execute this query', 'connect using'
+            ]
+            return any(x in t for x in forbidden_guidance)
 
         def infer_permissions_and_role(text):
             text_upper = (text or '').upper()
@@ -3850,17 +4230,13 @@ def database_ai_chat():
                 return "I am here. Tell me the operations and duration, and I will prepare your request."
             if is_out_of_scope_request(msg_lower):
                 return "I can help only with database access in NPAMX. Tell me your DB task and duration."
+            if is_credential_flow_question(msg_lower):
+                return "NPAMX provides temporary credentials after your access request is approved via backend and Vault. Tell me the operations and duration, and I will prepare that request."
+            if is_db_connection_execution_request(msg_lower):
+                return "I cannot directly connect to databases from chat. I can prepare your access request now, and after approval you can run SHOW TABLES or COUNT queries using the temporary credentials."
             if is_destructive_execution_request(msg_lower):
                 return "I cannot execute destructive actions through chat. I can help you submit a controlled access request instead."
-            has_ops = any(x in msg_lower for x in ['read', 'write', 'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'grant', 'revoke'])
-            has_duration = bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower))
-            if has_ops and has_duration:
-                return "Perfect, I captured it. Please click Submit for Approval."
-            if has_ops and not has_duration:
-                return "Got it. How long do you need this access (for example 2h, 4h, or 8h)?"
-            if not has_ops and has_duration:
-                return "Understood. What operations do you need on the selected database?"
-            return "Tell me the required operations and duration, and I will prepare the request."
+            return build_request_only_followup(msg_lower)
 
         message_for_ai = redact_sensitive_content(message)
         shared_secret = message_for_ai != message
@@ -3875,7 +4251,9 @@ def database_ai_chat():
                 'response': ai_response,
                 'conversation_id': conversation_id,
                 'permissions': None,
-                'suggested_role': None
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
             })
 
         if is_destructive_execution_request(message_for_ai):
@@ -3885,7 +4263,63 @@ def database_ai_chat():
                 'response': ai_response,
                 'conversation_id': conversation_id,
                 'permissions': None,
-                'suggested_role': None
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_credential_flow_question(message_for_ai):
+            ai_response = _auth_mode_user_hint(auth_profile) + " Share required access, business reason, and duration, and I will prepare the request."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_auth_mode_question(message_for_ai):
+            ai_response = _auth_mode_user_hint(auth_profile)
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if asks_for_password_path(message_for_ai):
+            if auth_profile.get('auth_mode') == 'iam_only':
+                ai_response = "This instance is IAM-auth based, so password flow is not used for NPAMX. Share required access, business reason, and duration, and I will prepare IAM access request."
+            else:
+                ai_response = "Password flow is supported. After approvals, temporary credentials will be available in My Requests under Database Access."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if asks_for_iam_path(message_for_ai):
+            if auth_profile.get('auth_mode') == 'password_only':
+                ai_response = "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
+            else:
+                ai_response = "IAM flow is supported. After approvals, NPAMX will prepare DB connect access and you can authenticate with IAM token."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
             })
 
         context_lines = []
@@ -3899,6 +4333,8 @@ def database_ai_chat():
             context_lines.append(f"Selected database(s): {', '.join(context_db_names[:5])}")
         if context_hosts:
             context_lines.append(f"Selected endpoint(s): {', '.join(context_hosts[:3])}")
+        if auth_profile.get('auth_mode'):
+            context_lines.append(f"Detected auth mode: {auth_profile.get('auth_mode')}")
         if not context_lines:
             context_lines.append("No DB target is preselected in UI context.")
         context_block = "\n".join(context_lines)
@@ -3920,17 +4356,29 @@ Rules:
 - If user asks something outside database/JIT scope, gently redirect to database assistance in one short sentence.
 - Never ask for usernames, passwords, API keys, tokens, or any secret.
 - If a user shares a secret, tell them not to share secrets and continue without it.
+- You do not have direct DB console/query execution ability; never say you will connect or run queries yourself.
+- If user asks who provides credentials, answer clearly: NPAMX backend + Vault provide temporary credentials after approval.
 - Never claim to directly execute infrastructure changes yourself.
 - For delete/drop/terminate requests against infrastructure, refuse execution and redirect to the approved request workflow.
+- Core job: only help user place a DB JIT request by collecting:
+  1) required access/operations
+  2) business reason
+  3) duration
+- Auth guidance:
+  - If auth mode is `iam_only`, do not suggest password flow.
+  - If auth mode is `password_only`, do not suggest IAM token flow.
+  - If auth mode is `iam_and_password`, ask user preference and proceed accordingly.
+- Do not provide manual runbook or SQL execution steps; keep user focused on request submission workflow.
 - Avoid bullet points, markdown, or template-like wording.
 - Keep tone friendly, brief, and practical.
 
 If details are missing, ask only the next most important missing detail:
 1) operations needed
-2) duration
-3) environment/account (if not already known)
+2) business reason
+3) duration
+4) environment/account (if not already known)
 
-If enough details are available (operations and duration), confirm briefly and ask the user to submit for approval."""
+If enough details are available (operations, business reason, and duration), confirm briefly and ask the user to submit for approval so backend and Vault can provision temporary access."""
 
         bedrock_cfg = ConversationManager.bedrock_config if isinstance(ConversationManager.bedrock_config, dict) else {}
         region = str(
@@ -3991,9 +4439,15 @@ If enough details are available (operations and duration), confirm briefly and a
 
         ai_response = normalize_db_ai_reply(ai_response)
         if asks_for_sensitive_data(ai_response):
-            ai_response = "I will never ask for usernames or passwords in chat. Tell me the operations and duration, and I will prepare your access request."
+            ai_response = "I will never ask for usernames or passwords in chat. Tell me required access, business reason, and duration, and I will prepare your access request."
+        elif claims_direct_db_access(ai_response):
+            ai_response = "I cannot directly connect to databases from chat. I can prepare your access request now, and after approval you can run the required query with temporary credentials."
         elif claims_direct_execution(ai_response):
             ai_response = "I cannot directly execute infrastructure changes. I can help you prepare a controlled JIT access request."
+        elif violates_request_only_scope(ai_response):
+            ai_response = build_request_only_followup(message_for_ai)
+        elif not any(x in ai_response.lower() for x in ['request', 'approval', 'access', 'duration', 'business reason', 'vault', 'backend']):
+            ai_response = build_request_only_followup(message_for_ai)
 
         if not ai_response:
             ai_response = local_guardrailed_fallback(message_for_ai)
@@ -4008,12 +4462,17 @@ If enough details are available (operations and duration), confirm briefly and a
             if m.get('role') == 'user'
         )
         suggested_perms, suggested_role = infer_permissions_and_role(recent_user_text)
+        recommended_auth = recommended_auth_for_message(message_for_ai)
 
         return jsonify({
             'response': ai_response,
             'conversation_id': conversation_id,
             'permissions': suggested_perms if suggested_perms else None,
-            'suggested_role': suggested_role
+            'suggested_role': suggested_role,
+            'auth_mode': auth_profile.get('auth_mode'),
+            'iam_auth_enabled': bool(auth_profile.get('iam_auth_enabled')),
+            'password_auth_enabled': bool(auth_profile.get('password_auth_enabled')),
+            'recommended_auth': recommended_auth
         })
         
     except Exception as e:
@@ -4099,13 +4558,21 @@ def get_databases():
                     if filter_engine and norm_engine != filter_engine:
                         continue
                     display_engine = 'MySQL' if norm_engine == 'mysql' else 'MariaDB' if norm_engine == 'maria' else 'PostgreSQL' if norm_engine == 'postgres' else 'MSSQL' if norm_engine == 'mssql' else 'Aurora'
+                    iam_enabled = bool(db.get('IAMDatabaseAuthenticationEnabled'))
+                    password_enabled = True
+                    auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
                     databases.append({
                         'id': db['DBInstanceIdentifier'],
                         'name': db.get('DBName', db['DBInstanceIdentifier']),
                         'engine': display_engine,
                         'host': host,
                         'port': port,
-                        'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable')
+                        'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable'),
+                        'iam_auth_enabled': iam_enabled,
+                        'password_auth_enabled': password_enabled,
+                        'auth_mode': auth_mode,
+                        'db_resource_id': db.get('DbiResourceId', ''),
+                        'region': region
                     })
                 # Sort by engine, then id
                 databases.sort(key=lambda x: (x['engine'], x['id']))
@@ -4148,6 +4615,20 @@ def request_database_access():
         use_vault = data.get('use_vault', False)
         ai_generated = data.get('ai_generated', False)
         role = (data.get('role') or 'custom').strip().lower()  # custom or named role
+        preferred_auth = _normalize_auth_choice(data.get('preferred_auth'))
+        requested_region = str(data.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
+        selected_instance_id = str(data.get('db_instance_id') or '').strip()
+
+        if not databases:
+            return jsonify({'error': 'At least one database target is required'}), 400
+
+        first_db = databases[0] if isinstance(databases[0], dict) else {}
+        auth_profile = _resolve_rds_auth_profile(
+            instance_id=selected_instance_id or str(first_db.get('id') or ''),
+            host=str(first_db.get('host') or ''),
+            region=requested_region
+        )
+        effective_auth = _resolve_effective_auth_choice(preferred_auth, auth_profile)
         
         # Only DROP/TRUNCATE/DDL/ALL require approval; plain DELETE (data) allowed for Limited Write
         perms = (permissions or []) if isinstance(permissions, list) else [p.strip() for p in str(permissions or '').split(',') if p.strip()]
@@ -4177,29 +4658,46 @@ def request_database_access():
             approval_required = ['self']
             approval_message = 'Auto-approved for read/write queries'
         
-        # Try Vault first, fallback to direct creation
+        # Provisioning strategy by auth mode
         vault_lease_id = None
         create_error = None
+        iam_assignment = None
         if status == 'approved':
-            try:
-                vault_creds = VaultManager.create_database_credentials(
-                    db_host=databases[0]['host'],
-                    db_name=databases[0]['name'],
-                    username=db_username,
-                    permissions=permissions,
-                    duration_hours=duration_hours
-                )
-                if vault_creds:
-                    db_username = vault_creds['username']
-                    password = vault_creds['password']
-                    vault_lease_id = vault_creds['lease_id']
-                    print(f"✅ Vault credentials created: {db_username}")
-                else:
+            if effective_auth == 'password':
+                try:
+                    vault_creds = VaultManager.create_database_credentials(
+                        db_host=databases[0]['host'],
+                        db_name=databases[0]['name'],
+                        username=db_username,
+                        permissions=permissions,
+                        duration_hours=duration_hours
+                    )
+                    if vault_creds:
+                        db_username = vault_creds['username']
+                        password = vault_creds['password']
+                        vault_lease_id = vault_creds['lease_id']
+                        print(f"✅ Vault credentials created: {db_username}")
+                    else:
+                        password = generate_password()
+                        print("⚠️ Vault returned None, using direct creation")
+                except Exception as e:
+                    print(f"⚠️ Vault unavailable, using direct creation: {e}")
                     password = generate_password()
-                    print("⚠️ Vault returned None, using direct creation")
-            except Exception as e:
-                print(f"⚠️ Vault unavailable, using direct creation: {e}")
-                password = generate_password()
+            else:
+                password = None
+                iam_assignment = _create_and_assign_dbconnect_access(
+                    user_email=user_email,
+                    account_id=data.get('account_id'),
+                    db_username=db_username,
+                    db_name=databases[0].get('name', 'database'),
+                    duration_hours=duration_hours,
+                    auth_profile=auth_profile,
+                    request_id=request_id
+                )
+                if iam_assignment.get('error'):
+                    create_error = iam_assignment['error']
+                    status = 'failed'
+                    approval_message = f"IAM DB auth setup failed: {create_error}"
         else:
             password = None
         
@@ -4211,6 +4709,14 @@ def request_database_access():
             'user_full_name': user_full_name,
             'db_username': db_username,
             'db_password': password,
+            'requested_auth': preferred_auth or '',
+            'effective_auth': effective_auth,
+            'auth_mode': auth_profile.get('auth_mode'),
+            'iam_auth_enabled': bool(auth_profile.get('iam_auth_enabled')),
+            'password_auth_enabled': bool(auth_profile.get('password_auth_enabled')),
+            'db_instance_id': auth_profile.get('instance_id') or selected_instance_id or databases[0].get('id', ''),
+            'db_resource_id': auth_profile.get('db_resource_id', ''),
+            'db_region': auth_profile.get('region', requested_region),
             'permissions': permissions,
             'query_types': query_types,
             'role': role,
@@ -4221,11 +4727,14 @@ def request_database_access():
             'ai_generated': ai_generated,
             'status': status,
             'approval_required': approval_required,
+            'iam_permission_set_name': (iam_assignment or {}).get('permission_set_name', ''),
+            'iam_permission_set_arn': (iam_assignment or {}).get('permission_set_arn', ''),
+            'db_connect_arn': (iam_assignment or {}).get('db_connect_arn', ''),
             'created_at': datetime.now().isoformat(),
             'expires_at': expires_at.isoformat()
         }
         
-        if status == 'approved' and not vault_lease_id:
+        if status == 'approved' and effective_auth == 'password' and not vault_lease_id:
             admin_user = os.getenv('DB_ADMIN_USER', 'admin')
             admin_password = os.getenv('DB_ADMIN_PASSWORD', 'admin123')
             # Map role to MySQL GRANT permissions. For custom role, honor explicit permission list when provided.
@@ -4270,13 +4779,24 @@ def request_database_access():
         _save_requests()
         # MVP 2: Never return password to client
         msg = approval_message
+        if status == 'approved' and effective_auth == 'iam':
+            ps_name = (iam_assignment or {}).get('permission_set_name', 'NPAMX DB Connect permission set')
+            msg = (
+                f"IAM auth request is ready. {ps_name} has been prepared for account access. "
+                "After approval, use IAM token authentication for database login."
+            )
+        elif status == 'approved' and effective_auth == 'password':
+            msg = "Password auth request is ready. After approval, temporary credentials will be shown in My Requests under Database Access."
         if create_error and status == 'approved':
             msg += f"\n\n⚠️ DB user creation failed ({create_error}). Set DB_ADMIN_USER and DB_ADMIN_PASSWORD to your MySQL root on EC2, then request new access."
         return jsonify({
             'status': status,
             'request_id': request_id,
             'message': msg,
-            'creation_error': create_error if status == 'approved' else None
+            'creation_error': create_error if status in ('approved', 'failed') else None,
+            'auth_mode': auth_profile.get('auth_mode'),
+            'effective_auth': effective_auth,
+            'iam_permission_set_name': (iam_assignment or {}).get('permission_set_name', '')
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -4303,6 +4823,9 @@ def get_approved_databases():
                         pass
                 
                 for db in req.get('databases', []):
+                    effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+                    masked_username = _mask_secret(req.get('db_username', ''), visible=2)
+                    masked_password = _mask_secret(req.get('db_password', ''), visible=1) if effective_auth == 'password' and req.get('db_password') else ''
                     approved_databases.append({
                         'request_id': req_id,
                         'db_name': db['name'],
@@ -4310,7 +4833,17 @@ def get_approved_databases():
                         'host': db['host'],
                         'port': db['port'],
                         'db_username': req['db_username'],
+                        'masked_username': masked_username,
+                        'masked_password': masked_password,
                         'role': req.get('role', 'custom'),
+                        'effective_auth': effective_auth,
+                        'auth_mode': req.get('auth_mode', 'password_only'),
+                        'iam_permission_set_name': req.get('iam_permission_set_name', ''),
+                        'credentials_note': (
+                            'Use IAM token authentication after approval.'
+                            if effective_auth == 'iam'
+                            else 'Temporary username/password available in this request.'
+                        ),
                         'expires_at': req['expires_at']
                     })
         
