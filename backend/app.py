@@ -706,6 +706,9 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
         return 'iam'
     if mode == 'password_only':
         return 'password'
+    if mode == 'iam_and_password' and not preferred:
+        # Prefer IAM by default when available (more secure).
+        return 'iam'
     if preferred in ('iam', 'password'):
         return preferred
     return 'password'
@@ -3907,8 +3910,7 @@ def _auth_mode_user_hint(profile):
     mode = str((profile or {}).get('auth_mode') or 'password_only')
     if mode == 'iam_only':
         return (
-            "This RDS instance is IAM-auth based. NPAMX will prepare DB connect access via backend and Vault, "
-            "and you can use IAM token authentication after approval."
+            "This RDS instance supports IAM database authentication. After approval, NPAMX will show IAM token sign-in steps in My Requests."
         )
     if mode == 'iam_and_password':
         return (
@@ -3916,8 +3918,7 @@ def _auth_mode_user_hint(profile):
             "Tell me your preferred method and I will prepare the right request."
         )
     return (
-        "This RDS instance is password-auth based for NPAMX workflow. "
-        "After approval, temporary credentials will be available in My Requests under Database Access."
+        "This RDS instance uses password-based access in NPAMX. After approval, time-limited credentials will appear in My Requests under Database Access."
     )
 
 @app.route('/api/databases/ai-chat', methods=['POST'])
@@ -4040,6 +4041,72 @@ def database_ai_chat():
             asks_assistant = any(x in msg_lower for x in ['i want you to', 'can you', 'please', 'for me', 'right now'])
             return asks_assistant and any(x in msg_lower for x in connect_words) and any(x in msg_lower for x in db_words)
 
+        def is_approved_channels_question(msg):
+            msg_lower = (msg or '').lower().strip()
+            # Common follow-up in chat threads
+            if re.match(r'^then\s*\??$', msg_lower):
+                return True
+            return any(x in msg_lower for x in [
+                'approved channels', 'approved channel', 'how do i request', 'how to request',
+                'how does jit work', 'jit process', 'request process', 'what is the process',
+                'what next', 'then?', 'then ?', 'then what', 'what should i do next', 'how to place request'
+            ])
+
+        def is_architecture_question(msg):
+            msg_lower = (msg or '').lower().strip()
+            return any(x in msg_lower for x in [
+                'backend architecture', 'architecture', 'system design', 'how is backend built',
+                'microservice', 'microservices', 'data flow', 'design diagram'
+            ])
+
+        def is_vault_question(msg):
+            msg_lower = (msg or '').lower().strip()
+            return 'vault' in msg_lower
+
+        def mentions_internal_components(text):
+            t = (text or '').lower()
+            terms = [
+                'backend', 'backend system', 'microservice', 'microservices', 'proxy', 'vpc', 'security group',
+                'vault', 'hashicorp', 'identity center', 'permission set',
+                'bedrock', 'claude', 'llm', 'implementation'
+            ]
+            return any(x in t for x in terms)
+
+        def user_facing_process_answer():
+            return (
+                "Use NPAMX Databases to chat and click Submit for Approval. "
+                "After approval, check My Requests > Database Access for credentials or IAM token steps."
+            )
+
+        def credential_flow_user_answer(profile):
+            mode = str((profile or {}).get('auth_mode') or 'password_only')
+            if mode == 'iam_only':
+                return (
+                    "You won't get a password for this instance; after approval, My Requests > Database Access shows IAM token sign-in steps. "
+                    "What do you need to do and for how long?"
+                )
+            if mode == 'iam_and_password':
+                return (
+                    "After approval, My Requests > Database Access will show IAM token steps or time-limited credentials (your choice). "
+                    "What do you need to do and for how long?"
+                )
+            return (
+                "After approval, My Requests > Database Access shows time-limited credentials (masked). "
+                "What do you need to do and for how long?"
+            )
+
+        def vault_user_facing_answer(user_msg):
+            msg_lower = (user_msg or '').lower()
+            if 'hashicorp' in msg_lower or 'hashi' in msg_lower:
+                return (
+                    "Yes, NPAMX uses HashiCorp Vault to issue time-limited database access. "
+                    "You never share passwords in chat; after approval, My Requests shows what you need."
+                )
+            return (
+                "Vault is the secure credential system NPAMX uses to issue time-limited database access. "
+                "You never share passwords in chat; after approval, My Requests shows what you need."
+            )
+
         def is_auth_mode_question(msg):
             msg_lower = (msg or '').lower()
             return any(x in msg_lower for x in [
@@ -4087,21 +4154,27 @@ def database_ai_chat():
             business = has_business_reason_hint(msg_lower)
 
             if is_credential_flow_question(msg_lower):
-                return _auth_mode_user_hint(auth_profile) + " Share required access, business reason, and duration so I can prepare your request."
+                return credential_flow_user_answer(auth_profile)
             if is_auth_mode_question(msg_lower):
                 return _auth_mode_user_hint(auth_profile)
+            if is_approved_channels_question(msg_lower):
+                return user_facing_process_answer()
+            if is_vault_question(msg_lower):
+                return vault_user_facing_answer(msg_lower)
+            if is_architecture_question(msg_lower):
+                return "I cannot share internal architecture in this chat. I can help place your DB access request: required access, business reason, and duration."
             if asks_for_password_path(msg_lower):
                 if auth_profile.get('auth_mode') == 'iam_only':
                     return "This instance is IAM-auth based, so password flow is not used for NPAMX. Share required access, business reason, and duration, and I will prepare IAM access request."
-                return "Password flow is supported. After approvals, temporary credentials will appear in My Requests under Database Access."
+                return "Password flow is supported. After approval, time-limited credentials will appear in My Requests under Database Access."
             if asks_for_iam_path(msg_lower):
                 if auth_profile.get('auth_mode') == 'password_only':
                     return "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
-                return "IAM flow is supported. After approvals, NPAMX will prepare DB connect access; you can use IAM token authentication."
+                return "IAM flow is supported. After approval, My Requests will show IAM token sign-in steps."
             if is_db_connection_execution_request(msg_lower):
-                return "I cannot connect to databases from chat. Tell me required access, business reason, and duration, and I will prepare the request for backend/Vault provisioning."
+                return "I cannot connect to databases from chat. Tell me required access, business reason, and duration, and I will prepare the access request."
             if access and duration and business:
-                return "Perfect, I have required access, business reason, and duration. Please click Submit for Approval so backend and Vault can provision temporary DB access."
+                return "Perfect, I have required access, business reason, and duration. Please click Submit for Approval so NPAMX can provision temporary DB access."
             if not access and not duration and not business:
                 return "I can help place your DB access request. Tell me required access, business reason, and duration."
             if not access:
@@ -4156,7 +4229,8 @@ def database_ai_chat():
             t = (text or '').lower()
             forbidden_guidance = [
                 'open aws console', 'use dbeaver', 'use workbench', 'sql client', 'follow these steps',
-                'step 1', 'step 2', 'run show tables', 'run select', 'execute this query', 'connect using'
+                'step 1', 'step 2', 'next steps', 'here are the next steps', '1)', '2)',
+                'run show tables', 'run select', 'execute this query', 'connect using'
             ]
             return any(x in t for x in forbidden_guidance)
 
@@ -4227,25 +4301,22 @@ def database_ai_chat():
             if greeting:
                 return f"Hey hi, I am here. How can I help with {target_hint}?"
             if 'are you there' in msg_lower or 'what happened' in msg_lower:
-                return "I am here. Tell me the operations and duration, and I will prepare your request."
+                return "I am here. Tell me required access, business reason, and duration, and I will prepare your request."
             if is_out_of_scope_request(msg_lower):
                 return "I can help only with database access in NPAMX. Tell me your DB task and duration."
-            if is_credential_flow_question(msg_lower):
-                return "NPAMX provides temporary credentials after your access request is approved via backend and Vault. Tell me the operations and duration, and I will prepare that request."
-            if is_db_connection_execution_request(msg_lower):
-                return "I cannot directly connect to databases from chat. I can prepare your access request now, and after approval you can run SHOW TABLES or COUNT queries using the temporary credentials."
             if is_destructive_execution_request(msg_lower):
                 return "I cannot execute destructive actions through chat. I can help you submit a controlled access request instead."
             return build_request_only_followup(msg_lower)
 
         message_for_ai = redact_sensitive_content(message)
-        shared_secret = message_for_ai != message
+        # Frontend may already redact to [REDACTED] before sending; treat that as a secret-sharing attempt.
+        shared_secret = (message_for_ai != message) or bool(re.search(r'\[\s*redacted\s*\]', message or '', flags=re.IGNORECASE))
 
         # Add sanitized user message to history.
         db_conversations[conversation_id].append({'role': 'user', 'content': message_for_ai})
 
         if shared_secret:
-            ai_response = "Please do not share usernames, passwords, tokens, or keys in chat. NPAMX does not need secrets here, so tell me only the operations and duration."
+            ai_response = "Please do not share usernames, passwords, tokens, or keys in chat. Tell me what you need to do and for how long, and I will prepare your request."
             db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
             return jsonify({
                 'response': ai_response,
@@ -4269,7 +4340,67 @@ def database_ai_chat():
             })
 
         if is_credential_flow_question(message_for_ai):
-            ai_response = _auth_mode_user_hint(auth_profile) + " Share required access, business reason, and duration, and I will prepare the request."
+            ai_response = credential_flow_user_answer(auth_profile)
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_out_of_scope_request(message_for_ai):
+            ai_response = "I can help only with database access in NPAMX. Tell me what you need to do on the selected database and for how long."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_db_connection_execution_request(message_for_ai):
+            ai_response = "I can't connect to or query databases from chat. Tell me what you need to do and for how long, and I'll draft the access request."
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_approved_channels_question(message_for_ai):
+            ai_response = user_facing_process_answer()
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_vault_question(message_for_ai):
+            ai_response = vault_user_facing_answer(message_for_ai)
+            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+            return jsonify({
+                'response': ai_response,
+                'conversation_id': conversation_id,
+                'permissions': None,
+                'suggested_role': None,
+                'auth_mode': auth_profile.get('auth_mode'),
+                'recommended_auth': recommended_auth_for_message(message_for_ai)
+            })
+
+        if is_architecture_question(message_for_ai):
+            ai_response = "I cannot share internal architecture in this chat. I can help place your DB access request: required access, business reason, and duration."
             db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
             return jsonify({
                 'response': ai_response,
@@ -4296,7 +4427,7 @@ def database_ai_chat():
             if auth_profile.get('auth_mode') == 'iam_only':
                 ai_response = "This instance is IAM-auth based, so password flow is not used for NPAMX. Share required access, business reason, and duration, and I will prepare IAM access request."
             else:
-                ai_response = "Password flow is supported. After approvals, temporary credentials will be available in My Requests under Database Access."
+                ai_response = "Password flow is supported. After approval, time-limited credentials will appear in My Requests under Database Access."
             db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
             return jsonify({
                 'response': ai_response,
@@ -4311,7 +4442,7 @@ def database_ai_chat():
             if auth_profile.get('auth_mode') == 'password_only':
                 ai_response = "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
             else:
-                ai_response = "IAM flow is supported. After approvals, NPAMX will prepare DB connect access and you can authenticate with IAM token."
+                ai_response = "IAM flow is supported. After approval, My Requests will show IAM token sign-in steps."
             db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
             return jsonify({
                 'response': ai_response,
@@ -4357,7 +4488,7 @@ Rules:
 - Never ask for usernames, passwords, API keys, tokens, or any secret.
 - If a user shares a secret, tell them not to share secrets and continue without it.
 - You do not have direct DB console/query execution ability; never say you will connect or run queries yourself.
-- If user asks who provides credentials, answer clearly: NPAMX backend + Vault provide temporary credentials after approval.
+- If user asks about credentials, keep it user-facing: after approval, My Requests shows time-limited credentials or IAM token steps.
 - Never claim to directly execute infrastructure changes yourself.
 - For delete/drop/terminate requests against infrastructure, refuse execution and redirect to the approved request workflow.
 - Core job: only help user place a DB JIT request by collecting:
@@ -4368,6 +4499,8 @@ Rules:
   - If auth mode is `iam_only`, do not suggest password flow.
   - If auth mode is `password_only`, do not suggest IAM token flow.
   - If auth mode is `iam_and_password`, ask user preference and proceed accordingly.
+- User-facing communication:
+  - Do not describe internal architecture (backend/proxy/VPC). If asked, politely decline and return to request workflow.
 - Do not provide manual runbook or SQL execution steps; keep user focused on request submission workflow.
 - Avoid bullet points, markdown, or template-like wording.
 - Keep tone friendly, brief, and practical.
@@ -4378,7 +4511,7 @@ If details are missing, ask only the next most important missing detail:
 3) duration
 4) environment/account (if not already known)
 
-If enough details are available (operations, business reason, and duration), confirm briefly and ask the user to submit for approval so backend and Vault can provision temporary access."""
+If enough details are available (operations, business reason, and duration), confirm briefly and ask the user to submit for approval so NPAMX can provision temporary access."""
 
         bedrock_cfg = ConversationManager.bedrock_config if isinstance(ConversationManager.bedrock_config, dict) else {}
         region = str(
@@ -4437,17 +4570,22 @@ If enough details are available (operations, business reason, and duration), con
             print(f"Bedrock chat failed: {bedrock_err}")
             ai_response = local_guardrailed_fallback(message_for_ai)
 
-        ai_response = normalize_db_ai_reply(ai_response)
-        if asks_for_sensitive_data(ai_response):
+        raw_ai_response = ai_response
+        cleaned_ai_response = normalize_db_ai_reply(raw_ai_response)
+        detection_text = f"{raw_ai_response}\n{cleaned_ai_response}"
+
+        if asks_for_sensitive_data(detection_text):
             ai_response = "I will never ask for usernames or passwords in chat. Tell me required access, business reason, and duration, and I will prepare your access request."
-        elif claims_direct_db_access(ai_response):
+        elif claims_direct_db_access(detection_text):
             ai_response = "I cannot directly connect to databases from chat. I can prepare your access request now, and after approval you can run the required query with temporary credentials."
-        elif claims_direct_execution(ai_response):
+        elif claims_direct_execution(detection_text):
             ai_response = "I cannot directly execute infrastructure changes. I can help you prepare a controlled JIT access request."
-        elif violates_request_only_scope(ai_response):
+        elif violates_request_only_scope(detection_text):
             ai_response = build_request_only_followup(message_for_ai)
-        elif not any(x in ai_response.lower() for x in ['request', 'approval', 'access', 'duration', 'business reason', 'vault', 'backend']):
+        elif mentions_internal_components(detection_text) and not any(x in message_for_ai.lower() for x in ['vault', 'architecture', 'hashicorp']):
             ai_response = build_request_only_followup(message_for_ai)
+
+        ai_response = normalize_db_ai_reply(ai_response)
 
         if not ai_response:
             ai_response = local_guardrailed_fallback(message_for_ai)
