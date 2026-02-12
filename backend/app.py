@@ -3699,12 +3699,12 @@ db_conversations = {}
 
 @app.route('/api/databases/ai-chat', methods=['POST'])
 def database_ai_chat():
-    """AI chat for database access requests. Falls back to rule-based when Bedrock unavailable."""
+    """AI chat for database access requests."""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'JSON body required'}), 400
-        message = data.get('message', '')
+        message = str(data.get('message', '')).strip()
         conversation_id = data.get('conversation_id')
         chat_context = data.get('context') if isinstance(data.get('context'), dict) else {}
         context_databases = chat_context.get('databases') if isinstance(chat_context.get('databases'), list) else []
@@ -3713,6 +3713,8 @@ def database_ai_chat():
         context_account = str(chat_context.get('account_id') or '').strip()
         context_db_names = [str(d.get('name')).strip() for d in context_databases if d.get('name')]
         context_hosts = [str(d.get('host')).strip() for d in context_databases if d.get('host')]
+        selected_instance = chat_context.get('selected_instance') if isinstance(chat_context.get('selected_instance'), dict) else {}
+        selected_instance_name = str(selected_instance.get('name') or selected_instance.get('id') or '').strip()
         
         if not message:
             return jsonify({'error': 'Message required'}), 400
@@ -3780,118 +3782,106 @@ def database_ai_chat():
 
             return suggested, role
 
-        def fast_fallback_reply(msg, context=None):
-            msg_lower = (msg or '').lower().strip()
-            context = context if isinstance(context, dict) else {}
-            dbs = context.get('databases') if isinstance(context.get('databases'), list) else []
-            dbs = [d for d in dbs if isinstance(d, dict)]
-            db_names = [str(d.get('name')).strip() for d in dbs if d.get('name')]
-            db_hosts = [str(d.get('host')).strip() for d in dbs if d.get('host')]
-            target_hint = ', '.join(db_names[:2]) or (db_hosts[0] if db_hosts else 'the selected database')
+        context_lines = []
+        if context_engine_label:
+            context_lines.append(f"Engine: {context_engine_label}")
+        if context_account:
+            context_lines.append(f"Account: {context_account}")
+        if selected_instance_name:
+            context_lines.append(f"Selected instance: {selected_instance_name}")
+        if context_db_names:
+            context_lines.append(f"Selected database(s): {', '.join(context_db_names[:5])}")
+        if context_hosts:
+            context_lines.append(f"Selected endpoint(s): {', '.join(context_hosts[:3])}")
+        if not context_lines:
+            context_lines.append("No DB target is preselected in UI context.")
+        context_block = "\n".join(context_lines)
 
-            is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
-            if is_greeting:
-                return f"Hey hi, how are you today? How can I help you with {target_hint}?"
+        system_prompt = f"""You are NPAMX, the database JIT access assistant.
 
-            has_env = any(x in msg_lower for x in ['dev', 'development', 'staging', 'prod', 'production', 'uat'])
-            has_target = bool(db_names or db_hosts) or any(x in msg_lower for x in ['database', ' db ', 'rds', 'endpoint', 'host', 'instance', 'schema', 'cluster'])
-            has_actions = any(x in msg_lower for x in [
-                'read', 'write', 'select', 'insert', 'update', 'delete', 'create', 'alter', 'drop', 'truncate', 'grant', 'revoke', 'admin'
-            ])
-            has_troubleshoot = any(x in msg_lower for x in ['error', 'issue', 'unable', 'failed', 'failure', 'debug', 'troubleshoot', 'problem'])
-            has_duration = bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower) or msg_lower in ('2', '4', '8'))
-
-            if has_actions and has_duration and (has_env or has_target):
-                return "Perfect, I captured that. If this looks right, click Submit for Approval."
-            if has_troubleshoot and has_target and not has_actions:
-                return "Understood. Do you want read/debug access to investigate this issue? Share duration too (2h, 4h, or 8h)."
-            if has_actions and not has_duration:
-                return "Got it. How long do you need this access (for example 2h, 4h, or 8h)?"
-            if has_env and not has_actions:
-                return "Understood. What operations do you need on the DB (for example SELECT, UPDATE, schema changes, or admin)?"
-            if has_target and not has_actions:
-                return "Got it. What operations do you need, and for how long?"
-            return "Share the target DB, required operations, and duration. I'll prepare the request."
-
-        # Fast path: keep latency low for short messages.
-        ai_response = None
-        msg_lower = message.lower().strip()
-        fast_keywords = [
-            'dev', 'staging', 'prod', 'read', 'write', 'select', 'update', 'insert', 'delete',
-            'create', 'alter', 'drop', 'grant', 'revoke', 'database', 'rds', 'hour', '2', '4', '8',
-            'error', 'issue', 'unable', 'failed', 'failure', 'debug', 'troubleshoot', 'problem'
-        ]
-        is_greeting = bool(re.match(r'^(hi|hii|hello|hey|hey there|hello there|good morning|good afternoon|good evening)[\s!.?]*$', msg_lower))
-        if (is_greeting or any(x in msg_lower for x in fast_keywords)) and len(msg_lower) < 90:
-            ai_response = fast_fallback_reply(message, chat_context)
-
-        if not ai_response:
-            # Build compact conversation history for Bedrock.
-            recent_msgs = db_conversations[conversation_id][-8:]
-            history = "\n".join([f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in recent_msgs])
-            context_lines = []
-            if context_engine_label:
-                context_lines.append(f"- Engine: {context_engine_label}")
-            if context_db_names:
-                context_lines.append(f"- Selected databases: {', '.join(context_db_names[:5])}")
-            if context_hosts:
-                context_lines.append(f"- Selected endpoint(s): {', '.join(context_hosts[:3])}")
-            if context_account:
-                context_lines.append(f"- Account: {context_account}")
-            if not context_lines:
-                context_lines.append("- No preselected DB context provided.")
-            context_block = "\n".join(context_lines)
-            prompt = f"""You are NPAMX, a friendly database access assistant in a JIT access platform.
-
-Goal: help users quickly submit a database access request.
-Collect only what is missing:
-- environment/account
-- target database/endpoint
-- requested operations/permissions (free-form; do not force predefined role templates)
-- duration in hours
-
-Known UI context (already selected in the product):
+Current UI context:
 {context_block}
 
-Behavior rules:
-- If UI context already has selected database/endpoint, do not ask for endpoint again unless user asks to change target.
-- If the user describes an application incident/error, infer troubleshooting intent and ask a practical follow-up (for example read checks vs write fix).
-- Understand natural human language and map intent to least required DB operations.
-
-Response style:
-- Keep it concise: max 2 short sentences.
-- Friendly, natural tone (not robotic).
+Rules:
+- Respond naturally and concisely in max 2 short sentences.
 - Ask at most one clarifying question.
-- Do not use bullets or long explanations.
-- If enough details exist, summarize briefly and ask user to click Submit for Approval.
+- Never repeat the same question if the answer is already in chat history or UI context.
+- If database or instance is already selected in UI context, do not ask for it again unless the user asks to change it.
+- Infer intent from plain language (including troubleshooting narratives) and guide the user toward a usable DB access request.
+- If user asks something outside database/JIT scope, gently redirect to database assistance in one short sentence.
+- Avoid bullet points, markdown, or template-like wording.
+- Keep tone friendly and practical, not robotic.
 
-Conversation so far:
-{history}
+When enough details are available (operations and duration), confirm briefly and ask the user to submit for approval."""
 
-Reply to the latest user message only."""
+        bedrock_cfg = ConversationManager.bedrock_config if isinstance(ConversationManager.bedrock_config, dict) else {}
+        region = str(
+            bedrock_cfg.get('aws_region')
+            or os.getenv('AWS_REGION')
+            or os.getenv('AWS_DEFAULT_REGION')
+            or 'ap-south-1'
+        )
+        model_id = str(bedrock_cfg.get('model_id') or 'anthropic.claude-3-sonnet-20240229-v1:0')
+        max_tokens = int(bedrock_cfg.get('max_tokens') or 260)
+        temperature = float(bedrock_cfg.get('temperature') if bedrock_cfg.get('temperature') is not None else 0.4)
 
-            try:
-                bedrock = boto3.client('bedrock-runtime', region_name='ap-south-1', config=AWS_CONFIG)
-                response = bedrock.invoke_model(
-                    modelId='anthropic.claude-3-sonnet-20240229-v1:0',
-                    body=json.dumps({
-                        'anthropic_version': 'bedrock-2023-05-31',
-                        'max_tokens': 260,
-                        'temperature': 0.4,
-                        'messages': [{'role': 'user', 'content': prompt}]
-                    })
-                )
-                result = json.loads(response['body'].read())
-                ai_response = result['content'][0]['text']
-            except Exception as bedrock_err:
-                print(f"Bedrock unavailable ({bedrock_err}), using fallback")
-                ai_response = fast_fallback_reply(message, chat_context)
+        bedrock_client = ConversationManager.bedrock_client
+        if not bedrock_client:
+            bedrock_client = boto3.client('bedrock-runtime', region_name=region, config=AWS_CONFIG)
+
+        chat_messages = []
+        for msg in db_conversations[conversation_id][-12:]:
+            role = msg.get('role')
+            if role not in ('user', 'assistant'):
+                continue
+            content = str(msg.get('content') or '').strip()
+            if not content:
+                continue
+            chat_messages.append({'role': role, 'content': content})
+
+        if not chat_messages or chat_messages[-1].get('role') != 'user':
+            chat_messages.append({'role': 'user', 'content': message})
+
+        try:
+            response = bedrock_client.invoke_model(
+                modelId=model_id,
+                body=json.dumps({
+                    'anthropic_version': 'bedrock-2023-05-31',
+                    'system': system_prompt,
+                    'max_tokens': max_tokens,
+                    'temperature': temperature,
+                    'messages': chat_messages
+                })
+            )
+            result = json.loads(response['body'].read())
+            content_blocks = result.get('content') if isinstance(result, dict) else None
+            if isinstance(content_blocks, list):
+                parts = []
+                for block in content_blocks:
+                    if isinstance(block, dict):
+                        text_part = str(block.get('text') or '').strip()
+                        if text_part:
+                            parts.append(text_part)
+                ai_response = " ".join(parts).strip()
+            else:
+                ai_response = str(result.get('output_text') or '').strip()
+        except Exception as bedrock_err:
+            print(f"Bedrock chat failed: {bedrock_err}")
+            ai_response = "NPAMX is temporarily unavailable. Please retry in a few seconds."
+
+        if not ai_response:
+            ai_response = "I can help with your database access request. Please share the required operations and duration."
 
         # Store assistant response
         db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
 
-        # Infer permissions from user+assistant text without forcing fixed templates.
-        suggested_perms, suggested_role = infer_permissions_and_role(f"{message}\n{ai_response}")
+        # Infer permissions from user intent only (assistant text should not bias this).
+        recent_user_text = "\n".join(
+            str(m.get('content') or '')
+            for m in db_conversations[conversation_id][-10:]
+            if m.get('role') == 'user'
+        )
+        suggested_perms, suggested_role = infer_permissions_and_role(recent_user_text)
 
         return jsonify({
             'response': ai_response,

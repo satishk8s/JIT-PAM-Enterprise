@@ -786,7 +786,7 @@ function initDbAiChat(label, engine) {
         ${dbAssistantAvatar()}
         <div class="db-ai-msg-content">
             <p><strong>Hey hi, how are you today?</strong> How can I help you with ${escapeHtml(label)} database access?</p>
-            <p>Share required actions and duration (2h / 4h / 8h), and I'll prepare your request.</p>
+            <p>Tell me your use case in plain language and I will guide the next steps.</p>
         </div>
     </div>`;
     chat.scrollTop = chat.scrollHeight;
@@ -810,7 +810,7 @@ function initDbChatWithPrompts(label, engine) {
             ${dbAssistantAvatar()}
             <div class="db-ai-msg-content">
                 <p><strong>Great, ${escapeHtml(dbNames)} is selected.</strong></p>
-                <p>Tell NPAMX the exact operations and duration, and I'll prepare the request.</p>
+                <p>Tell me what you want to do, and I will figure out the right access request.</p>
             </div>
         </div>`;
     chat.scrollTop = chat.scrollHeight;
