@@ -777,7 +777,7 @@ function transitionToDbChatUI() {
 }
 
 function dbAssistantAvatar() {
-    return '<div class="db-ai-msg-avatar db-ai-msg-avatar-assistant"><span class="db-ai-avatar-label">NP</span></div>';
+    return '<div class="db-ai-msg-avatar db-ai-msg-avatar-assistant"><i class="fas fa-comments"></i></div>';
 }
 
 function initDbAiChat(label, engine) {
@@ -792,17 +792,8 @@ function initDbAiChat(label, engine) {
     chat.scrollTop = chat.scrollHeight;
     const quickPrompts = document.getElementById('dbAiQuickPrompts');
     if (quickPrompts) {
-        quickPrompts.style.display = 'flex';
-        quickPrompts.innerHTML = `
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need production troubleshooting access for 2 hours.')">
-                <i class="fas fa-bug"></i> Prod troubleshooting 2h
-            </button>
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need deployment-time data and schema changes in staging for 4 hours.')">
-                <i class="fas fa-wrench"></i> Staging changes 4h
-            </button>
-            <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
-                <i class="fas fa-comments"></i> Custom request
-            </button>`;
+        quickPrompts.style.display = 'none';
+        quickPrompts.innerHTML = '';
     }
     document.getElementById('dbAiRequestSummary').style.display = 'none';
     document.getElementById('dbAiActions').style.display = 'none';
@@ -824,17 +815,8 @@ function initDbChatWithPrompts(label, engine) {
         </div>`;
     chat.scrollTop = chat.scrollHeight;
     if (quickPrompts) {
-        quickPrompts.style.display = 'flex';
-        quickPrompts.innerHTML = `
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need query access for production diagnostics for 2 hours.')">
-                <i class="fas fa-magnifying-glass-chart"></i> Diagnostics 2h
-            </button>
-            <button class="db-ai-prompt-btn" onclick="sendDbAiPrompt('Need write and migration permissions in staging for 4 hours.')">
-                <i class="fas fa-database"></i> Write + migration 4h
-            </button>
-            <button class="db-ai-prompt-btn db-ai-prompt-custom" onclick="hideDbQuickPrompts(); document.getElementById('dbAiInput').focus();">
-                <i class="fas fa-comments"></i> Chat with NPAMX
-            </button>`;
+        quickPrompts.style.display = 'none';
+        quickPrompts.innerHTML = '';
     }
     document.getElementById('dbAiRequestSummary').style.display = 'none';
     document.getElementById('dbAiActions').style.display = 'none';
