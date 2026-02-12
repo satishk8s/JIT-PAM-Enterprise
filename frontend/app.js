@@ -424,7 +424,7 @@ function updateSidebarToggleState(collapsed) {
     toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 
     if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
-    if (label) label.textContent = collapsed ? 'Show' : 'Hide';
+    if (label) label.textContent = collapsed ? 'Show Menu' : 'Hide Menu';
 }
 
 function toggleSidebar(e) {

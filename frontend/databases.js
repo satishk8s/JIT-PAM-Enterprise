@@ -776,10 +776,14 @@ function transitionToDbChatUI() {
     initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
 }
 
+function dbMermaidAvatar() {
+    return '<div class="db-ai-msg-avatar db-ai-msg-avatar-mermaid"><span class="db-mermaid-icon" aria-hidden="true">🧜‍♀️</span></div>';
+}
+
 function initDbAiChat(label, engine) {
     const chat = document.getElementById('dbAiChat');
     chat.innerHTML = `<div class="db-ai-msg db-ai-bot db-ai-welcome">
-        <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
+        ${dbMermaidAvatar()}
         <div class="db-ai-msg-content">
             <p><strong>Hi, I'm NPAMX.</strong> I'll help you prepare this ${escapeHtml(label)} request.</p>
             <p>Share environment, what you need to do, and duration (2h / 4h / 8h). I'll ask quick follow-ups only if needed.</p>
@@ -812,7 +816,7 @@ function initDbChatWithPrompts(label, engine) {
     const dbNames = selectedDatabases?.map(d => d.name).join(', ') || 'database';
     chat.innerHTML = `
         <div class="db-ai-msg db-ai-bot db-ai-welcome">
-            <div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div>
+            ${dbMermaidAvatar()}
             <div class="db-ai-msg-content">
                 <p><strong>Great, ${escapeHtml(dbNames)} is selected.</strong></p>
                 <p>Tell NPAMX the exact operations and duration. I'll keep it short.</p>
@@ -889,7 +893,7 @@ async function sendDbAiMessage() {
             chat.innerHTML += `<div class="db-ai-msg db-ai-error"><div class="db-ai-msg-avatar"><i class="fas fa-triangle-exclamation"></i></div><div class="db-ai-msg-content"><p>${escapeHtml(data.error)}</p></div></div>`;
         } else {
             const safeResponse = escapeHtml(data.response || '').replace(/\n/g, '<br>');
-            chat.innerHTML += `<div class="db-ai-msg db-ai-bot"><div class="db-ai-msg-avatar"><i class="fas fa-robot"></i></div><div class="db-ai-msg-content"><p>${safeResponse}</p></div></div>`;
+            chat.innerHTML += `<div class="db-ai-msg db-ai-bot">${dbMermaidAvatar()}<div class="db-ai-msg-content"><p>${safeResponse}</p></div></div>`;
             if (data.permissions || data.suggested_role) {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.permissions && data.permissions.length) {

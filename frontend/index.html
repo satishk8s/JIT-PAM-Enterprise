@@ -24,7 +24,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="enterprise-theme.css?v=10" as="style">
+    <link rel="preload" href="enterprise-theme.css?v=11" as="style">
     <link rel="preload" href="styles.css?v=11" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
@@ -32,7 +32,7 @@
     <link href="instances.css" rel="stylesheet">
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
-    <link href="enterprise-theme.css?v=10" rel="stylesheet">
+    <link href="enterprise-theme.css?v=11" rel="stylesheet">
     <link href="styles.css?v=11" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
@@ -40,7 +40,7 @@
     <link href="unified-assistant.css" rel="stylesheet">
     <link href="workflow-designer.css" rel="stylesheet">
     <link href="vendor-icons.css" rel="stylesheet">
-    <link href="databases.css?v=10" rel="stylesheet">
+    <link href="databases.css?v=11" rel="stylesheet">
     <link href="terminal-page.css?v=3" rel="stylesheet">
     <link href="performance.css?v=12" rel="stylesheet">
 </head>
@@ -302,7 +302,7 @@
                 </nav>
                 <button type="button" class="sidebar-toggle-edge" id="sidebarToggle" onclick="toggleSidebar(event)" title="Hide sidebar" aria-expanded="true">
                     <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
-                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">Hide</span>
+                    <span id="sidebarToggleLabel" class="sidebar-toggle-label">Hide Menu</span>
                 </button>
             </aside>
             <div class="sidebar-expand-fab" id="sidebarExpandFab" onclick="toggleSidebar(event)" title="Show sidebar" style="display: none;">
@@ -993,7 +993,7 @@
                         <div class="db-info-hero-head">
                             <div class="db-info-hero-title">
                                 <h3><i class="fas fa-shield-alt"></i> Database Access (Just-In-Time)</h3>
-                                <p>This platform provides temporary, time-bound database access. NPAMX gathers your intent, prepares the request, and access is revoked automatically after expiry.</p>
+                                <p>Just-In-Time (JIT) database access means no standing access. You raise a request only when needed, get time-bound access after approvals, and access is revoked automatically on expiry.</p>
                             </div>
                             <div class="db-info-badges">
                                 <span class="db-info-pill"><i class="fas fa-bolt"></i> JIT Enforced</span>
@@ -1003,17 +1003,22 @@
                         </div>
                         <div class="db-info-sections">
                             <div class="db-info-section">
-                                <h4>NPAMX Request Guidance</h4>
-                                <p>Describe your task in plain language. NPAMX keeps the chat short and asks follow-up questions only when required.</p>
-                                <p class="db-info-flow"><strong>Conversation flow:</strong> Environment + intent + duration, then submit the generated request.</p>
+                                <h4>How To Place A Request</h4>
+                                <p>Select engine, account, instance, and database name.</p>
+                                <p>Then chat with NPAMX in plain language with required actions and duration, and submit for approval.</p>
+                                <p class="db-info-flow"><strong>Fast path:</strong> Keep your message short: environment + actions + duration.</p>
                             </div>
                             <div class="db-info-section">
-                                <h4>Dynamic Permission Generation</h4>
-                                <p>Permissions are generated from your request context. There are no fixed templates on this page; NPAMX can draft custom permission sets for each task.</p>
-                                <p class="db-info-flow"><strong>Execution path:</strong> NPAMX -> Backend -> Proxy/Vault workflow for time-bound DB access.</p>
+                                <h4>Approval Matrix</h4>
+                                <ul class="db-info-approvals">
+                                    <li><strong>Non-Prod Read:</strong> Auto-approved</li>
+                                    <li><strong>Non-Prod Write (any write action):</strong> Manager approval required</li>
+                                    <li><strong>Production Read and Write:</strong> Manager approval required</li>
+                                    <li><strong>PII Database (Read and Write):</strong> CISO + Manager + DB Owner approvals required</li>
+                                </ul>
                             </div>
                         </div>
-                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to start with NPAMX.</p>
+                        <p class="db-info-footer"><i class="fas fa-arrow-down"></i> <strong>Select the database engine below</strong> to begin your JIT request.</p>
                     </div>
                     <!-- Layout: Tree (left) + Config/AI (right) -->
                     <div class="db-page-body">
@@ -1036,13 +1041,16 @@
                             </div>
                             <div id="dbAiPanel" class="db-ai-panel db-ai-panel-hidden">
                                 <div class="db-ai-header">
-                                    <h3><i class="fas fa-robot"></i> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
+                                    <h3><span class="db-mermaid-icon db-mermaid-header" aria-hidden="true">🧜‍♀️</span> NPAMX — <span id="dbAiEngineLabel">Select an engine</span></h3>
                                     <button class="btn-icon" onclick="closeDbAiPanel()" title="Close"><i class="fas fa-times"></i></button>
                                 </div>
                                 <div id="dbAiChat" class="db-ai-chat"></div>
                                 <div id="dbAiThinking" class="db-ai-thinking" style="display: none;">
-                                    <div class="db-ai-thinking-dots"><span></span><span></span><span></span></div>
-                                    <span>NPAMX is thinking...</span>
+                                    <div class="db-ai-mermaid-thinking" aria-hidden="true">
+                                        <span class="db-ai-mermaid-swimmer">🧜‍♀️</span>
+                                        <span class="db-ai-mermaid-water"></span>
+                                    </div>
+                                    <span>NPAMX mermaid is thinking...</span>
                                 </div>
                                 <div id="dbAiQuickPrompts" class="db-ai-quick-prompts" style="display: none;"></div>
                                 <div class="db-ai-input-row">
@@ -2681,13 +2689,13 @@
     <script src="request-drafts.js"></script>
     <script src="account-tagging.js"></script>
     <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=11"></script>
+    <script src="databases.js?v=12"></script>
     <script src="terminal-page.js?v=7"></script>
     <script src="s3-explorer.js"></script>
     <script src="security-ui-helpers.js?v=2"></script>
     <script src="unified-assistant.js"></script>
     <script src="workflow-designer.js"></script>
-    <script src="app.js?v=11"></script>
+    <script src="app.js?v=12"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

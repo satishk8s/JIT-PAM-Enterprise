@@ -415,6 +415,20 @@
     line-height: 1.5;
 }
 
+.db-info-approvals {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 7px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.db-info-approvals strong {
+    color: var(--text-primary);
+}
+
 .db-info-flow {
     margin-top: 8px !important;
     font-size: 12px !important;
@@ -1136,6 +1150,21 @@
     margin: 0;
     font-size: 15px;
     letter-spacing: 0.01em;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.db-mermaid-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    filter: drop-shadow(0 2px 4px rgba(2, 132, 199, 0.35));
+}
+
+.db-mermaid-header {
+    font-size: 17px;
 }
 
 .db-ai-chat {
@@ -1154,34 +1183,73 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 10px 14px;
+    padding: 11px 14px;
     margin: 0 16px 12px;
-    background: rgba(56, 189, 248, 0.1);
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(14, 165, 233, 0.08) 100%);
     border: 1px solid color-mix(in srgb, var(--border-color) 74%, #38bdf8 26%);
-    border-radius: 12px;
+    border-radius: 14px;
     font-size: 13px;
     color: var(--text-secondary);
 }
 
-.db-ai-thinking-dots {
+.db-ai-mermaid-thinking {
+    position: relative;
+    width: 44px;
+    height: 24px;
     display: flex;
-    gap: 4px;
+    align-items: flex-end;
+    justify-content: center;
 }
 
-.db-ai-thinking-dots span {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--primary-color);
-    animation: db-thinking-bounce 1.4s ease-in-out infinite both;
+.db-ai-mermaid-swimmer {
+    position: relative;
+    z-index: 2;
+    font-size: 18px;
+    line-height: 1;
+    animation: db-mermaid-dive 1.9s ease-in-out infinite;
 }
 
-.db-ai-thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
-.db-ai-thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+.db-ai-mermaid-water {
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    bottom: 1px;
+    height: 10px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(14, 165, 233, 0.7) 0%, rgba(56, 189, 248, 0.9) 50%, rgba(14, 165, 233, 0.7) 100%);
+    overflow: hidden;
+}
 
-@keyframes db-thinking-bounce {
-    0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; }
-    40% { transform: scale(1); opacity: 1; }
+.db-ai-mermaid-water::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: repeating-linear-gradient(120deg, rgba(255, 255, 255, 0.18) 0 7px, transparent 7px 14px);
+    animation: db-wave-shift 1.3s linear infinite;
+}
+
+@keyframes db-mermaid-dive {
+    0%, 100% {
+        transform: translateY(-6px) scale(1);
+        opacity: 1;
+    }
+    35% {
+        transform: translateY(5px) scale(0.95);
+        opacity: 0.76;
+    }
+    55% {
+        transform: translateY(9px) scale(0.92);
+        opacity: 0.62;
+    }
+    78% {
+        transform: translateY(-2px) scale(0.98);
+        opacity: 0.9;
+    }
+}
+
+@keyframes db-wave-shift {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(14px); }
 }
 
 .db-ai-quick-prompts {
@@ -1248,6 +1316,10 @@
     justify-content: center;
     font-size: 13px;
     margin-top: 4px;
+}
+
+.db-ai-msg-avatar-mermaid .db-mermaid-icon {
+    font-size: 18px;
 }
 
 .db-ai-msg-content {
