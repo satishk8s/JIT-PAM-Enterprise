@@ -902,10 +902,15 @@ function getDbRoleLabel(role) {
 
 function shouldShowDbRequestSummary() {
     if (!dbRequestDraft || !selectedEngine || !selectedDatabases?.length) return false;
+    // Only show summary when NPAMX is at the confirmation stage (strict workflow).
+    if (!dbRequestDraft._needsConfirmation && !dbRequestDraft._readyToSubmit) return false;
     const permissionsText = String(dbRequestDraft.permissions || '').trim();
     const role = String(dbRequestDraft.role || '').trim();
     const knownRoles = ['read_only', 'read_limited_write', 'read_full_write', 'admin'];
-    return permissionsText.length > 0 || knownRoles.includes(role);
+    const hasOps = permissionsText.length > 0 || knownRoles.includes(role);
+    const hasReason = String(dbRequestDraft.justification || '').trim().length > 0;
+    const hasDuration = !!(dbRequestDraft.duration_hours || 0);
+    return hasOps && hasReason && hasDuration;
 }
 
 async function sendDbAiMessage() {
@@ -957,6 +962,22 @@ async function sendDbAiMessage() {
         } else {
             const safeResponse = escapeHtml(data.response || '').replace(/\n/g, '<br>');
             chat.innerHTML += `<div class="db-ai-msg db-ai-bot">${dbAssistantAvatar()}<div class="db-ai-msg-content"><p>${safeResponse}</p></div></div>`;
+            if (data.draft && typeof data.draft === 'object') {
+                dbRequestDraft = dbRequestDraft || {};
+                if (data.draft.db_name) dbRequestDraft.db_name = data.draft.db_name;
+                if (data.draft.duration_hours) dbRequestDraft.duration_hours = parseInt(data.draft.duration_hours, 10) || dbRequestDraft.duration_hours;
+                if (data.draft.justification) dbRequestDraft.justification = String(data.draft.justification || '').trim();
+                if (Array.isArray(data.draft.query_types)) dbRequestDraft.query_types = data.draft.query_types;
+            }
+            if (typeof data.needs_confirmation === 'boolean') {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft._needsConfirmation = data.needs_confirmation;
+            }
+            if (typeof data.ready_to_submit === 'boolean') {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft._readyToSubmit = data.ready_to_submit;
+                if (data.ready_to_submit) dbRequestDraft.confirmed_by_user = true;
+            }
             if (data.permissions || data.suggested_role) {
                 dbRequestDraft = dbRequestDraft || {};
                 if (data.permissions && data.permissions.length) {
@@ -973,6 +994,12 @@ async function sendDbAiMessage() {
             if (data.auth_mode) {
                 dbRequestDraft = dbRequestDraft || {};
                 dbRequestDraft.auth_mode = data.auth_mode;
+            }
+            // Strict workflow: only submit after user confirms in chat.
+            if (data.ready_to_submit && !(dbRequestDraft && dbRequestDraft._autoSubmitted)) {
+                dbRequestDraft = dbRequestDraft || {};
+                dbRequestDraft._autoSubmitted = true;
+                await submitDbRequestViaAi({ skipPrompt: true, fromChat: true });
             }
         }
         chat.scrollTop = chat.scrollHeight;
@@ -1014,6 +1041,7 @@ function showDbRequestSummaryIfReady() {
     const role = getDbRoleLabel(dbRequestDraft.role || '');
     const permissionsText = String(dbRequestDraft.permissions || '').trim();
     const duration = dbRequestDraft.duration_hours || 2;
+    const reason = String(dbRequestDraft.justification || '').trim();
     const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
     const operations = permissionsText || (dbRequestDraft.role === 'read_only'
         ? 'SELECT'
@@ -1024,13 +1052,15 @@ function showDbRequestSummaryIfReady() {
                 : dbRequestDraft.role === 'admin'
                     ? 'ALL PRIVILEGES'
                     : 'Custom (NPAMX)');
+    const title = dbRequestDraft._readyToSubmit ? 'Confirmed request' : 'Please confirm this request';
     summary.innerHTML = `
-        <p><strong>Draft ready for approval</strong></p>
+        <p><strong>${escapeHtml(title)}</strong></p>
         <div class="db-ai-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine.label)}</span>
             <span><strong>Databases:</strong> ${escapeHtml(databases)}</span>
             <span><strong>Operations:</strong> ${escapeHtml(operations)}</span>
             <span><strong>Role:</strong> ${escapeHtml(role)}</span>
+            <span><strong>Reason:</strong> ${escapeHtml(reason)}</span>
             <span><strong>Duration:</strong> ${escapeHtml(String(duration))} hour(s)</span>
         </div>`;
     summary.style.display = 'block';
@@ -1049,20 +1079,28 @@ function editDbRequestDuration() {
     }
 }
 
-async function submitDbRequestViaAi() {
+async function submitDbRequestViaAi(opts = {}) {
     if (!selectedEngine || !dbRequestDraft) {
         alert('Please complete the NPAMX conversation first. Select account and database.');
         return;
     }
-    if (!shouldShowDbRequestSummary()) {
-        alert('Please continue chatting with NPAMX so it can finalize required operations before submission.');
+    const skipPrompt = !!opts.skipPrompt;
+    if (!dbRequestDraft._readyToSubmit && !dbRequestDraft.confirmed_by_user) {
+        alert('Please finish the NPAMX chat and confirm the summary by replying Yes before submitting.');
         return;
     }
     const userEmail = localStorage.getItem('userEmail') || 'user@company.com';
     const fullName = (typeof currentUser !== 'undefined' && currentUser && currentUser.name) || localStorage.getItem('userName') || userEmail.split('@')[0].replace(/\./g, ' ');
-    const justification = prompt('Justification (why you need access):', dbRequestDraft.justification || '');
-    if (!justification) return;
-    if (!justification) return;
+    let justification = String(dbRequestDraft.justification || '').trim();
+    if (!justification && !skipPrompt) {
+        justification = prompt('Justification (why you need access):', '') || '';
+        justification = String(justification).trim();
+        if (justification) dbRequestDraft.justification = justification;
+    }
+    if (!justification) {
+        alert('Please provide a short reason in chat (business reason) before submitting.');
+        return;
+    }
     let accountId = dbRequestDraft.account_id || dbRequestDraft.project_id || dbRequestDraft.subscription_id || dbRequestDraft.compartment_id || dbRequestDraft.atlas_project_id || '';
     if (!accountId) {
         const accounts = await fetchAccounts();
@@ -1094,10 +1132,13 @@ async function submitDbRequestViaAi() {
                 user_full_name: fullName,
                 db_username: userEmail.split('@')[0],
                 permissions: dbRequestDraft.permissions || '',
+                query_types: Array.isArray(dbRequestDraft.query_types) ? dbRequestDraft.query_types : [],
                 role: dbRequestDraft.role || 'custom',
                 duration_hours: dbRequestDraft.duration_hours || 2,
                 justification,
                 preferred_auth: dbRequestDraft.preferred_auth || '',
+                ai_generated: true,
+                confirmed_by_user: !!dbRequestDraft.confirmed_by_user,
                 conversation_id: dbConversationId
             })
         });

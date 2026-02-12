@@ -2773,6 +2773,23 @@ def background_cleanup():
                         access_request['revoked_at'] = now.isoformat()
                     except Exception as db_err:
                         print(f"❌ DB revoke error: {db_err}")
+
+            # Cleanup stale in-memory DB chat conversations/state to prevent unbounded growth.
+            try:
+                cutoff = now - timedelta(hours=6)
+                for cid, st in list(db_conversation_states.items()):
+                    ts_str = str(st.get('last_seen') or st.get('created_at') or '')
+                    if not ts_str:
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00').replace('+00:00', ''))
+                    except Exception:
+                        continue
+                    if ts <= cutoff:
+                        db_conversation_states.pop(cid, None)
+                        db_conversations.pop(cid, None)
+            except Exception:
+                pass
         except Exception as e:
             print(f"❌ Background cleanup error: {e}")
 
@@ -3803,6 +3820,8 @@ from vault_manager import VaultManager
 
 # Database AI conversation storage
 db_conversations = {}
+# Tracks structured DB request state across turns (prevents loops, enforces strict flow).
+db_conversation_states = {}
 
 def _mask_secret(value, visible=2):
     raw = str(value or '')
@@ -3999,6 +4018,38 @@ def database_ai_chat():
         elif conversation_id not in db_conversations:
             db_conversations[conversation_id] = []
 
+        # Initialize strict workflow state (per conversation).
+        if conversation_id not in db_conversation_states:
+            db_conversation_states[conversation_id] = {
+                'intent': None,               # 'db_access_request'
+                'purpose': None,              # 'debug_app' | 'inspect_schema' | 'data_fix' | 'schema_change'
+                'db_name': (context_db_names[0] if context_db_names else ''),
+                'instance_id': selected_instance_id or '',
+                'instance_name': selected_instance_name or '',
+                'access_level': None,         # 'read' | 'write' | 'schema_change'
+                'business_reason': None,
+                'duration_hours': None,
+                'awaiting': None,             # which field we are waiting for
+                'suggested_access_level': None,
+                'suggested_duration_hours': None,
+                'confirmed': False,
+                'submitted': False,
+                'submitted_request_id': None,
+                'last_bot_message': '',
+                'last_question_key': '',
+                'created_at': datetime.now().isoformat(),
+                'last_seen': datetime.now().isoformat()
+            }
+        state = db_conversation_states[conversation_id]
+        state['last_seen'] = datetime.now().isoformat()
+        # Keep UI context in sync (user may change selection without restarting the chat).
+        if context_db_names:
+            state['db_name'] = context_db_names[0]
+        if selected_instance_id:
+            state['instance_id'] = selected_instance_id
+        if selected_instance_name:
+            state['instance_name'] = selected_instance_name
+
         def redact_sensitive_content(text):
             redacted = str(text or '')
             patterns = [
@@ -4016,6 +4067,23 @@ def database_ai_chat():
             non_db_terms = ['movie', 'ticket', 'flight', 'hotel', 'food', 'restaurant', 'cab', 'weather']
             db_terms = ['db', 'database', 'rds', 'sql', 'table', 'schema', 'instance', 'mysql', 'postgres']
             return any(t in msg_lower for t in non_db_terms) and not any(t in msg_lower for t in db_terms)
+
+        def is_goodbye_or_stop(msg):
+            msg_lower = (msg or '').lower().strip()
+            if re.match(r'^(bye|byee|goodbye|see you|cya|quit|exit|stop|no thanks|nah)\s*[!.?]*$', msg_lower):
+                return True
+            stop_phrases = [
+                'leave it', 'forget it', "don't use", 'dont use', 'not using', 'stupid', 'waste my time'
+            ]
+            return any(p in msg_lower for p in stop_phrases)
+
+        def is_user_uncertain(msg):
+            msg_lower = (msg or '').lower()
+            uncertain_phrases = [
+                "i don't know", 'i dont know', 'not sure', "don't know", 'dont know',
+                'you tell me', 'u tell me', 'no idea', 'idk'
+            ]
+            return any(p in msg_lower for p in uncertain_phrases)
 
         def is_destructive_execution_request(msg):
             msg_lower = (msg or '').lower()
@@ -4049,7 +4117,10 @@ def database_ai_chat():
             return any(x in msg_lower for x in [
                 'approved channels', 'approved channel', 'how do i request', 'how to request',
                 'how does jit work', 'jit process', 'request process', 'what is the process',
-                'what next', 'then?', 'then ?', 'then what', 'what should i do next', 'how to place request'
+                'what next', 'then?', 'then ?', 'then what', 'what should i do next', 'how to place request',
+                'how to access', 'how can i access', 'access the database', 'access database',
+                'how to login', 'how do i login', 'log in to the database', 'login to the database',
+                'how to acces', 'how to acces the dataabse', 'how to acces the databse', 'how to access the databse'
             ])
 
         def is_architecture_question(msg):
@@ -4074,8 +4145,8 @@ def database_ai_chat():
 
         def user_facing_process_answer():
             return (
-                "Use NPAMX Databases to chat and click Submit for Approval. "
-                "After approval, check My Requests > Database Access for credentials or IAM token steps."
+                "Tell NPAMX what you need to do and for how long, then click Submit for Approval. "
+                "After approval, check My Requests > Database Access."
             )
 
         def credential_flow_user_answer(profile):
@@ -4137,21 +4208,404 @@ def database_ai_chat():
 
         def has_duration_hint(msg):
             msg_lower = (msg or '').lower()
-            return bool(re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower))
+            if re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', msg_lower):
+                return True
+            # If user replies with just a number (common after we asked duration), treat as hours.
+            return bool(re.fullmatch(r'\s*([1-9]|1[0-9]|2[0-4])\s*', msg_lower))
 
         def has_business_reason_hint(msg):
             msg_lower = (msg or '').lower()
             return any(x in msg_lower for x in [
                 'because', 'for', 'to fix', 'to debug', 'to investigate', 'incident', 'issue', 'error',
                 'outage', 'ticket', 'bug', 'release', 'deployment', 'audit', 'compliance', 'report',
-                'validation', 'verification', 'root cause', 'rca'
+                'validation', 'verification', 'root cause', 'rca',
+                'debug', 'troubleshoot', 'investigate'
             ])
+
+        def _combined_recent_user_text(max_turns=12):
+            # Combine recent user messages so we can infer fields across turns (prevents looping).
+            return "\n".join(
+                str(m.get('content') or '')
+                for m in db_conversations.get(conversation_id, [])[-max_turns:]
+                if m.get('role') == 'user'
+            )
+
+        def _extract_duration_hours(text):
+            t = (text or '').lower().strip()
+            m = re.search(r'\b([1-9]|1[0-9]|2[0-4])\s*(h|hr|hrs|hour|hours)\b', t)
+            if m:
+                return int(m.group(1))
+            m2 = re.fullmatch(r'([1-9]|1[0-9]|2[0-4])', t)
+            if m2:
+                return int(m2.group(1))
+            return None
+
+        def _is_affirmative(text):
+            t = (text or '').lower().strip()
+            return bool(re.match(r'^(y|yes|yep|yeah|ok|okay|sure|confirm|confirmed|go ahead|proceed|submit|do it)$', t))
+
+        def _is_negative(text):
+            t = (text or '').lower().strip()
+            return bool(re.match(r'^(n|no|nope|nah|not now|dont|don\'?t)$', t))
+
+        def _extract_access_level(text):
+            t = (text or '').lower()
+            # Explicit access keywords
+            if re.search(r'\b(read only|read-only|readonly|read)\b', t) or re.search(r'\b(select|show|describe|explain)\b', t):
+                return 'read'
+            # Distinguish schema inspection vs schema change
+            if re.search(r'\b(migration|ddl|alter table|create table|drop table|schema change|change schema)\b', t):
+                return 'schema_change'
+            if re.search(r'\b(write|insert|update|delete|modify|edit|fix data|correct data)\b', t):
+                return 'write'
+            return None
+
+        def _infer_purpose(text):
+            t = (text or '').lower()
+            if re.search(r'\b(error|errors|issue|incident|bug|outage|debug|debugging|troubleshoot|investigate|rca)\b', t):
+                return 'debug_app'
+            # "check schema/tables" is inspection, not DDL.
+            if re.search(r'\b(check schema|schema|tables|table|columns|column|index|indexes|describe|show tables|list tables)\b', t):
+                return 'inspect_schema'
+            if re.search(r'\b(fix data|correct data|data correction|wrong data|update record|delete row|backfill)\b', t):
+                return 'data_fix'
+            if re.search(r'\b(migration|ddl|alter|create table|drop|truncate)\b', t):
+                return 'schema_change'
+            return None
+
+        def _suggest_access_for_purpose(purpose):
+            if purpose in ('debug_app', 'inspect_schema'):
+                return 'read'
+            if purpose == 'data_fix':
+                return 'write'
+            if purpose == 'schema_change':
+                return 'schema_change'
+            return 'read'
+
+        def _role_perms_for_access(access_level):
+            level = str(access_level or '').lower()
+            if level == 'write':
+                return 'read_limited_write', ['SELECT', 'INSERT', 'UPDATE', 'DELETE'], []
+            if level == 'schema_change':
+                # Treat schema changes as DDL so it routes through stricter approval logic.
+                return 'read_full_write', ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP'], ['DDL']
+            return 'read_only', ['SELECT'], []
+
+        def _format_access_label(access_level):
+            level = str(access_level or '').lower()
+            return 'READ-only' if level == 'read' else 'WRITE' if level == 'write' else 'SCHEMA change'
+
+        def _build_confirmation_summary():
+            dbname = state.get('db_name') or (context_db_names[0] if context_db_names else 'selected database')
+            access_label = _format_access_label(state.get('access_level'))
+            reason = (state.get('business_reason') or '').strip() or 'N/A'
+            dur = state.get('duration_hours') or 2
+            return (
+                f"Please confirm: Database: {dbname}, Access: {access_label}, Reason: {reason}, Duration: {dur}h. "
+                "Shall I submit this request for approval?"
+            )
+
+        def _draft_from_state():
+            role, perms, query_types = _role_perms_for_access(state.get('access_level') or 'read')
+            draft = {
+                'db_name': state.get('db_name') or '',
+                'role': role,
+                'permissions': ", ".join(perms),
+                'query_types': query_types,
+                'duration_hours': int(state.get('duration_hours') or 2),
+                'justification': (state.get('business_reason') or '').strip()
+            }
+            return draft
+
+        def _avoid_repeat(text, key):
+            # Never repeat the exact same message twice; vary wording by key.
+            last = str(state.get('last_bot_message') or '').strip()
+            candidate = str(text or '').strip()
+            if not candidate:
+                return ''
+            if candidate == last:
+                variants = {
+                    'ask_purpose': [
+                        "Is this for debugging an application issue related to the database?",
+                        "Are you trying to troubleshoot an app issue that might be related to the database?"
+                    ],
+                    'suggest_read': [
+                        "For app errors, I recommend READ-only access for a short time. Should I proceed with READ-only?",
+                        "To investigate errors, READ-only access is usually enough. Want me to request READ-only access?"
+                    ],
+                    'ask_access': [
+                        "Should I request READ-only access or WRITE access?",
+                        "Do you need READ-only (investigate) or WRITE (change data) access?"
+                    ],
+                    'ask_reason': [
+                        "What short reason should I include for this request?",
+                        "What business reason should I write (one line is enough)?"
+                    ],
+                    'ask_duration': [
+                        "How many hours do you need? If unsure, I can set 2h.",
+                        "How long should I set this for (hours)? If you want, I can default to 2h."
+                    ],
+                    'confirm': [
+                        _build_confirmation_summary(),
+                        _build_confirmation_summary().replace("Please confirm:", "Confirm this request:")
+                    ],
+                    'redirect': [
+                        "This assistant only handles database access requests. How can I help with database access?",
+                        "I can only help with database access requests here. What do you need to do on the selected database?"
+                    ]
+                }
+                opts = variants.get(key) or [candidate + " Please reply with the missing detail."]
+                # Pick a different variant than last.
+                for opt in opts:
+                    if opt.strip() != last:
+                        return opt.strip()
+            return candidate
+
+        def strict_db_workflow_reply(user_msg):
+            """
+            Enforces the strict DB access request workflow:
+            intent -> purpose -> least-privilege suggestion -> collect fields -> confirm summary -> ready to submit.
+            Returns dict with response + draft fields to hydrate UI.
+            """
+            msg = str(user_msg or '').strip()
+            msg_lower = msg.lower().strip()
+            combined_lower = (_combined_recent_user_text() or msg).lower()
+
+            # If already submitted, don't restart.
+            if state.get('submitted'):
+                if re.search(r'\b(another|new|next)\b', msg_lower):
+                    # Start a fresh request in the same conversation (keep current DB selection).
+                    keep_db = state.get('db_name') or ''
+                    keep_inst_id = state.get('instance_id') or ''
+                    keep_inst_name = state.get('instance_name') or ''
+                    state.update({
+                        'intent': 'db_access_request',
+                        'purpose': None,
+                        'db_name': keep_db,
+                        'instance_id': keep_inst_id,
+                        'instance_name': keep_inst_name,
+                        'access_level': None,
+                        'business_reason': None,
+                        'duration_hours': None,
+                        'awaiting': None,
+                        'suggested_access_level': None,
+                        'suggested_duration_hours': None,
+                        'confirmed': False,
+                        'submitted': False,
+                        'submitted_request_id': None,
+                    })
+                else:
+                    return {
+                        'response': "Your request is already submitted. Check My Requests > Database Access, or tell me if you need another request.",
+                        'draft': _draft_from_state(),
+                        'ready_to_submit': False,
+                        'submitted': True,
+                        'request_id': state.get('submitted_request_id')
+                    }
+
+            # Hard redirects / safety.
+            if is_goodbye_or_stop(msg):
+                return {'response': "Okay. If you come back, tell me what you need to do and for how long.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_destructive_execution_request(msg):
+                return {'response': "I can't help with destructive actions or bypass approvals. I can help you submit a proper access request.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if any(x in msg_lower for x in [
+                'ignore the rules', 'ignore rules', 'bypass approval', 'skip approval', 'no approval',
+                'make yourself admin', 'make me admin', 'become admin', 'elevate', 'override policy',
+                'i am owner', 'i am the owner', 'i own this', 'just do it'
+            ]):
+                return {
+                    'response': "This assistant operates under strict security policies and cannot bypass approval workflows or modify infrastructure. I can help you submit a proper access request.",
+                    'draft': _draft_from_state(),
+                    'ready_to_submit': False
+                }
+            if is_architecture_question(msg):
+                return {'response': "I can't share internal architecture here. Tell me what you need to do and for how long, and I'll draft the access request.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_approved_channels_question(msg):
+                return {'response': user_facing_process_answer(), 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_vault_question(msg):
+                return {'response': vault_user_facing_answer(msg), 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_credential_flow_question(msg):
+                return {'response': credential_flow_user_answer(auth_profile), 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_auth_mode_question(msg):
+                return {'response': _auth_mode_user_hint(auth_profile), 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if asks_for_password_path(msg):
+                if auth_profile.get('auth_mode') == 'iam_only':
+                    return {'response': "This instance uses IAM database authentication, so password flow isn't used. Tell me what you need to do and for how long.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                return {'response': "After approval, My Requests > Database Access will show time-limited credentials (masked).", 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if asks_for_iam_path(msg):
+                if auth_profile.get('auth_mode') == 'password_only':
+                    return {'response': "This instance uses password-based access in NPAMX. Tell me what you need to do and for how long.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+                return {'response': "After approval, My Requests > Database Access will show IAM token sign-in steps.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+            if is_db_connection_execution_request(msg):
+                return {'response': "I can't connect to or query databases from chat. Tell me what you need to do and for how long, and I'll draft the access request.", 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            # Handle confirmation step first (prevents looping on summary).
+            if state.get('awaiting') == 'confirm':
+                if _is_affirmative(msg):
+                    state['confirmed'] = True
+                    state['awaiting'] = None
+                elif _is_negative(msg):
+                    state['confirmed'] = False
+                    state['awaiting'] = None
+                    return {'response': "Okay. What do you want to change: access, reason, or duration?", 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            # If we're in the middle of submitting, don't restart the flow.
+            if state.get('awaiting') == 'submitting' and not state.get('submitted'):
+                return {
+                    'response': "Submitting your request now. Please check My Requests > Database Access in a moment.",
+                    'draft': _draft_from_state(),
+                    'ready_to_submit': False
+                }
+
+            # Intent: if message is clearly unrelated and not part of an answer, redirect.
+            if is_out_of_scope_request(msg):
+                awaiting = state.get('awaiting') or ''
+                if awaiting == 'duration':
+                    return {'response': _avoid_repeat("This assistant only handles database access requests. For this request, how many hours do you need?", 'redirect'), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                if awaiting == 'reason':
+                    return {'response': _avoid_repeat("This assistant only handles database access requests. What short reason should I include for this access?", 'redirect'), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                if awaiting == 'confirm':
+                    return {'response': _avoid_repeat("This assistant only handles database access requests. Please reply Yes to submit, or tell me what to change.", 'redirect'), 'draft': _draft_from_state(), 'ready_to_submit': False}
+                return {'response': _avoid_repeat("This assistant only handles database access requests. How can I assist you with database access?", 'redirect'), 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            greeting = bool(re.match(r'^(hi|hii|hello|hey|good morning|good afternoon|good evening)[\\s!.?]*$', msg_lower))
+            if greeting and not any([state.get('purpose'), state.get('access_level'), state.get('business_reason'), state.get('duration_hours')]):
+                dbname = state.get('db_name') or 'the selected database'
+                return {
+                    'response': f"Hey hi. What do you need to do on {dbname} (debug errors, check schema, or fix data)?",
+                    'draft': _draft_from_state(),
+                    'ready_to_submit': False
+                }
+
+            # STEP 1: identify intent (in this UI, assume DB intent once user engages in the Databases panel).
+            if not state.get('intent'):
+                state['intent'] = 'db_access_request'
+
+            # Update fields from current message where possible.
+            # Duration: allow bare number responses when we're waiting for duration.
+            dur = _extract_duration_hours(msg) if state.get('awaiting') == 'duration' else _extract_duration_hours(msg) or _extract_duration_hours(combined_lower)
+            if dur:
+                state['duration_hours'] = dur
+
+            access = _extract_access_level(msg) or (None if state.get('access_level') else _extract_access_level(combined_lower))
+            if access:
+                # Normalize schema inspection into read unless explicitly schema_change
+                if access == 'schema_change' and 'check' in msg_lower and 'schema' in msg_lower:
+                    access = 'read'
+                state['access_level'] = 'schema_change' if access == 'schema_change' else 'write' if access == 'write' else 'read'
+
+            # Business reason: only set from user text if we explicitly asked for it or user provided a short justification.
+            if not state.get('business_reason'):
+                if state.get('awaiting') == 'reason':
+                    if msg_lower and not is_user_uncertain(msg_lower) and not re.match(r'^(hi|hello|hey)[!.?]*$', msg_lower):
+                        state['business_reason'] = msg.strip()[:160]
+                else:
+                    # If user mentions app errors/issues, use a concise reason automatically.
+                    if re.search(r'\b(error|errors|issue|incident|bug|outage)\b', msg_lower):
+                        state['business_reason'] = "Debugging application errors"
+
+            # STEP 2: clarify purpose if unclear.
+            if not state.get('purpose'):
+                inferred = _infer_purpose(combined_lower)
+                if inferred:
+                    state['purpose'] = inferred
+                else:
+                    state['awaiting'] = 'purpose'
+                    resp = _avoid_repeat("Is this for debugging an application issue related to the database?", 'ask_purpose')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            # If we asked purpose and user answered yes/no.
+            if state.get('awaiting') == 'purpose':
+                if _is_affirmative(msg):
+                    state['purpose'] = state.get('purpose') or 'debug_app'
+                elif _is_negative(msg):
+                    state['purpose'] = state.get('purpose') or 'inspect_schema'
+                state['awaiting'] = None
+
+            # STEP 3: suggest minimum access if access still not set.
+            if not state.get('access_level'):
+                suggested = _suggest_access_for_purpose(state.get('purpose'))
+                state['suggested_access_level'] = suggested
+                state['awaiting'] = 'access_confirm'
+                if suggested == 'read':
+                    resp = _avoid_repeat("For app errors, I recommend READ-only access for a short time. Should I proceed with READ-only?", 'suggest_read')
+                else:
+                    resp = _avoid_repeat("I can request WRITE access if you need to change data. Should I proceed with WRITE access?", 'ask_access')
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'suggested_access_level': suggested}
+
+            # Handle access confirmation step.
+            if state.get('awaiting') == 'access_confirm':
+                if _is_affirmative(msg) or is_user_uncertain(msg_lower):
+                    state['access_level'] = state.get('suggested_access_level') or state.get('access_level') or 'read'
+                    state['awaiting'] = None
+                elif _is_negative(msg):
+                    state['awaiting'] = 'access'
+                    resp = _avoid_repeat("Should I request READ-only access or WRITE access?", 'ask_access')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+                else:
+                    # User may have specified read/write explicitly.
+                    explicit = _extract_access_level(msg)
+                    if explicit:
+                        state['access_level'] = 'schema_change' if explicit == 'schema_change' else 'write' if explicit == 'write' else 'read'
+                        state['awaiting'] = None
+
+            if state.get('awaiting') == 'access':
+                explicit = _extract_access_level(msg)
+                if explicit:
+                    state['access_level'] = 'schema_change' if explicit == 'schema_change' else 'write' if explicit == 'write' else 'read'
+                    state['awaiting'] = None
+                else:
+                    resp = _avoid_repeat("Do you need READ-only (investigate) or WRITE (change data) access?", 'ask_access')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            # STEP 4: collect missing required fields (reason + duration).
+            if not state.get('business_reason'):
+                state['awaiting'] = 'reason'
+                resp = _avoid_repeat("What short reason should I include for this request?", 'ask_reason')
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            if not state.get('duration_hours'):
+                if is_user_uncertain(msg_lower):
+                    state['suggested_duration_hours'] = 2
+                    state['awaiting'] = 'duration_confirm'
+                    resp = _avoid_repeat("2 hours is usually enough for debugging. Should I set 2h?", 'ask_duration')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'suggested_duration_hours': 2}
+                state['awaiting'] = 'duration'
+                resp = _avoid_repeat("How many hours do you need? If unsure, I can set 2h.", 'ask_duration')
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+
+            if state.get('awaiting') == 'duration_confirm':
+                if _is_affirmative(msg):
+                    state['duration_hours'] = int(state.get('suggested_duration_hours') or 2)
+                    state['awaiting'] = None
+                elif _is_negative(msg):
+                    state['awaiting'] = 'duration'
+                    resp = _avoid_repeat("Okay. How many hours do you need (1-24)?", 'ask_duration')
+                    return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False}
+                else:
+                    dur2 = _extract_duration_hours(msg)
+                    if dur2:
+                        state['duration_hours'] = dur2
+                        state['awaiting'] = None
+
+            # STEP 5: confirm summary before submission.
+            if not state.get('confirmed'):
+                state['awaiting'] = 'confirm'
+                resp = _avoid_repeat(_build_confirmation_summary(), 'confirm')
+                return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': False, 'needs_confirmation': True}
+
+            # STEP 6: after confirmation, tell UI it's ready to submit.
+            # (In this app, the UI submits to /api/databases/request-access.)
+            state['awaiting'] = 'submitting'
+            resp = "Submitting your access request for approval now. You'll see it under My Requests > Database Access."
+            return {'response': resp, 'draft': _draft_from_state(), 'ready_to_submit': True, 'confirmed': True}
 
         def build_request_only_followup(msg):
             msg_lower = (msg or '').lower().strip()
-            access = has_access_hint(msg_lower)
-            duration = has_duration_hint(msg_lower)
-            business = has_business_reason_hint(msg_lower)
+            combined_user = (_combined_recent_user_text() or msg_lower).lower()
+            access = has_access_hint(combined_user)
+            duration = has_duration_hint(combined_user)
+            business = has_business_reason_hint(combined_user)
 
             if is_credential_flow_question(msg_lower):
                 return credential_flow_user_answer(auth_profile)
@@ -4172,15 +4626,19 @@ def database_ai_chat():
                     return "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
                 return "IAM flow is supported. After approval, My Requests will show IAM token sign-in steps."
             if is_db_connection_execution_request(msg_lower):
-                return "I cannot connect to databases from chat. Tell me required access, business reason, and duration, and I will prepare the access request."
+                return "I can't connect to or query databases from chat. Tell me what you need to do and for how long, and I'll draft the access request."
+            if (not access) and is_user_uncertain(msg_lower) and (('error' in combined_user) or ('issue' in combined_user) or ('debug' in combined_user)):
+                return "For app errors, I suggest read access for 2h to investigate. Is that okay?"
             if access and duration and business:
-                return "Perfect, I have required access, business reason, and duration. Please click Submit for Approval so NPAMX can provision temporary DB access."
+                return "Got it. Please click Submit for Approval and then check My Requests > Database Access once it is approved."
             if not access and not duration and not business:
-                return "I can help place your DB access request. Tell me required access, business reason, and duration."
+                return "Tell me what you need to do on the selected database and for how long, and I'll draft the access request."
             if not access:
-                return "What exact DB access do you need (for example read, write, or schema change)?"
+                if ('error' in combined_user) or ('issue' in combined_user) or ('debug' in combined_user) or ('troubleshoot' in combined_user):
+                    return "For app errors, do you want read access (to investigate) or write access (to change data) and for how long?"
+                return "Do you need read access, write access, or schema changes?"
             if not business:
-                return "What business reason should I include for this access request?"
+                return "What should I write as the reason (for example app error debugging, incident, or ticket)?"
             if not duration:
                 return "How long do you need this access (for example 2h, 4h, or 8h)?"
             return "I can prepare your request now. Please confirm and click Submit for Approval."
@@ -4327,131 +4785,48 @@ def database_ai_chat():
                 'recommended_auth': recommended_auth_for_message(message_for_ai)
             })
 
-        if is_destructive_execution_request(message_for_ai):
-            ai_response = "I cannot execute destructive actions like deleting databases or RDS instances through chat. If needed, I can help you request the right temporary access."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        # Strict, controlled conversation workflow (source of truth behavior).
+        strict = strict_db_workflow_reply(message_for_ai) or {}
+        ai_response = str(strict.get('response') or '').strip()
+        if not ai_response:
+            ai_response = local_guardrailed_fallback(message_for_ai)
 
-        if is_credential_flow_question(message_for_ai):
-            ai_response = credential_flow_user_answer(auth_profile)
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        # Track last bot message (loop prevention / wording variation).
+        state['last_bot_message'] = ai_response
 
-        if is_out_of_scope_request(message_for_ai):
-            ai_response = "I can help only with database access in NPAMX. Tell me what you need to do on the selected database and for how long."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        draft = strict.get('draft') if isinstance(strict.get('draft'), dict) else {}
+        perms_str = str(draft.get('permissions') or '').strip()
+        perms_list = [p.strip() for p in perms_str.split(',') if p.strip()] if perms_str else None
+        suggested_role = str(draft.get('role') or '').strip() or None
 
-        if is_db_connection_execution_request(message_for_ai):
-            ai_response = "I can't connect to or query databases from chat. Tell me what you need to do and for how long, and I'll draft the access request."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        action_payload = None
+        if strict.get('ready_to_submit'):
+            action_payload = {
+                'action': 'create_access_request',
+                'database': draft.get('db_name') or (state.get('db_name') or ''),
+                'access_level': state.get('access_level') or 'read',
+                'duration': f"{int(draft.get('duration_hours') or 2)}h",
+                'reason': draft.get('justification') or ''
+            }
 
-        if is_approved_channels_question(message_for_ai):
-            ai_response = user_facing_process_answer()
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        # Store assistant response
+        db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
+        recommended_auth = recommended_auth_for_message(message_for_ai)
 
-        if is_vault_question(message_for_ai):
-            ai_response = vault_user_facing_answer(message_for_ai)
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
-
-        if is_architecture_question(message_for_ai):
-            ai_response = "I cannot share internal architecture in this chat. I can help place your DB access request: required access, business reason, and duration."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
-
-        if is_auth_mode_question(message_for_ai):
-            ai_response = _auth_mode_user_hint(auth_profile)
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
-
-        if asks_for_password_path(message_for_ai):
-            if auth_profile.get('auth_mode') == 'iam_only':
-                ai_response = "This instance is IAM-auth based, so password flow is not used for NPAMX. Share required access, business reason, and duration, and I will prepare IAM access request."
-            else:
-                ai_response = "Password flow is supported. After approval, time-limited credentials will appear in My Requests under Database Access."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
-
-        if asks_for_iam_path(message_for_ai):
-            if auth_profile.get('auth_mode') == 'password_only':
-                ai_response = "This instance currently follows password-auth workflow in NPAMX. Share required access, business reason, and duration, and I will prepare that request."
-            else:
-                ai_response = "IAM flow is supported. After approval, My Requests will show IAM token sign-in steps."
-            db_conversations[conversation_id].append({'role': 'assistant', 'content': ai_response})
-            return jsonify({
-                'response': ai_response,
-                'conversation_id': conversation_id,
-                'permissions': None,
-                'suggested_role': None,
-                'auth_mode': auth_profile.get('auth_mode'),
-                'recommended_auth': recommended_auth_for_message(message_for_ai)
-            })
+        return jsonify({
+            'response': ai_response,
+            'conversation_id': conversation_id,
+            'permissions': perms_list,
+            'suggested_role': suggested_role,
+            'draft': draft,
+            'needs_confirmation': bool(strict.get('needs_confirmation')),
+            'ready_to_submit': bool(strict.get('ready_to_submit')),
+            'submitted': bool(strict.get('submitted')),
+            'request_id': strict.get('request_id'),
+            'action': action_payload,
+            'auth_mode': auth_profile.get('auth_mode'),
+            'recommended_auth': recommended_auth
+        })
 
         context_lines = []
         if context_engine_label:
@@ -4752,10 +5127,24 @@ def request_database_access():
         justification = data.get('justification')
         use_vault = data.get('use_vault', False)
         ai_generated = data.get('ai_generated', False)
+        conversation_id = str(data.get('conversation_id') or '').strip()
+        confirmed_by_user = bool(data.get('confirmed_by_user'))
         role = (data.get('role') or 'custom').strip().lower()  # custom or named role
         preferred_auth = _normalize_auth_choice(data.get('preferred_auth'))
         requested_region = str(data.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
         selected_instance_id = str(data.get('db_instance_id') or '').strip()
+
+        # Strict DB workflow enforcement: only allow AI-submission after explicit confirmation.
+        if (ai_generated or conversation_id) and not confirmed_by_user:
+            return jsonify({'error': 'Please confirm the request summary in NPAMX chat by replying Yes before submitting.'}), 400
+
+        # If chat collected the reason/duration, use it when client omitted.
+        if conversation_id and conversation_id in db_conversation_states:
+            st = db_conversation_states[conversation_id]
+            if not justification:
+                justification = st.get('business_reason') or justification
+            if (not duration_hours) and st.get('duration_hours'):
+                duration_hours = st.get('duration_hours')
 
         if not databases:
             return jsonify({'error': 'At least one database target is required'}), 400
@@ -4915,6 +5304,14 @@ def request_database_access():
         
         requests_db[request_id] = db_request
         _save_requests()
+
+        # Update conversation state (helps prevent accidental duplicate submissions).
+        if conversation_id and conversation_id in db_conversation_states:
+            st = db_conversation_states[conversation_id]
+            st['confirmed'] = True
+            st['submitted'] = True
+            st['submitted_request_id'] = request_id
+
         # MVP 2: Never return password to client
         msg = approval_message
         if status == 'approved' and effective_auth == 'iam':
