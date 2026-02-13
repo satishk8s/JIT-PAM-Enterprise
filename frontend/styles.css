@@ -2054,6 +2054,48 @@ td {
     visibility: visible !important;
 }
 
+/* Admin page PAM theme (light/dark) */
+.admin-page-header { margin-bottom: 1rem; }
+.admin-role-hint {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+.badge-readaccess { background: var(--bg-secondary); color: var(--primary-color); border: 1px solid var(--border-color); }
+.badge-manager { background: color-mix(in srgb, var(--primary-color) 20%, transparent); color: var(--primary-color); border: 1px solid var(--primary-color); }
+.badge-admin { background: color-mix(in srgb, #f59e0b 25%, var(--bg-secondary)); color: #f59e0b; border: 1px solid #f59e0b; }
+.group-role-desc { margin: 8px 0 0; font-size: 13px; color: var(--text-secondary); }
+.btn-pam {
+    background: color-mix(in srgb, var(--primary-color) 15%, var(--bg-secondary));
+    border: 1px solid color-mix(in srgb, var(--primary-color) 50%, var(--border-color));
+    color: var(--primary-color);
+}
+.btn-pam:hover { border-color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 25%, var(--bg-secondary)); }
+.btn-primary.btn-pam { background: linear-gradient(135deg, rgba(14, 165, 233, 0.9), rgba(56, 189, 248, 0.9)); border-color: rgba(255,255,255,0.2); color: #fff; }
+.btn-primary.btn-pam:hover { filter: brightness(1.08); }
+
+.admin-tab-pam .builder-subtitle,
+.admin-tab-pam .section-desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 15px; }
+.template-card-pam { border: 1px solid var(--border-color); background: var(--bg-secondary); border-radius: 12px; }
+.template-card-pam .template-icon { color: var(--primary-color); font-size: 1.5rem; }
+.admin-subtabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px; flex-wrap: wrap; }
+.admin-subtab.active { background: color-mix(in srgb, var(--primary-color) 20%, var(--bg-secondary)); border-color: var(--primary-color); color: var(--primary-color); }
+
+.integrations-section { padding: 0 0 1rem; }
+.integrations-subtitle { font-size: 13px; color: var(--text-secondary); margin: 1.5rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.integrations-subtitle:first-child { margin-top: 0; }
+.integrations-grid-pam { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
+.integration-card-pam {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.integration-card-pam:hover { border-color: var(--primary-color); box-shadow: 0 4px 12px rgba(56, 189, 248, 0.12); }
+.integration-icon-aws { color: #ff9900; }
+.integration-icon-gcp { color: #4285f4; }
+
 /* Terminal pages: ensure content visible when active */
 #databaseTerminalPage.page.active,
 #vmTerminalPage.page.active {

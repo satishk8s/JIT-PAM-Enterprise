@@ -210,7 +210,7 @@
                     <i class="fas fa-life-ring"></i> Support
                 </button>
                 <button class="header-glow-btn admin-only-nav" id="adminPanelBtn" onclick="showPage('admin')" style="margin-right: 1rem;">
-                    <i class="fas fa-shield-alt"></i> Admin Panel
+                    <i class="fas fa-cog"></i> Admin
                 </button>
                 <div class="profile-dropdown">
                     <button class="profile-btn" onclick="toggleProfileMenu()">
@@ -234,11 +234,6 @@
         <div class="app-layout">
             <aside class="sidebar" id="mainSidebar">
                 <nav class="sidebar-nav">
-                    <div class="nav-item active admin-only-nav" onclick="showPage('dashboard')">
-                        <i class="fas fa-tachometer-alt"></i>
-                        <span>Dashboard</span>
-                    </div>
-                    
                     <div class="nav-category">Management</div>
                     <div class="nav-item" onclick="showPage('requests')">
                         <i class="fas fa-list-alt"></i>
@@ -1593,25 +1588,18 @@
                 </div>
             </div>
 
-            <!-- Admin Panel Page -->
+            <!-- Admin Page -->
             <div id="adminPage" class="page">
-                <div class="page-header">
-                    <h2><i class="fas fa-shield-alt"></i> Admin Panel</h2>
+                <div class="page-header admin-page-header">
                     <div class="admin-nav">
-                        <button class="admin-tab-btn active" onclick="showAdminTab('dashboard', event)">
-                            <i class="fas fa-chart-bar"></i> Dashboard
-                        </button>
-                        <button class="admin-tab-btn" onclick="showAdminTab('users', event)">
+                        <button class="admin-tab-btn active" onclick="showAdminTab('users', event)">
                             <i class="fas fa-users"></i> Users & Groups
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
-                            <i class="fas fa-cogs"></i> Management
-                        </button>
-                        <button class="admin-tab-btn" onclick="showAdminTab('features', event)">
-                            <i class="fas fa-toggle-on"></i> Features
+                            <i class="fas fa-sliders-h"></i> Management
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('security', event)">
-                            <i class="fas fa-shield-alt"></i> Security
+                            <i class="fas fa-lock"></i> Security
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
@@ -1619,70 +1607,8 @@
                     </div>
                 </div>
 
-                <!-- Admin Dashboard Tab -->
-                <div id="adminDashboardTab" class="admin-tab active">
-                    <div class="admin-dashboard">
-                        <div class="admin-cards">
-                            <div class="card">
-                                <div class="card-icon"><i class="fas fa-user-plus"></i></div>
-                                <div class="card-content">
-                                    <h3 id="adminNewUsersCount">0</h3>
-                                    <p>New Users (30 days)</p>
-                                </div>
-                            </div>
-                            <div class="card">
-                                <div class="card-icon"><i class="fas fa-user-check"></i></div>
-                                <div class="card-content">
-                                    <h3 id="adminRepeatedUsersCount">0</h3>
-                                    <p>Repeated Users</p>
-                                </div>
-                            </div>
-                            <div class="card">
-                                <div class="card-icon"><i class="fas fa-user-shield"></i></div>
-                                <div class="card-content">
-                                    <h3 id="adminExceptionalUsersCount">0</h3>
-                                    <p>Exceptional Users</p>
-                                </div>
-                            </div>
-                            <div class="card">
-                                <div class="card-icon"><i class="fas fa-exclamation-triangle"></i></div>
-                                <div class="card-content">
-                                    <h3 id="adminPendingApprovalsCount">0</h3>
-                                    <p>Pending Approvals</p>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="charts-container">
-                            <div class="chart-card">
-                                <h3>User Activity Trends</h3>
-                                <canvas id="adminUserActivityChart" width="400" height="200"></canvas>
-                            </div>
-                            <div class="chart-card">
-                                <h3>Request Types Distribution</h3>
-                                <canvas id="adminRequestTypesChart" width="400" height="200"></canvas>
-                            </div>
-                        </div>
-                        
-                        <div class="admin-actions">
-                            <h3>Quick Actions</h3>
-                            <div class="action-buttons">
-                                <button class="btn-secondary" onclick="exportAuditLog()">
-                                    <i class="fas fa-download"></i> Export Audit Log
-                                </button>
-                                <button class="btn-warning" onclick="cleanupOldRequests()">
-                                    <i class="fas fa-broom"></i> Cleanup Old Requests
-                                </button>
-                                <button class="btn-danger" onclick="revokeAllExpired()">
-                                    <i class="fas fa-times-circle"></i> Revoke All Expired
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
                 <!-- Admin Users & Groups Tab -->
-                <div id="adminUsersTab" class="admin-tab" style="font-family: 'Inter', sans-serif;">
+                <div id="adminUsersTab" class="admin-tab active" style="font-family: 'Inter', sans-serif;">
                     <!-- Sub-tabs -->
                     <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
                         <button class="btn-secondary" id="usersSubTab" onclick="showUsersSubTab('users')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
@@ -1698,37 +1624,33 @@
                         <div class="users-management">
                             <div class="users-header">
                                 <h3>User Management</h3>
-                                <button class="btn-primary" onclick="showCreateUserModal()">
+                                <button class="btn-primary btn-pam" onclick="showCreateUserModal()">
                                     <i class="fas fa-user-plus"></i> Create User
                                 </button>
                             </div>
-                            
+                            <p class="admin-role-hint">Roles: <strong>Readaccess</strong> (read-only PAM) · <strong>Manager</strong> (create users/groups, logs, guardrails, reset MFA, integrations) · <strong>Admin</strong> (full access)</p>
                             <div class="users-table">
-                            <table>
+                                <table>
                                     <thead>
-                                    <tr>
-                                        <th>Name</th>
-                                        <th>Email</th>
-                                        <th>Phone</th>
-                                        <th>Department</th>
-                                        <th>Group</th>
-                                        <th>Role</th>
-                                        <th>Status</th>
-                                        <th>Actions</th>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Email</th>
+                                            <th>Group</th>
+                                            <th>Role</th>
+                                            <th>Status</th>
+                                            <th>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="usersTableBody">
-                                    <tr>
-                                        <td>Satish Korra</td>
-                                        <td>satish.korra@nykaa.com</td>
-                                        <td>+91-9876543210</td>
-                                        <td>DevOps</td>
-                                        <td>DevOps Team</td>
-                                        <td><span class="badge badge-danger">Admin</span></td>
-                                        <td><span class="badge badge-success">Active</span></td>
-                                        <td>
-                                            <button class="btn-link" onclick="editUser('satish')">Edit</button>
-                                            <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
+                                        <tr>
+                                            <td>Satish Korra</td>
+                                            <td>satish.korra@nykaa.com</td>
+                                            <td>admin</td>
+                                            <td><span class="badge badge-admin">Admin</span></td>
+                                            <td><span class="badge badge-success">Active</span></td>
+                                            <td>
+                                                <button class="btn-link" onclick="editUser('satish')">Edit</button>
+                                                <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
                                             </td>
                                         </tr>
                                     </tbody>
@@ -1740,76 +1662,48 @@
                     <!-- Groups Section -->
                     <div id="groupsSection" style="display: none;">
                         <div class="groups-management">
-                        <div class="section-header">
-                            <h3>Groups Management</h3>
-                                <button class="btn-primary" onclick="showCreateGroupModal()">
+                            <div class="section-header">
+                                <h3>Groups Management</h3>
+                                <button class="btn-primary btn-pam" onclick="showCreateGroupModal()">
                                     <i class="fas fa-plus"></i> Create Group
                                 </button>
                             </div>
-                            
-                        <div class="groups-list">
-                            <div class="group-detail-card">
-                                <div class="group-detail-header">
-                                    <h4>DevOps Team</h4>
+                            <p class="admin-role-hint">Default groups with predefined roles. Attach a role when creating a group.</p>
+                            <div class="groups-list">
+                                <div class="group-detail-card group-role-readaccess">
+                                    <div class="group-detail-header">
+                                        <h4><i class="fas fa-eye"></i> readaccess</h4>
                                         <div>
-                                        <button class="btn-secondary btn-sm" onclick="editGroup('devops')">Edit</button>
-                                        <button class="btn-link" onclick="deleteGroup('devops')">Delete</button>
+                                            <span class="badge badge-readaccess">Readaccess</span>
+                                            <button class="btn-secondary btn-sm" onclick="editGroup('readaccess')">Edit</button>
                                         </div>
                                     </div>
-                                <div class="group-permissions">
-                                    <h5>Permissions:</h5>
-                                    <div class="permission-checks">
-                                        <label><input type="checkbox" checked disabled> AWS Console</label>
-                                        <label><input type="checkbox" checked disabled> GCP Console</label>
-                                        <label><input type="checkbox" checked disabled> Azure Console</label>
-                                        <label><input type="checkbox" disabled> Oracle Console</label>
-                                        <label><input type="checkbox" checked disabled> Storage</label>
-                                        <label><input type="checkbox" checked disabled> Databases</label>
-                                        <label><input type="checkbox" checked disabled> Identity</label>
-                                        <label><input type="checkbox" checked disabled> Networking</label>
-                                        <label><input type="checkbox" checked disabled> Container</label>
-                                        <label><input type="checkbox" checked disabled> Instances</label>
-                                        </div>
+                                    <div class="group-permissions">
+                                        <p class="group-role-desc">Read-only access to PAM solution.</p>
                                     </div>
                                 </div>
-
-                            <div class="group-detail-card">
-                                <div class="group-detail-header">
-                                    <h4>Security Team</h4>
+                                <div class="group-detail-card group-role-manager">
+                                    <div class="group-detail-header">
+                                        <h4><i class="fas fa-user-tie"></i> manager</h4>
                                         <div>
-                                        <button class="btn-secondary btn-sm" onclick="editGroup('security')">Edit</button>
-                                        <button class="btn-link" onclick="deleteGroup('security')">Delete</button>
+                                            <span class="badge badge-manager">Manager</span>
+                                            <button class="btn-secondary btn-sm" onclick="editGroup('manager')">Edit</button>
                                         </div>
                                     </div>
-                                <div class="group-permissions">
-                                    <h5>Permissions:</h5>
-                                    <div class="permission-checks">
-                                        <label><input type="checkbox" checked disabled> AWS Console</label>
-                                        <label><input type="checkbox" checked disabled> GCP Console</label>
-                                        <label><input type="checkbox" checked disabled> Azure Console</label>
-                                        <label><input type="checkbox" checked disabled> Oracle Console</label>
-                                        <label><input type="checkbox" checked disabled> ALL (Read-Only)</label>
-                                        </div>
+                                    <div class="group-permissions">
+                                        <p class="group-role-desc">Create users/groups, download logs, create guardrails, reset MFA for others, integrations.</p>
                                     </div>
                                 </div>
-
-                            <div class="group-detail-card">
-                                <div class="group-detail-header">
-                                    <h4>Developers</h4>
+                                <div class="group-detail-card group-role-admin">
+                                    <div class="group-detail-header">
+                                        <h4><i class="fas fa-crown"></i> admin</h4>
                                         <div>
-                                        <button class="btn-secondary btn-sm" onclick="editGroup('developers')">Edit</button>
-                                        <button class="btn-link" onclick="deleteGroup('developers')">Delete</button>
+                                            <span class="badge badge-admin">Admin</span>
+                                            <button class="btn-secondary btn-sm" onclick="editGroup('admin')">Edit</button>
                                         </div>
                                     </div>
-                                <div class="group-permissions">
-                                    <h5>Permissions:</h5>
-                                    <div class="permission-checks">
-                                        <label><input type="checkbox" checked disabled> AWS Console</label>
-                                        <label><input type="checkbox" checked disabled> Storage (S3)</label>
-                                        <label><input type="checkbox" checked disabled> Databases (RDS)</label>
-                                        <label><input type="checkbox" checked disabled> Container (ECS/EKS)</label>
-                                        <label><input type="checkbox" checked disabled> Instances (EC2)</label>
-                                        </div>
+                                    <div class="group-permissions">
+                                        <p class="group-role-desc">Full access to PAM plus all Manager capabilities.</p>
                                     </div>
                                 </div>
                             </div>
@@ -1817,22 +1711,22 @@
                     </div>
                 </div>
                 
-                <!-- Admin Management Tab -->
-                <div id="adminPoliciesTab" class="admin-tab" style="display: none; font-family: 'Inter', sans-serif;">
-                    <div id="policiesSection" style="font-family: 'Inter', sans-serif;">
+                <!-- Admin Management Tab (PAM theme, real icons) -->
+                <div id="adminPoliciesTab" class="admin-tab admin-tab-pam" style="display: none; font-family: 'Inter', sans-serif;">
+                    <div id="policiesSection" class="admin-tab-pam-inner" style="font-family: 'Inter', sans-serif;">
                         <div class="policy-builder">
                         <div class="builder-header">
-                            <h3>🎯 Organization Policy Builder</h3>
-                            <p style="color: #666; font-size: 13px;">Configure your organization's access control model - Groups, Policies, JIT Flow, and Approval Workflows</p>
+                            <h3><i class="fas fa-bullseye"></i> Organization Policy Builder</h3>
+                            <p class="builder-subtitle">Configure your organization's access control model - Groups, Policies, JIT Flow, and Approval Workflows</p>
                     </div>
 
                         <!-- User & Group Sync Options -->
                         <div class="quick-start-section">
-                            <h4>👥 User & Group Management</h4>
-                            <p style="color: #666; font-size: 13px; margin-bottom: 15px;">Choose how to manage users and groups in your organization</p>
+                            <h4><i class="fas fa-users-cog"></i> User & Group Management</h4>
+                            <p class="section-desc">Choose how to manage users and groups in your organization</p>
                             <div class="template-cards">
-                                <div class="template-card" onclick="showSyncFromAD()">
-                                    <div class="template-icon">🔄</div>
+                                <div class="template-card template-card-pam" onclick="showSyncFromAD()">
+                                    <div class="template-icon"><i class="fas fa-sync-alt"></i></div>
                                     <h5>Sync from Active Directory</h5>
                                     <p>Import users and groups from AD</p>
                                     <ul>
@@ -1842,8 +1736,8 @@
                                     </ul>
                                     <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure AD Sync</button>
                             </div>
-                                <div class="template-card" onclick="showSyncFromIdentityCenter()">
-                                    <div class="template-icon">☁️</div>
+                                <div class="template-card template-card-pam" onclick="showSyncFromIdentityCenter()">
+                                    <div class="template-icon"><i class="fas fa-cloud"></i></div>
                                     <h5>Sync from AWS Identity Center</h5>
                                     <p>Import from AWS SSO Identity Store</p>
                                     <ul>
@@ -1853,8 +1747,8 @@
                                     </ul>
                                     <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure Identity Center Sync</button>
                                     </div>
-                                <div class="template-card" onclick="showManualUserManagement()">
-                                    <div class="template-icon">✏️</div>
+                                <div class="template-card template-card-pam" onclick="showManualUserManagement()">
+                                    <div class="template-icon"><i class="fas fa-user-edit"></i></div>
                                     <h5>Manual Management</h5>
                                     <p>Create users/groups in JIT tool</p>
                                     <ul>
@@ -2247,205 +2141,88 @@
 
                 </div>
 
-                <!-- Admin Features Tab -->
-                <div id="adminFeaturesTab" class="admin-tab" style="display: none; font-family: 'Inter', sans-serif;">
-                    <div id="featuresSection" style="font-family: 'Inter', sans-serif;">
-                        <div class="features-management">
-                            <div class="section-header">
-                                <h3><i class="fas fa-toggle-on"></i> Feature Management</h3>
-                                <p style="color: #666; font-size: 13px;">Enable or disable features based on your license</p>
-                            </div>
-
-                            <div class="license-info" style="background: #e7f3ff; border: 1px solid #4A90E2; border-radius: 6px; padding: 15px; margin-bottom: 20px;">
-                                <h4 style="margin: 0 0 10px 0;">📋 Current License</h4>
-                                <p style="margin: 5px 0;"><strong>Plan:</strong> Enterprise</p>
-                                <p style="margin: 5px 0;"><strong>Users:</strong> 100 / Unlimited</p>
-                                <p style="margin: 5px 0;"><strong>Expires:</strong> 2025-12-31</p>
-                                <button class="btn-secondary btn-sm" onclick="alert('Contact sales@company.com to upgrade')">Upgrade License</button>
-                            </div>
-
-                            <div class="features-grid">
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-hdd"></i> S3 Explorer</h4>
-                                        <p>Browse and manage S3 buckets through web interface</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureS3" onchange="toggleFeature('s3', this.checked)" checked>
-                                        <span class="toggle-slider"></span>
-                                    </label>
+                <!-- Admin Integrations Tab (PAM theme: Cloud AWS/GCP, Ticketing Jira/Confluence, SIEM Chronicle, IGP JumpCloud) -->
+                <div id="adminIntegrationsTab" class="admin-tab admin-tab-pam" style="display: none;">
+                    <div class="integrations-section">
+                        <h4 class="integrations-subtitle"><i class="fab fa-aws"></i> Cloud Integration</h4>
+                        <div class="integrations-grid integrations-grid-pam">
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <i class="fab fa-aws integration-icon-aws"></i>
+                                    <h3>AWS</h3>
                                 </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-success">✓ Enabled</span>
-                                    <span style="color: #666; font-size: 12px;">Included in license</span>
+                                <p>Amazon Web Services</p>
+                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
+                                <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('aws')"><i class="fas fa-cog"></i> Configure</button>
+                            </div>
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <i class="fab fa-google integration-icon-gcp"></i>
+                                    <h3>GCP</h3>
                                 </div>
-                    </div>
-                    
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-terminal"></i> Instance Terminal Access</h4>
-                                        <p>SSH/SSM access to EC2 instances via browser</p>
+                                <p>Google Cloud Platform</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('gcp')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureTerminal" onchange="toggleFeature('terminal', this.checked)" checked>
-                                        <span class="toggle-slider"></span>
-                                    </label>
-                            </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-success">✓ Enabled</span>
-                                    <span style="color: #666; font-size: 12px;">Included in license</span>
-                            </div>
-                            </div>
-
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><span class="icon-database"></span> Database Access Management</h4>
-                                        <p>Manage temporary database credentials and connections</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureDatabase" onchange="toggleFeature('database', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
-                                </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-warning">⚠ Disabled</span>
-                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
                         </div>
-                    </div>
-                    
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-cube"></i> Container Access Management</h4>
-                                        <p>Access Kubernetes pods and Docker containers</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureContainer" onchange="toggleFeature('container', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
+                        <h4 class="integrations-subtitle"><i class="fas fa-ticket-alt"></i> Ticketing</h4>
+                        <div class="integrations-grid integrations-grid-pam">
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <div class="integration-logo app-logo-jira">J</div>
+                                    <h3>Jira</h3>
                                 </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-warning">⚠ Disabled</span>
-                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
-                                </div>
+                                <p>Issue & Project Tracking</p>
+                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
+                                <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('jira')"><i class="fas fa-cog"></i> Configure</button>
                             </div>
-
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-key"></i> Secrets Manager Access</h4>
-                                        <p>Temporary access to secrets and credentials</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureSecrets" onchange="toggleFeature('secrets', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <div class="integration-logo">C</div>
+                                    <h3>Confluence</h3>
                                 </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-warning">⚠ Disabled</span>
-                                    <span style="color: #666; font-size: 12px;">Not in current license</span>
-                                </div>
+                                <p>Documentation & Wiki</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('confluence')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
-
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-chart-line"></i> Advanced Analytics</h4>
-                                        <p>Detailed reports and usage analytics</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureAnalytics" onchange="toggleFeature('analytics', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
+                        </div>
+                        <h4 class="integrations-subtitle"><i class="fas fa-shield-alt"></i> SIEM</h4>
+                        <div class="integrations-grid integrations-grid-pam">
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <div class="integration-logo">Ch</div>
+                                    <h3>Chronicle</h3>
                                 </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-warning">⚠ Disabled</span>
-                                    <span style="color: #666; font-size: 12px;">Premium feature</span>
-                                </div>
+                                <p>SIEM & Security Analytics</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('chronicle')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
-
-                            <div class="feature-card">
-                                <div class="feature-header">
-                                    <div>
-                                        <h4><i class="fas fa-brain"></i> Intelligent Permission Assistant</h4>
-                                        <p>AI-powered natural language understanding for permission requests</p>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="featureAI" onchange="toggleFeature('ai', this.checked)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
+                        </div>
+                        <h4 class="integrations-subtitle"><i class="fas fa-id-badge"></i> IGP</h4>
+                        <div class="integrations-grid integrations-grid-pam">
+                            <div class="integration-card integration-card-pam">
+                                <div class="integration-header">
+                                    <div class="integration-logo">JC</div>
+                                    <h3>JumpCloud</h3>
                                 </div>
-                                <div class="feature-status">
-                                    <span class="badge badge-warning">⚠ Disabled</span>
-                                    <span style="color: #666; font-size: 12px;">Premium feature</span>
-                                </div>
+                                <p>Identity & Device Management</p>
+                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
                         </div>
                     </div>
                 </div>
-                </div>
 
-                <!-- Admin Integrations Tab -->
-                <div id="adminIntegrationsTab" class="admin-tab" style="display: none;">
-                        <div class="integrations-grid">
-                            <div class="integration-card">
-                            <div class="integration-header">
-                                <div class="integration-logo app-logo-jira">J</div>
-                                <h3>JIRA</h3>
-                            </div>
-                            <p>Issue & Project Tracking System</p>
-                            <div class="integration-status connected">
-                                <i class="fas fa-check-circle"></i> Connected
-                            </div>
-                            <button class="btn-secondary" onclick="configureIntegration('jira')">
-                                <i class="fas fa-cog"></i> Configure
-                                </button>
-                            </div>
-                        
-                            <div class="integration-card">
-                            <div class="integration-header">
-                                <div class="integration-logo app-logo-splunk">S</div>
-                                <h3>Splunk</h3>
-                            </div>
-                            <p>Log Analysis & SIEM Platform</p>
-                            <div class="integration-status connected">
-                                <i class="fas fa-check-circle"></i> Connected
-                        </div>
-                            <button class="btn-secondary" onclick="configureIntegration('splunk')">
-                                <i class="fas fa-cog"></i> Configure
-                            </button>
-                    </div>
-                    
-                            <div class="integration-card">
-                            <div class="integration-header">
-                                <div class="integration-logo app-logo-servicenow">SN</div>
-                                <h3>ServiceNow</h3>
-                            </div>
-                            <p>IT Service Management Platform</p>
-                            <div class="integration-status disconnected">
-                                <i class="fas fa-times-circle"></i> Not Connected
-                            </div>
-                            <button class="btn-primary" onclick="configureIntegration('servicenow')">
-                                    <i class="fas fa-plug"></i> Connect
-                                </button>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Admin Security Tab -->
-                <div id="adminSecurityTab" class="admin-tab" style="display: none;">
-                    <!-- Sub-tabs -->
-                    <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="btn-secondary" id="securitySubTab" onclick="showSecuritySubTab('security')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
-                            <i class="fas fa-shield-alt"></i> Security
+                <!-- Admin Security Tab (PAM theme) -->
+                <div id="adminSecurityTab" class="admin-tab admin-tab-pam" style="display: none;">
+                    <div class="admin-subtabs">
+                        <button class="btn-secondary btn-pam admin-subtab active" id="securitySubTab" onclick="showSecuritySubTab('security')">
+                            <i class="fas fa-lock"></i> Security
                         </button>
-                        <button class="btn-secondary" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')" style="font-family: 'Inter', sans-serif;">
-                            <i class="fas fa-shield-check"></i> Guardrails
+                        <button class="btn-secondary btn-pam admin-subtab" id="guardrailsSubTab" onclick="showSecuritySubTab('guardrails')">
+                            <i class="fas fa-shield-alt"></i> Guardrails
                         </button>
-                        <button class="btn-secondary" id="auditSubTab" onclick="showSecuritySubTab('audit')" style="font-family: 'Inter', sans-serif;">
+                        <button class="btn-secondary btn-pam admin-subtab" id="auditSubTab" onclick="showSecuritySubTab('audit')">
                             <i class="fas fa-clipboard-list"></i> Audit Logs
                         </button>
                     </div>
@@ -2830,16 +2607,12 @@
             document.getElementById('securitySection').style.display = tab === 'security' ? 'block' : 'none';
             document.getElementById('guardrailsSection').style.display = tab === 'guardrails' ? 'block' : 'none';
             document.getElementById('auditSection').style.display = tab === 'audit' ? 'block' : 'none';
-            
-            const securityBtn = document.getElementById('securitySubTab');
-            const guardrailsBtn = document.getElementById('guardrailsSubTab');
-            const auditBtn = document.getElementById('auditSubTab');
-            
-            [securityBtn, guardrailsBtn, auditBtn].forEach(btn => {
-                btn.classList.remove('tab-glow-subtab-active');
-            });
-            const activeBtn = tab === 'security' ? securityBtn : (tab === 'guardrails' ? guardrailsBtn : auditBtn);
-            if (activeBtn) activeBtn.classList.add('tab-glow-subtab-active');
+            var securityBtn = document.getElementById('securitySubTab');
+            var guardrailsBtn = document.getElementById('guardrailsSubTab');
+            var auditBtn = document.getElementById('auditSubTab');
+            [securityBtn, guardrailsBtn, auditBtn].forEach(function(btn) { if (btn) { btn.classList.remove('active', 'tab-glow-subtab-active'); } });
+            var activeBtn = tab === 'security' ? securityBtn : (tab === 'guardrails' ? guardrailsBtn : auditBtn);
+            if (activeBtn) activeBtn.classList.add('active');
         }
             
         // Security Copilot Functions
@@ -2882,5 +2655,76 @@
             }, 500);
         }
     </script>
+    <!-- Modal overlay for Admin User/Group modals -->
+    <div id="modalOverlay" class="modal-overlay" onclick="if(event.target===this) closeModal();">
+        <div id="createUserModal" class="modal modal-pam">
+            <div class="modal-header">
+                <h3><i class="fas fa-user-plus"></i> Create User</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="createUserForm">
+                    <div class="form-group">
+                        <label>Name <span class="required">*</span></label>
+                        <input type="text" id="userFirstName" required placeholder="Full name">
+                    </div>
+                    <div class="form-group">
+                        <label>Email <span class="required">*</span></label>
+                        <input type="email" id="userEmail" required placeholder="user@company.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Role <span class="required">*</span></label>
+                        <select id="userRole" required>
+                            <option value="">Select Role</option>
+                            <option value="Readaccess">Readaccess</option>
+                            <option value="Manager">Manager</option>
+                            <option value="Admin">Admin</option>
+                        </select>
+                        <small class="form-hint">Readaccess: read-only PAM · Manager: users/groups, logs, guardrails, MFA, integrations · Admin: full access</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Group</label>
+                        <select id="userGroup">
+                            <option value="">Select Group (optional)</option>
+                            <option value="readaccess">readaccess</option>
+                            <option value="manager">manager</option>
+                            <option value="admin">admin</option>
+                        </select>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary btn-pam" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn-primary btn-pam">Create User</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <div id="createGroupModal" class="modal modal-pam">
+            <div class="modal-header">
+                <h3><i class="fas fa-users-cog"></i> Assign Users to Group</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="createGroupForm">
+                    <div class="form-group">
+                        <label>Group (predefined role) <span class="required">*</span></label>
+                        <select id="groupName" required>
+                            <option value="">Select Group</option>
+                            <option value="readaccess">readaccess (Readaccess)</option>
+                            <option value="manager">manager (Manager)</option>
+                            <option value="admin">admin (Admin)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Add Users to Group</label>
+                        <div id="groupUsersList" class="users-checklist">No users yet. Create users first.</div>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary btn-pam" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn-primary btn-pam">Assign to Group</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

@@ -194,7 +194,7 @@
                     <i class="fas fa-life-ring"></i> Support
                 </button>
                 <button class="header-glow-btn admin-only-nav" id="adminPanelBtn" onclick="showPage('admin')" style="margin-right: 1rem;">
-                    <i class="fas fa-shield-alt"></i> Admin Panel
+                    <i class="fas fa-cog"></i> Admin
                 </button>
                 <div class="profile-dropdown">
                     <button class="profile-btn" onclick="toggleProfileMenu()">
@@ -218,11 +218,6 @@
         <div class="app-layout">
             <aside class="sidebar" id="mainSidebar">
                 <nav class="sidebar-nav">
-                    <div class="nav-item active admin-only-nav" onclick="showPage('dashboard')">
-                        <i class="fas fa-tachometer-alt"></i>
-                        <span>Dashboard</span>
-                    </div>
-                    
                     <div class="nav-category">Management</div>
                     <div class="nav-item" onclick="showPage('requests')">
                         <i class="fas fa-list-alt"></i>
@@ -1585,13 +1580,10 @@
                             <i class="fas fa-users"></i> Users & Groups
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
-                            <i class="fas fa-cogs"></i> Management
-                        </button>
-                        <button class="admin-tab-btn" onclick="showAdminTab('features', event)">
-                            <i class="fas fa-toggle-on"></i> Features
+                            <i class="fas fa-sliders-h"></i> Management
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('security', event)">
-                            <i class="fas fa-shield-alt"></i> Security
+                            <i class="fas fa-lock"></i> Security
                         </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
@@ -1667,50 +1659,50 @@
                         </div>
                     </div>
 
-                    <!-- Groups Section (Access groups: ReadOnly, Manager, Admin) -->
+                    <!-- Groups Section (Default: readaccess, manager, admin) -->
                     <div id="groupsSection" style="display: none;">
                         <div class="groups-management">
                             <div class="section-header">
-                                <h3>Access Groups</h3>
-                                <p class="section-desc">Groups that define who can access the JIT tool and at what level. Same as roles.</p>
+                                <h3>Groups</h3>
+                                <p class="section-desc">Default groups with predefined roles. Attach a role when creating a group.</p>
                             </div>
                             <div class="groups-list">
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
-                                        <h4>ReadOnly</h4>
+                                        <h4><i class="fas fa-eye"></i> readaccess</h4>
                                         <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('ReadOnly')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('ReadOnly')">Delete</button>
+                                            <span class="badge badge-readaccess">Readaccess</span>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('readaccess')">Edit</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">Users can access the JIT console with read access.</p>
-                                        <p class="group-members"><strong>Members:</strong> <span id="readonlyGroupCount">0</span> users</p>
+                                        <p class="group-desc">Read-only access to PAM solution.</p>
+                                        <p class="group-members"><strong>Members:</strong> <span id="readaccessGroupCount">0</span> users</p>
                                     </div>
                                 </div>
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
-                                        <h4>Manager</h4>
+                                        <h4><i class="fas fa-user-tie"></i> manager</h4>
                                         <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Manager')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Manager')">Delete</button>
+                                            <span class="badge badge-manager">Manager</span>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('manager')">Edit</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">Integrations with cloud, create users and groups, download reports.</p>
+                                        <p class="group-desc">Create users/groups, download logs, create guardrails, reset MFA for others, integrations.</p>
                                         <p class="group-members"><strong>Members:</strong> <span id="managerGroupCount">0</span> users</p>
                                     </div>
                                 </div>
                                 <div class="group-detail-card">
                                     <div class="group-detail-header">
-                                        <h4>Admin</h4>
+                                        <h4><i class="fas fa-crown"></i> admin</h4>
                                         <div class="user-mgmt-actions">
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('Admin')">Edit</button>
-                                            <button class="user-mgmt-glow-btn btn-sm" onclick="deleteAccessGroup('Admin')">Delete</button>
+                                            <span class="badge badge-admin">Admin</span>
+                                            <button class="user-mgmt-glow-btn btn-sm" onclick="editAccessGroup('admin')">Edit</button>
                                         </div>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-desc">All above and manage guardrails, policies and security inside the tool.</p>
+                                        <p class="group-desc">Full access to PAM plus all Manager capabilities.</p>
                                         <p class="group-members"><strong>Members:</strong> <span id="adminGroupCount">0</span> users</p>
                                     </div>
                                 </div>
@@ -3063,17 +3055,19 @@
                     <label>Role <span class="required">*</span></label>
                     <select id="userRole" required>
                         <option value="">Select Role</option>
-                        <option value="ReadOnly">ReadOnly</option>
+                        <option value="Readaccess">Readaccess</option>
                         <option value="Manager">Manager</option>
                         <option value="Admin">Admin</option>
                     </select>
-                    <small class="form-hint">ReadOnly: View only | Manager: Approve requests, manage access | Admin: Full control</small>
+                    <small class="form-hint">Readaccess: read-only PAM · Manager: users/groups, logs, guardrails, MFA, integrations · Admin: full access</small>
                 </div>
                 <div class="form-group">
-                    <label>Add to Group</label>
+                    <label>Group</label>
                     <select id="userGroup">
                         <option value="">Select Group (optional)</option>
-                        <!-- Populated by populateGroupDropdown() -->
+                        <option value="readaccess">readaccess</option>
+                        <option value="manager">manager</option>
+                        <option value="admin">admin</option>
                     </select>
                 </div>
                 <div class="modal-actions">
@@ -3096,11 +3090,11 @@
                     <label>Group <span class="required">*</span></label>
                     <select id="groupName" required>
                         <option value="">Select Group</option>
-                        <option value="ReadOnly">ReadOnly</option>
-                        <option value="Manager">Manager</option>
-                        <option value="Admin">Admin</option>
+                        <option value="readaccess">readaccess (Readaccess)</option>
+                        <option value="manager">manager (Manager)</option>
+                        <option value="admin">admin (Admin)</option>
                     </select>
-                    <small class="form-hint">Access groups define who can use the JIT tool and at what level</small>
+                    <small class="form-hint">Default groups: readaccess, manager, admin. Attach users to a group.</small>
                 </div>
                 <div class="form-group">
                     <label>Add Users to Group</label>

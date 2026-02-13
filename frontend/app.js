@@ -407,24 +407,10 @@ function addAdminNavigation() {
         const adminBtn = document.createElement('button');
         adminBtn.id = 'adminNav';
         adminBtn.className = 'nav-btn';
-        adminBtn.innerHTML = '<i class="fas fa-shield-alt"></i> Admin Panel';
+        adminBtn.innerHTML = '<i class="fas fa-cog"></i> Admin';
         adminBtn.onclick = () => showPage('admin');
         nav.appendChild(adminBtn);
     }
-}
-
-function updateSidebarToggleState(collapsed) {
-    const toggle = document.getElementById('sidebarToggle');
-    if (!toggle) return;
-
-    const icon = document.getElementById('sidebarToggleIcon');
-    const label = document.getElementById('sidebarToggleLabel');
-    toggle.dataset.state = collapsed ? 'collapsed' : 'expanded';
-    toggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
-    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-
-    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
-    if (label) label.textContent = collapsed ? 'Show Menu' : 'Hide Menu';
 }
 
 function toggleSidebar(e) {
@@ -435,13 +421,17 @@ function toggleSidebar(e) {
     const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
-    if (!layout || !sidebar || !toggle) return;
+    if (!sidebar || !toggle) return;
     const collapsed = !layout.classList.contains('sidebar-collapsed');
     layout.classList.toggle('sidebar-collapsed', collapsed);
     sidebar.classList.toggle('sidebar-collapsed', collapsed);
     if (main) main.classList.toggle('main-expanded', collapsed);
     if (container) container.classList.toggle('sidebar-collapsed', collapsed);
-    updateSidebarToggleState(collapsed);
+    toggle.title = collapsed ? 'Expand sidebar (>>)' : 'Collapse sidebar (<<)';
+    const icon = document.getElementById('sidebarToggleIcon');
+    const label = document.getElementById('sidebarToggleLabel');
+    if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
+    if (label) label.textContent = collapsed ? '>>' : '<<';
     if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
     localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 }
@@ -450,6 +440,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const collapsed = localStorage.getItem('sidebarCollapsed') === '1';
     const layout = document.querySelector('.app-layout');
     const sidebar = document.getElementById('mainSidebar');
+    const toggle = document.getElementById('sidebarToggle');
     const expandFab = document.getElementById('sidebarExpandFab');
     const main = document.querySelector('.app-main');
     const container = document.querySelector('.app-container');
@@ -458,9 +449,9 @@ document.addEventListener('DOMContentLoaded', function() {
         sidebar.classList.add('sidebar-collapsed');
         main.classList.add('main-expanded');
         if (container) container.classList.add('sidebar-collapsed');
+        if (toggle) toggle.title = 'Expand sidebar (>>)';
+        if (expandFab) expandFab.style.display = 'flex';
     }
-    updateSidebarToggleState(collapsed);
-    if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
 });
 
 // Theme Management
@@ -490,21 +481,8 @@ function setTheme(theme) {
     }
 }
 
-function getEventTarget(evt) {
-    if (evt && evt.target) return evt.target;
-    if (typeof window !== 'undefined' && window.event && window.event.target) {
-        return window.event.target;
-    }
-    return null;
-}
-
 // Navigation
-function showPage(pageId, evt) {
-    // Backward compatibility: legacy "terminal" route now maps to VM Terminal.
-    if (pageId === 'terminal') {
-        pageId = 'vmTerminal';
-    }
-
+function showPage(pageId) {
     document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
@@ -525,9 +503,8 @@ function showPage(pageId, evt) {
     document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
         item.classList.remove('active');
     });
-    const navTarget = getEventTarget(evt);
-    if (navTarget) {
-        const navItem = navTarget.closest('.nav-item');
+    if (event && event.target) {
+        const navItem = event.target.closest('.nav-item');
         if (navItem) {
             navItem.classList.add('active');
         }
@@ -553,16 +530,8 @@ function showPage(pageId, evt) {
         loadAdminPage();
     } else if (pageId === 'instances') {
         loadInstances();
-    } else if (pageId === 'databaseTerminal') {
-        if (typeof initDatabaseTerminalPage === 'function') {
-            initDatabaseTerminalPage();
-        } else if (typeof loadTerminalDbConnections === 'function') {
-            loadTerminalDbConnections('database');
-        }
-    } else if (pageId === 'vmTerminal') {
-        if (typeof initVmTerminalPage === 'function') {
-            initVmTerminalPage();
-        } else if (typeof initTerminalPage === 'function') {
+    } else if (pageId === 'terminal') {
+        if (typeof initTerminalPage === 'function') {
             initTerminalPage();
         } else if (typeof refreshApprovedInstances === 'function') {
             refreshApprovedInstances();
@@ -608,71 +577,52 @@ function showPage(pageId, evt) {
 // Admin Tab Navigation
 function showAdminTab(tabId, event) {
     // Hide all admin tabs
-    document.querySelectorAll('#adminPage .admin-tab').forEach(tab => {
+    document.querySelectorAll('.admin-tab').forEach(tab => {
         tab.style.display = 'none';
         tab.classList.remove('active');
     });
     
-    // Map tab IDs - from sso_backup_20260203_173529 (Dashboard first, no Reports)
     const tabMap = {
-        'dashboard': 'adminDashboardTab',
         'users': 'adminUsersTab',
         'policies': 'adminPoliciesTab',
-        'features': 'adminFeaturesTab',
         'security': 'adminSecurityTab',
         'integrations': 'adminIntegrationsTab',
         'reports': 'adminReportsTab'
     };
-
-    // Fallback order guarantees at least one admin tab remains visible.
-    const fallbackOrder = ['users', 'dashboard', 'policies', 'features', 'security', 'integrations', 'reports'];
-    let effectiveTabId = tabId;
+    if (!tabMap[tabId] || !document.getElementById(tabMap[tabId])) tabId = 'users';
     
-    // Show selected tab (use setProperty important to override design-system.css !important)
-    let targetTab = document.getElementById(tabMap[effectiveTabId]);
-    if (!targetTab) {
-        effectiveTabId = fallbackOrder.find(id => document.getElementById(tabMap[id])) || null;
-        targetTab = effectiveTabId ? document.getElementById(tabMap[effectiveTabId]) : null;
-    }
+    const targetTab = document.getElementById(tabMap[tabId]);
     if (targetTab) {
         targetTab.style.setProperty('display', 'block', 'important');
         targetTab.style.setProperty('visibility', 'visible', 'important');
         targetTab.classList.add('active');
-        console.log('✅ Showing admin tab:', effectiveTabId, targetTab);
+        console.log('✅ Showing admin tab:', tabId, targetTab);
     } else {
         console.error('❌ Admin tab not found:', tabId, tabMap[tabId]);
-        return;
     }
     
     // Update tab buttons
-    document.querySelectorAll('#adminPage .admin-tab-btn').forEach(btn => {
+    document.querySelectorAll('.admin-tab-btn').forEach(btn => {
         btn.classList.remove('active');
     });
     if (event && event.target) {
         const btn = event.target.closest('.admin-tab-btn');
         if (btn) btn.classList.add('active');
     } else {
-        // Fallback: find button by resolved tab id
-        const btn = document.querySelector(`#adminPage .admin-tab-btn[onclick*="'${effectiveTabId}'"]`);
+        // Fallback: find button by tabId
+        const btn = document.querySelector(`.admin-tab-btn[onclick*="'${tabId}'"]`);
         if (btn) btn.classList.add('active');
     }
     
-    // Load tab-specific data
-    if (effectiveTabId === 'dashboard') {
-        if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
-        setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
-    } else if (effectiveTabId === 'users') {
+    if (tabId === 'users') {
         if (typeof loadUsersManagement === 'function') loadUsersManagement();
-    } else if (effectiveTabId === 'policies') {
+    } else if (tabId === 'policies') {
         if (typeof initPolicyConfig === 'function') initPolicyConfig();
-        // Always reload policy settings when showing policies tab
         setTimeout(() => {
             if (typeof loadPolicySettings === 'function') loadPolicySettings();
         }, 100);
         if (typeof loadAccountsForTagging === 'function') loadAccountsForTagging();
-    } else if (effectiveTabId === 'features') {
-        // Features tab - already rendered
-    } else if (effectiveTabId === 'security') {
+    } else if (tabId === 'security') {
         // Ensure security section is visible by default
         setTimeout(() => {
             const secSection = document.getElementById('securitySection');
@@ -683,7 +633,7 @@ function showAdminTab(tabId, event) {
             if (auditSection) auditSection.style.display = 'none';
         }, 10);
         if (typeof loadAuditLogs === 'function') loadAuditLogs();
-    } else if (effectiveTabId === 'integrations') {
+    } else if (tabId === 'integrations') {
         // Integrations tab - already rendered
     }
 }
@@ -1050,11 +1000,10 @@ function loadWorkloadsRequests() {
     list.innerHTML = '<div class="requests-empty">No workload requests</div>';
 }
 
-function filterRequests(filter, evt) {
+function filterRequests(filter) {
     currentFilter = filter;
-    const target = getEventTarget(evt);
-    if (target) {
-        target.classList.add('active');
+    if (event && event.target) {
+        event.target.classList.add('active');
     }
     loadRequestsPage();
 }
@@ -1134,9 +1083,6 @@ function loadRequestsPage() {
     // Load database requests into My Requests page
     if (typeof loadDbRequests === 'function') {
         loadDbRequests();
-    }
-    if (typeof refreshApprovedDatabases === 'function') {
-        refreshApprovedDatabases();
     }
     // Load storage and workloads (placeholders for now)
     loadStorageRequests();
@@ -1729,7 +1675,7 @@ function calculateRiskScore(permissions, useCase) {
     return Math.min(risk, 10);
 }
 
-async function generateAIPermissions(evt) {
+async function generateAIPermissions() {
     const useCase = document.getElementById('aiUseCase').value;
     if (!useCase) {
         alert('Please describe what you need to do');
@@ -1742,12 +1688,10 @@ async function generateAIPermissions(evt) {
     
     // Backend will handle all validation - just send the request
     
-    const button = getEventTarget(evt);
-    const originalText = button ? button.innerHTML : '';
-    if (button) {
-        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
-        button.disabled = true;
-    }
+    const button = event.target;
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+    button.disabled = true;
     
     try {
         const response = await fetch(`${API_BASE}/generate-permissions`, {
@@ -1872,10 +1816,8 @@ async function generateAIPermissions(evt) {
         console.error('Error generating permissions:', error);
         alert('Error generating permissions. Please try again.');
     } finally {
-        if (button) {
-            button.innerHTML = originalText;
-            button.disabled = false;
-        }
+        button.innerHTML = originalText;
+        button.disabled = false;
     }
 }
 
@@ -2082,24 +2024,8 @@ function loadAdminPage() {
         adminPage.style.setProperty('display', 'block', 'important');
         adminPage.style.setProperty('visibility', 'visible', 'important');
     }
-    var usersTab = document.getElementById('adminUsersTab');
-    var dashboardTab = document.getElementById('adminDashboardTab');
-    if (usersTab) {
-        showAdminTab('users');
-    } else if (dashboardTab) {
-        showAdminTab('dashboard');
-        if (typeof updateAdminDashboard === 'function') updateAdminDashboard();
-        setTimeout(function() { if (typeof loadCharts === 'function') loadCharts(); }, 300);
-    }
-    // Re-apply visibility after a frame so delayed updateUIForRole or CSS cannot leave admin blank
-    requestAnimationFrame(function() {
-        if (adminPage && document.body.getAttribute('data-page') === 'admin') {
-            adminPage.style.setProperty('display', 'block', 'important');
-            adminPage.style.setProperty('visibility', 'visible', 'important');
-            var activeTab = document.querySelector('#adminPage .admin-tab.active');
-            if (activeTab) activeTab.style.setProperty('display', 'block', 'important');
-        }
-    });
+    showAdminTab('users');
+    if (typeof loadUsersManagement === 'function') loadUsersManagement();
 }
 
 
@@ -2481,11 +2407,10 @@ function isValidEmail(email) {
     return emailRegex.test(email);
 }
 
-function switchOtherAccessType(type, evt) {
+function switchOtherAccessType(type) {
     // Update tab buttons
     document.querySelectorAll('#requestForOthersModal .tab-btn').forEach(btn => btn.classList.remove('active'));
-    const target = getEventTarget(evt);
-    if (target) target.classList.add('active');
+    event.target.classList.add('active');
     
     // Update tab content
     document.querySelectorAll('#requestForOthersModal .tab-content').forEach(content => content.classList.remove('active'));
@@ -2494,7 +2419,7 @@ function switchOtherAccessType(type, evt) {
 
 let otherCurrentAIPermissions = null;
 
-async function generateOtherAIPermissions(evt) {
+async function generateOtherAIPermissions() {
     const useCase = document.getElementById('otherAiUseCase').value;
     if (!useCase) {
         alert('Please describe what users need to do');
@@ -2513,12 +2438,10 @@ async function generateOtherAIPermissions(evt) {
         return;
     }
     
-    const button = getEventTarget(evt);
-    const originalText = button ? button.innerHTML : '';
-    if (button) {
-        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
-        button.disabled = true;
-    }
+    const button = event.target;
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Generating...';
+    button.disabled = true;
     
     try {
         const response = await fetch(`${API_BASE}/generate-permissions`, {
@@ -2556,10 +2479,8 @@ async function generateOtherAIPermissions(evt) {
         console.error('Error generating permissions:', error);
         alert('Error generating permissions. Please try again.');
     } finally {
-        if (button) {
-            button.innerHTML = originalText;
-            button.disabled = false;
-        }
+        button.innerHTML = originalText;
+        button.disabled = false;
     }
 }
 

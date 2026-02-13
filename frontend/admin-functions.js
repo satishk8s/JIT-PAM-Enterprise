@@ -1,10 +1,15 @@
 // Admin Functions - User & Group Management
 
-// Access groups (who accesses the tool) - ReadOnly, Manager, Admin (same as roles)
+// Default groups and roles: readaccess, manager, admin (attach role when creating user/group)
 window.USER_MGMT_GROUPS = window.USER_MGMT_GROUPS || [
-    { id: 'ReadOnly', name: 'ReadOnly' },
-    { id: 'Manager', name: 'Manager' },
-    { id: 'Admin', name: 'Admin' }
+    { id: 'readaccess', name: 'readaccess', role: 'Readaccess' },
+    { id: 'manager', name: 'manager', role: 'Manager' },
+    { id: 'admin', name: 'admin', role: 'Admin' }
+];
+window.PAM_ROLES = [
+    { id: 'Readaccess', name: 'Readaccess', desc: 'Read-only access to PAM' },
+    { id: 'Manager', name: 'Manager', desc: 'Create users/groups, logs, guardrails, reset MFA, integrations' },
+    { id: 'Admin', name: 'Admin', desc: 'Full access to PAM' }
 ];
 window.USER_MGMT_USERS = window.USER_MGMT_USERS || [];
 
@@ -44,15 +49,20 @@ function showCreateGroupModal() {
     document.getElementById('createGroupForm').reset();
 }
 
-// Populate group dropdown from groups store
+// Populate group dropdown (readaccess, manager, admin) and role dropdown
 function populateGroupDropdown() {
     var sel = document.getElementById('userGroup');
-    if (!sel) return;
-    var groups = window.USER_MGMT_GROUPS || [];
-    sel.innerHTML = '<option value="">Select Group (optional)</option>' +
-        groups.map(function(g) {
-            return '<option value="' + (g.id || g.name) + '">' + (g.name || g.id) + '</option>';
-        }).join('');
+    if (sel) {
+        var groups = window.USER_MGMT_GROUPS || [];
+        sel.innerHTML = '<option value="">Select Group (optional)</option>' +
+            groups.map(function(g) { return '<option value="' + (g.id || g.name) + '">' + (g.name || g.id) + '</option>'; }).join('');
+    }
+    var roleSel = document.getElementById('userRole');
+    if (roleSel && !roleSel.dataset.populated) {
+        var roles = window.PAM_ROLES || [{ id: 'Readaccess', name: 'Readaccess' }, { id: 'Manager', name: 'Manager' }, { id: 'Admin', name: 'Admin' }];
+        roleSel.innerHTML = '<option value="">Select Role</option>' + roles.map(function(r) { return '<option value="' + (r.id || r.name) + '">' + (r.name || r.id) + '</option>'; }).join('');
+        roleSel.dataset.populated = 'true';
+    }
 }
 
 // Populate users checklist for Add Group modal
@@ -150,11 +160,12 @@ function addUserToStore(user) {
 
 function updateAccessGroupCounts() {
     var users = window.USER_MGMT_USERS || [];
-    var readonly = users.filter(function(u) { return u.role === 'ReadOnly'; }).length;
-    var manager = users.filter(function(u) { return u.role === 'Manager'; }).length;
-    var admin = users.filter(function(u) { return u.role === 'Admin'; }).length;
+    var readaccess = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'readaccess' || r === 'readonly'; }).length;
+    var manager = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'manager'; }).length;
+    var admin = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'admin'; }).length;
     var el;
-    if (el = document.getElementById('readonlyGroupCount')) el.textContent = readonly;
+    if (el = document.getElementById('readaccessGroupCount')) el.textContent = readaccess;
+    if (el = document.getElementById('readonlyGroupCount')) el.textContent = readaccess;
     if (el = document.getElementById('managerGroupCount')) el.textContent = manager;
     if (el = document.getElementById('adminGroupCount')) el.textContent = admin;
 }
