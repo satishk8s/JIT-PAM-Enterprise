@@ -591,6 +591,7 @@ function showAdminTab(tabId, event) {
         'policies': 'adminPoliciesTab',
         'security': 'adminSecurityTab',
         'integrations': 'adminIntegrationsTab',
+        'databaseSessions': 'adminDatabaseSessionsTab',
         'reports': 'adminReportsTab'
     };
     if (!tabMap[tabId] || !document.getElementById(tabMap[tabId])) tabId = 'users';
@@ -626,6 +627,8 @@ function showAdminTab(tabId, event) {
             if (typeof loadPolicySettings === 'function') loadPolicySettings();
         }, 100);
         if (typeof loadAccountsForTagging === 'function') loadAccountsForTagging();
+    } else if (tabId === 'databaseSessions') {
+        if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
     } else if (tabId === 'security') {
         // Ensure security section is visible by default
         setTimeout(() => {
@@ -640,6 +643,70 @@ function showAdminTab(tabId, event) {
     } else if (tabId === 'integrations') {
         // Integrations tab - already rendered
     }
+}
+
+// Admin: Database Sessions (emergency revoke)
+function loadAdminDatabaseSessions() {
+    var tbody = document.getElementById('adminDbSessionsTableBody');
+    var emptyEl = document.getElementById('adminDbSessionsEmpty');
+    var revokeBtn = document.getElementById('adminRevokeDbSessionsBtn');
+    var selectAll = document.getElementById('adminDbSessionsSelectAll');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Loading…</td></tr>';
+    if (emptyEl) emptyEl.style.display = 'none';
+    var apiBase = window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'));
+    fetch(apiBase + '/admin/database-sessions')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var sessions = (data && data.sessions) ? data.sessions : [];
+            if (sessions.length === 0) {
+                tbody.innerHTML = '';
+                if (emptyEl) { emptyEl.style.display = 'block'; emptyEl.textContent = 'No active database sessions.'; }
+                if (revokeBtn) revokeBtn.style.display = 'none';
+                if (selectAll) selectAll.checked = false;
+                return;
+            }
+            if (emptyEl) emptyEl.style.display = 'none';
+            if (revokeBtn) revokeBtn.style.display = 'inline-flex';
+            tbody.innerHTML = sessions.map(function(s) {
+                var exp = (s.expires_at || '').replace('T', ' ').substring(0, 19);
+                return '<tr><td><input type="checkbox" class="admin-db-session-cb" value="' + (s.request_id || '') + '"></td><td>' + (s.user_email || '—') + '</td><td><code>' + (s.request_id || '—') + '</code></td><td>' + (s.engine || 'mysql') + '</td><td>' + exp + '</td></tr>';
+            }).join('');
+            if (selectAll) selectAll.checked = false;
+        })
+        .catch(function(err) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-danger">Failed to load sessions.</td></tr>';
+            if (revokeBtn) revokeBtn.style.display = 'none';
+        });
+}
+function toggleAdminDbSessionsSelectAll(checkbox) {
+    document.querySelectorAll('.admin-db-session-cb').forEach(function(cb) { cb.checked = !!checkbox.checked; });
+}
+function revokeSelectedDatabaseSessions() {
+    var checked = document.querySelectorAll('.admin-db-session-cb:checked');
+    var ids = [];
+    checked.forEach(function(cb) { if (cb.value) ids.push(cb.value); });
+    if (ids.length === 0) {
+        alert('Select at least one session to revoke.');
+        return;
+    }
+    if (!confirm('Revoke ' + ids.length + ' database session(s)? This will remove access in Vault and revoke the user\'s DB access immediately.')) return;
+    var apiBase = window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'));
+    fetch(apiBase + '/admin/revoke-database-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ request_ids: ids, reason: 'Emergency revoke by admin' })
+    })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var revoked = (data && data.revoked) ? data.revoked.length : 0;
+            var failed = (data && data.failed) ? data.failed.length : 0;
+            if (revoked) alert('Revoked ' + revoked + ' session(s).' + (failed ? ' Failed: ' + failed : ''));
+            if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
+        })
+        .catch(function() {
+            alert('Revoke request failed.');
+        });
 }
 
 // Profile Menu

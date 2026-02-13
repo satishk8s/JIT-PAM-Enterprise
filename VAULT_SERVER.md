@@ -110,3 +110,14 @@ curl -s http://127.0.0.1:5000/api/health
 - [ ] `database/config/mysql`, `database/roles/jit-read-role` in Vault
 - [ ] Proxy 5002, Flask 5000
 - [ ] `USE_DB_PROXY=true`, `VAULT_ADDR`, `VAULT_TOKEN` set
+
+---
+
+## Admin: Emergency revoke (Database Sessions)
+
+Admins can revoke active database access from **Admin → Database Sessions**: the app calls Vault to revoke the lease and (optionally) delete the dynamic role. **No extra Vault configuration is required.** The token used by the app (`VAULT_TOKEN` or AppRole) must have:
+
+- `sys/leases/revoke` (or a policy that allows revoking leases created by the database engine)
+- Delete on `database/roles/<role_name>` for the dynamic roles created by the app
+
+If the app already creates dynamic DB roles and issues credentials, the same token typically has these capabilities. If revoke fails with permission denied, add a policy that allows `sys/leases/revoke` and `database/roles/*` delete.

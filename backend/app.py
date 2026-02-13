@@ -1698,17 +1698,41 @@ def delete_request(request_id):
 
 @app.route('/api/request/<request_id>/revoke', methods=['POST'])
 def revoke_access(request_id):
-    """Admin function to immediately revoke access"""
+    """Admin function to immediately revoke access (AWS or database)."""
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
-    
+
     access_request = requests_db[request_id]
-    if access_request['status'] != 'approved':
-        return jsonify({'error': 'Can only revoke approved requests'}), 400
-    
-    data = request.json
+    if access_request.get('status') not in ('approved', 'active'):
+        return jsonify({'error': 'Can only revoke approved or active requests'}), 400
+
+    data = request.json or {}
     revoke_reason = data.get('reason', 'Security revocation by admin')
-    
+
+    # Database access: revoke Vault lease and mark request revoked
+    if access_request.get('type') == 'database_access':
+        lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
+        role_name = str(access_request.get('role_name') or access_request.get('vault_role_name') or '').strip()
+        try:
+            if lease_id:
+                VaultManager.revoke_lease(lease_id)
+            if role_name:
+                VaultManager.delete_database_role(role_name)
+        except Exception as e:
+            print(f"Vault revoke (best-effort) for {request_id}: {e}")
+        access_request['status'] = 'revoked'
+        access_request['revoked_at'] = datetime.now().isoformat()
+        access_request['revoke_reason'] = revoke_reason
+        access_request['vault_token'] = ''
+        access_request['password'] = ''
+        access_request['db_password'] = ''
+        _save_requests()
+        return jsonify({
+            'status': 'revoked',
+            'message': f'Database access revoked. Reason: {revoke_reason}',
+        })
+
+    # AWS / other: revoke SSO assignment
     try:
         # Revoke AWS SSO assignment
         sso_admin = boto3.client('sso-admin', region_name='ap-south-1')
@@ -1779,6 +1803,77 @@ def revoke_access(request_id):
     except Exception as e:
         print(f"Error revoking access: {str(e)}")
         return jsonify({'error': f'Revocation failed: {str(e)}'}), 500
+
+
+@app.route('/api/admin/database-sessions', methods=['GET'])
+def admin_list_database_sessions():
+    """List all active database access sessions (for admin emergency revoke)."""
+    sessions = []
+    now = datetime.now()
+    for req_id, req in requests_db.items():
+        if not isinstance(req, dict) or req.get('type') != 'database_access':
+            continue
+        status = str(req.get('status') or '').strip().lower()
+        if status != 'active':
+            continue
+        if _is_db_request_expired(req, now=now):
+            continue
+        engine = 'mysql'
+        if req.get('databases') and isinstance(req['databases'][0], dict):
+            engine = str(req['databases'][0].get('engine') or 'mysql').strip()
+        sessions.append({
+            'request_id': req_id,
+            'user_email': str(req.get('user_email') or '').strip(),
+            'db_username': str(req.get('db_username') or '').strip()[:3] + '***' if req.get('db_username') else '—',
+            'engine': engine,
+            'expires_at': str(req.get('expires_at') or '').strip(),
+        })
+    return jsonify({'sessions': sessions})
+
+
+@app.route('/api/admin/revoke-database-sessions', methods=['POST'])
+def admin_revoke_database_sessions():
+    """Revoke selected database access sessions (emergency revoke). Calls Vault to revoke lease and remove DB user."""
+    data = request.json or {}
+    request_ids = data.get('request_ids') or []
+    reason = str(data.get('reason') or 'Emergency revoke by admin').strip()
+    if not isinstance(request_ids, list):
+        request_ids = []
+    revoked = []
+    failed = []
+    for req_id in request_ids:
+        if req_id not in requests_db:
+            failed.append({'request_id': req_id, 'error': 'not_found'})
+            continue
+        req = requests_db[req_id]
+        if not isinstance(req, dict) or req.get('type') != 'database_access':
+            failed.append({'request_id': req_id, 'error': 'not_database_request'})
+            continue
+        status = str(req.get('status') or '').strip().lower()
+        if status not in ('active', 'approved'):
+            failed.append({'request_id': req_id, 'error': 'not_active'})
+            continue
+        lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+        role_name = str(req.get('role_name') or req.get('vault_role_name') or '').strip()
+        try:
+            if lease_id:
+                VaultManager.revoke_lease(lease_id)
+            if role_name:
+                VaultManager.delete_database_role(role_name)
+        except Exception as e:
+            print(f"Vault revoke for {req_id}: {e}")
+            failed.append({'request_id': req_id, 'error': str(e)})
+            continue
+        req['status'] = 'revoked'
+        req['revoked_at'] = datetime.now().isoformat()
+        req['revoke_reason'] = reason
+        req['vault_token'] = ''
+        req['password'] = ''
+        req['db_password'] = ''
+        revoked.append(req_id)
+    _save_requests()
+    return jsonify({'revoked': revoked, 'failed': failed, 'reason': reason})
+
 
 @app.route('/api/approve/<request_id>', methods=['POST'])
 def approve_request(request_id):

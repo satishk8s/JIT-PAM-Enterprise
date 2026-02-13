@@ -1604,6 +1604,9 @@
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
                         </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('databaseSessions', event)">
+                            <i class="fas fa-database"></i> Database Sessions
+                        </button>
                     </div>
                 </div>
 
@@ -2274,6 +2277,39 @@
                                 </div>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Admin Database Sessions Tab (emergency revoke) -->
+                <div id="adminDatabaseSessionsTab" class="admin-tab admin-tab-pam" style="display: none;">
+                    <div class="admin-tab-pam-inner">
+                        <div class="section-header">
+                            <div>
+                                <h3><i class="fas fa-database"></i> Database access sessions</h3>
+                                <p class="admin-role-hint">Active database access granted via Vault. Select sessions and revoke to remove user access immediately (emergency revoke).</p>
+                            </div>
+                            <div class="header-actions">
+                                <button type="button" class="btn-secondary btn-pam" onclick="loadAdminDatabaseSessions()"><i class="fas fa-sync-alt"></i> Refresh</button>
+                                <button type="button" class="btn-danger btn-pam" id="adminRevokeDbSessionsBtn" onclick="revokeSelectedDatabaseSessions()" style="display: none;"><i class="fas fa-times-circle"></i> Revoke selected</button>
+                            </div>
+                        </div>
+                        <div class="db-sessions-table-wrap">
+                            <table class="users-table" id="adminDbSessionsTable">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 40px;"><input type="checkbox" id="adminDbSessionsSelectAll" onclick="toggleAdminDbSessionsSelectAll(this)" title="Select all"></th>
+                                        <th>User</th>
+                                        <th>Request ID</th>
+                                        <th>Engine</th>
+                                        <th>Expires</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="adminDbSessionsTableBody">
+                                    <tr><td colspan="5" class="text-muted">Loading…</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <p id="adminDbSessionsEmpty" class="text-muted" style="display: none;">No active database sessions.</p>
                     </div>
                 </div>
 

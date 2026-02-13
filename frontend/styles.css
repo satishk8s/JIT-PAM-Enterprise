@@ -2151,6 +2151,8 @@ td {
 .integration-logo-jumpcloud { background: rgba(227, 25, 55, 0.12); }
 .integration-logo-servicenow { background: rgba(129, 181, 161, 0.2); }
 .integrations-tab-pane { padding-top: 1rem; }
+.db-sessions-table-wrap { overflow-x: auto; margin-top: 1rem; }
+.db-sessions-table-wrap .users-table { width: 100%; }
 
 /* Terminal pages: ensure content visible when active */
 #databaseTerminalPage.page.active,
