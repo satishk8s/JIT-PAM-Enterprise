@@ -48,6 +48,7 @@ vault write database/config/mysql \
     plugin_name=mysql-database-plugin \
     connection_url="{{username}}:{{password}}@tcp(127.0.0.1:3306)/" \
     allowed_roles="jit-*" \
+    username_template="D-{{.RoleName}}-{{random 4}}" \
     username="root" \
     password="YourRootPassword"
 

@@ -88,7 +88,7 @@ Goal:
 
 Implementation:
 - Vault role creation sets `username_template` so the generated DB user looks like:
-  - `d_<user>_<rid>_<rand>`
+  - `D-jit_<user>-<rid>-<rand>`
 
 `backend/vault_manager.py`:
 
@@ -108,6 +108,16 @@ body={
 Notes:
 - MySQL usernames are limited to 32 chars, so NPAMX truncates the template safely.
 - A small random suffix is included to avoid collisions if credentials are minted more than once.
+- Some Vault versions generate usernames using a **connection-level** template (and ignore role-level templates).
+  If you still see usernames like `v-approle-...`, set the database connection `username_template` in Vault:
+
+```bash
+# Run on the Vault server. Use your real connection name (default in NPAMX: "my-mysql").
+# IMPORTANT: When writing database/config, include your existing config fields (plugin_name, connection_url, allowed_roles, etc.)
+# to avoid overwriting them.
+vault write database/config/my-mysql \
+  username_template="D-{{.RoleName}}-{{random 4}}"
+```
 
 ### 4.2 Approval Hook Calls Activation
 

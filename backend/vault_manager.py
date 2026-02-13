@@ -201,7 +201,9 @@ class VaultManager:
         suffix = f"-{{{{random {rand_len}}}}}"
 
         base = f"D-jit_{user_frag}-{rid_short}"
-        base_max = max_len - len(suffix)
+        # Account for the rendered random suffix length (e.g. "-abcd" is 1+4 chars),
+        # not the literal template text length (e.g. "-{{random 4}}").
+        base_max = max_len - (1 + rand_len)
         if base_max < 1:
             base = base[: max_len]
             return base
@@ -260,9 +262,14 @@ class VaultManager:
         connection = VaultManager._env("VAULT_DB_CONNECTION_NAME") or "my-mysql"
 
         # Per-request Vault role name (Vault config object).
-        # Updated: include requester identity for traceability.
-        requester_frag = VaultManager._normalize_user_fragment(requester)[:20]
-        role_name = f"jit_{requester_frag}_{rid}" if requester_frag else f"jit_{rid}"
+        #
+        # Keep it short and traceable (user + request-id fragment). This matters because
+        # Vault's DB username templating often derives from RoleName and DB engines like
+        # MySQL have strict identifier limits (32 chars).
+        requester_frag = VaultManager._normalize_user_fragment(requester)[:12]
+        rid_clean = re.sub(r"[^a-z0-9]", "", rid.lower())
+        rid_short = (rid_clean[:8] or "req")
+        role_name = f"jit_{requester_frag}-{rid_short}" if requester_frag else f"jit_{rid_short}"
         # Keep role names URL-safe.
         role_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", role_name)
 
