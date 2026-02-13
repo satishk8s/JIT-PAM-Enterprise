@@ -1709,19 +1709,16 @@ def revoke_access(request_id):
     data = request.json or {}
     revoke_reason = data.get('reason', 'Security revocation by admin')
 
-    # Database access: revoke Vault lease and mark request revoked
+    # Database access: revoke by full lease_id only; Vault owns lifecycle (revocation_statements run on revoke).
     if access_request.get('type') == 'database_access':
         lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
-        role_name = str(access_request.get('role_name') or access_request.get('vault_role_name') or '').strip()
-        db_username = str(access_request.get('db_username') or '').strip()
+        if not lease_id:
+            return jsonify({'error': 'No lease_id on request; cannot revoke'}), 400
         try:
-            if lease_id:
-                VaultManager.revoke_lease(lease_id)
-            if role_name:
-                VaultManager.delete_database_role(role_name)
+            VaultManager.revoke_lease(lease_id)
         except Exception as e:
-            print(f"Vault revoke (best-effort) for {request_id}: {e}")
-        _drop_mysql_user_if_configured(db_username)
+            print(f"Vault lease revoke failed for {request_id}: {e}")
+            return jsonify({'error': f'Vault revoke failed: {e}'}), 502
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
@@ -1835,7 +1832,7 @@ def admin_list_database_sessions():
 
 @app.route('/api/admin/revoke-database-sessions', methods=['POST'])
 def admin_revoke_database_sessions():
-    """Revoke selected database access sessions (emergency revoke). Calls Vault to revoke lease and remove DB user."""
+    """Revoke selected database access sessions. Calls Vault lease revoke with full lease_id; Vault runs revocation_statements."""
     data = request.json or {}
     request_ids = data.get('request_ids') or []
     reason = str(data.get('reason') or 'Emergency revoke by admin').strip()
@@ -1856,18 +1853,15 @@ def admin_revoke_database_sessions():
             failed.append({'request_id': req_id, 'error': 'not_active'})
             continue
         lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
-        role_name = str(req.get('role_name') or req.get('vault_role_name') or '').strip()
-        db_username = str(req.get('db_username') or '').strip()
+        if not lease_id:
+            failed.append({'request_id': req_id, 'error': 'no_lease_id'})
+            continue
         try:
-            if lease_id:
-                VaultManager.revoke_lease(lease_id)
-            if role_name:
-                VaultManager.delete_database_role(role_name)
+            VaultManager.revoke_lease(lease_id)
         except Exception as e:
             print(f"Vault revoke for {req_id}: {e}")
             failed.append({'request_id': req_id, 'error': str(e)})
             continue
-        _drop_mysql_user_if_configured(db_username)
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason
@@ -2949,25 +2943,17 @@ def background_cleanup():
                         # Vault handles revocation automatically via lease TTL. We only:
                         # 1) best-effort revoke the lease early (optional)
                         # 2) mark request expired in NPAMX and clear sensitive fields
-                        lease_id = str(access_request.get('vault_lease_id') or '').strip()
+                        lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
                         if lease_id:
                             try:
                                 VaultManager.revoke_lease(lease_id)
                             except Exception:
                                 pass
-
                         access_request['status'] = 'EXPIRED'
                         access_request['expired_at'] = now.isoformat()
                         access_request['vault_token'] = ''
                         access_request['password'] = ''
                         access_request['db_password'] = ''
-                        # Optional: delete the per-request Vault role (best-effort).
-                        role_name = str(access_request.get('role_name') or access_request.get('vault_role_name') or '').strip()
-                        if role_name:
-                            try:
-                                VaultManager.delete_database_role(role_name)
-                            except Exception:
-                                pass
                     except Exception as db_err:
                         print(f"❌ DB expiry handling error: {db_err}")
                     changed = True
@@ -4019,34 +4005,8 @@ def manage_ai_config():
         return jsonify({'error': str(e)}), 500
 
 # Database endpoints
-from database_manager import create_database_user, execute_query, revoke_database_access, generate_password
+from database_manager import create_database_user, execute_query, generate_password
 from vault_manager import VaultManager
-
-
-def _drop_mysql_user_if_configured(db_username):
-    """When DB_ADMIN_* env vars are set, DROP the MySQL user so revoke is guaranteed even if Vault revocation didn't run."""
-    if not db_username or not isinstance(db_username, str):
-        return
-    username = str(db_username).strip()
-    if not username:
-        return
-    host = str(os.getenv("DB_ADMIN_HOST") or os.getenv("DB_CONNECT_PROXY_HOST") or "127.0.0.1").strip()
-    try:
-        port = int(os.getenv("DB_ADMIN_PORT") or os.getenv("DB_CONNECT_PROXY_PORT") or 3306)
-    except Exception:
-        port = 3306
-    admin_user = str(os.getenv("DB_ADMIN_USER") or "").strip()
-    admin_password = str(os.getenv("DB_ADMIN_PASSWORD") or "").strip()
-    if not admin_user or not admin_password:
-        return
-    try:
-        out = revoke_database_access(host, port, admin_user, admin_password, username)
-        if out.get("error"):
-            print(f"DB DROP USER fallback for {username}: {out['error']}")
-        else:
-            print(f"DB DROP USER fallback succeeded for {username}")
-    except Exception as e:
-        print(f"DB DROP USER fallback for {username}: {e}")
 
 # Database AI conversation storage
 db_conversations = {}

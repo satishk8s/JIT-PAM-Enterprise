@@ -350,6 +350,8 @@ class VaultManager:
         data = creds.get("data") or {}
         db_username = str(data.get("username") or "").strip()
         db_password = str(data.get("password") or "").strip()
+        # Store the FULL lease_id (e.g. database/creds/jit_satish-6aa386ef/dfthU8XSCELjomCDym8Y5HTp).
+        # Do not truncate; revoke must use this exact string for sys/leases/revoke.
         lease_id = str(creds.get("lease_id") or "").strip()
         lease_duration = int(creds.get("lease_duration") or 0)
         if not db_username or not lease_id:
@@ -388,15 +390,12 @@ class VaultManager:
 
     @staticmethod
     def revoke_lease(lease_id: str) -> bool:
-        """Best-effort lease revoke (not required for TTL cleanup)."""
+        """Revoke a lease by full lease_id (e.g. database/creds/role/uuid). Returns True on success."""
         lid = str(lease_id or "").strip()
         if not lid:
             return False
-        try:
-            addr = VaultManager._vault_addr()
-            token = VaultManager._get_service_token()
-            url = f"{addr}/v1/sys/leases/revoke"
-            VaultManager._http_json("POST", url, token=token, body={"lease_id": lid})
-            return True
-        except Exception:
-            return False
+        addr = VaultManager._vault_addr()
+        token = VaultManager._get_service_token()
+        url = f"{addr}/v1/sys/leases/revoke"
+        VaultManager._http_json("POST", url, token=token, body={"lease_id": lid})
+        return True
