@@ -654,7 +654,7 @@ function loadAdminDatabaseSessions() {
     if (!tbody) return;
     tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Loading…</td></tr>';
     if (emptyEl) emptyEl.style.display = 'none';
-    var apiBase = window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'));
+    var apiBase = typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')));
     fetch(apiBase + '/admin/database-sessions')
         .then(function(r) { return r.json(); })
         .then(function(data) {
@@ -691,22 +691,29 @@ function revokeSelectedDatabaseSessions() {
         return;
     }
     if (!confirm('Revoke ' + ids.length + ' database session(s)? This will remove access in Vault and revoke the user\'s DB access immediately.')) return;
-    var apiBase = window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'));
-    fetch(apiBase + '/admin/revoke-database-sessions', {
+    var url = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')))) + '/admin/revoke-database-sessions';
+    fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ request_ids: ids, reason: 'Emergency revoke by admin' })
     })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
+        .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }); })
+        .then(function(result) {
+            var data = result.data;
+            if (!result.ok) {
+                alert('Revoke failed: ' + (data && data.error ? data.error : result.status));
+                return;
+            }
             var revoked = (data && data.revoked) ? data.revoked.length : 0;
             var failed = (data && data.failed) ? data.failed.length : 0;
-            if (revoked) alert('Revoked ' + revoked + ' session(s).' + (failed ? ' Failed: ' + failed : ''));
-            else if (failed) alert('Could not revoke ' + failed + ' session(s). Check console or try again.');
+            if (data && data.error) alert('Error: ' + data.error);
+            else if (revoked) alert('Revoked ' + revoked + ' session(s).' + (failed ? ' Failed: ' + failed : ''));
+            else if (failed) alert('Could not revoke ' + failed + ' session(s). ' + (data.failed && data.failed.length ? data.failed.map(function(f) { return (f.request_id || '').slice(0, 8) + ': ' + (f.error || ''); }).join('; ') : ''));
             if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
         })
-        .catch(function() {
-            alert('Revoke request failed.');
+        .catch(function(err) {
+            console.error('Revoke sessions error', err);
+            alert('Revoke request failed. ' + (err && err.message ? err.message : 'Check console.'));
         });
 }
 
