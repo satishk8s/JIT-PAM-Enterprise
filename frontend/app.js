@@ -702,6 +702,7 @@ function revokeSelectedDatabaseSessions() {
             var revoked = (data && data.revoked) ? data.revoked.length : 0;
             var failed = (data && data.failed) ? data.failed.length : 0;
             if (revoked) alert('Revoked ' + revoked + ' session(s).' + (failed ? ' Failed: ' + failed : ''));
+            else if (failed) alert('Could not revoke ' + failed + ' session(s). Check console or try again.');
             if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
         })
         .catch(function() {
@@ -1313,6 +1314,8 @@ function revokeAccess(requestId) {
             alert(`❌ ${result.message}`);
             loadRequests();
             updateDashboard();
+            if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
+            if (typeof loadDbRequests === 'function') loadDbRequests();
         }
     })
     .catch(error => {

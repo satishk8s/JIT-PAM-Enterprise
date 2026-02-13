@@ -1875,6 +1875,12 @@ async function loadDbRequests() {
         }
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
         const isAdminUser = (typeof currentUser !== 'undefined' && currentUser && currentUser.isAdmin) || localStorage.getItem('isAdmin') === 'true';
+        const currentUserEmail = (localStorage.getItem('userEmail') || '').trim().toLowerCase();
+        const canApprove = (req) => {
+            if (req.status !== 'pending') return false;
+            const requesterEmail = String(req.user_email || '').trim().toLowerCase();
+            return isAdminUser || (currentUserEmail && requesterEmail === currentUserEmail);
+        };
         list.innerHTML = requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = String(db?.engine || 'db');
@@ -1923,7 +1929,7 @@ async function loadDbRequests() {
                         ${req.status === 'approved' ? `
                             <button class="btn-secondary btn-sm" onclick="retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>
                         ` : ''}
-                        ${isAdminUser && req.status === 'pending' ? `
+                        ${canApprove(req) ? `
                         <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
                         <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
                         ` : ''}

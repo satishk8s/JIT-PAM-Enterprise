@@ -1709,16 +1709,17 @@ def revoke_access(request_id):
     data = request.json or {}
     revoke_reason = data.get('reason', 'Security revocation by admin')
 
-    # Database access: revoke by full lease_id only; Vault owns lifecycle (revocation_statements run on revoke).
+    # Database access: revoke by full lease_id when present; Vault runs revocation_statements. If no lease_id, still mark revoked so UI updates.
     if access_request.get('type') == 'database_access':
         lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
-        if not lease_id:
-            return jsonify({'error': 'No lease_id on request; cannot revoke'}), 400
-        try:
-            VaultManager.revoke_lease(lease_id)
-        except Exception as e:
-            print(f"Vault lease revoke failed for {request_id}: {e}")
-            return jsonify({'error': f'Vault revoke failed: {e}'}), 502
+        if lease_id:
+            try:
+                VaultManager.revoke_lease(lease_id)
+            except Exception as e:
+                print(f"Vault lease revoke failed for {request_id}: {e}")
+                return jsonify({'error': f'Vault revoke failed: {e}'}), 502
+        else:
+            print(f"Database revoke for {request_id}: no lease_id (e.g. not yet activated); marking revoked only.")
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
@@ -1853,15 +1854,15 @@ def admin_revoke_database_sessions():
             failed.append({'request_id': req_id, 'error': 'not_active'})
             continue
         lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
-        if not lease_id:
-            failed.append({'request_id': req_id, 'error': 'no_lease_id'})
-            continue
-        try:
-            VaultManager.revoke_lease(lease_id)
-        except Exception as e:
-            print(f"Vault revoke for {req_id}: {e}")
-            failed.append({'request_id': req_id, 'error': str(e)})
-            continue
+        if lease_id:
+            try:
+                VaultManager.revoke_lease(lease_id)
+            except Exception as e:
+                print(f"Vault revoke for {req_id}: {e}")
+                failed.append({'request_id': req_id, 'error': str(e)})
+                continue
+        else:
+            print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.")
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason
