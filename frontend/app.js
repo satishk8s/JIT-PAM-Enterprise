@@ -683,15 +683,19 @@ function toggleAdminDbSessionsSelectAll(checkbox) {
     document.querySelectorAll('.admin-db-session-cb').forEach(function(cb) { cb.checked = !!checkbox.checked; });
 }
 function revokeSelectedDatabaseSessions() {
+    console.log('Revoke clicked (Admin DB sessions)');
     var checked = document.querySelectorAll('.admin-db-session-cb:checked');
     var ids = [];
     checked.forEach(function(cb) { if (cb.value) ids.push(cb.value); });
+    console.log('Revoke clicked', ids.length ? ids : 'no-ids', 'sessionIds=', ids);
     if (ids.length === 0) {
         alert('Select at least one session to revoke.');
         return;
     }
     if (!confirm('Revoke ' + ids.length + ' database session(s)? This will remove access in Vault and revoke the user\'s DB access immediately.')) return;
-    var url = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')))) + '/admin/revoke-database-sessions';
+    var apiBase = typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')));
+    var url = apiBase + '/admin/revoke-database-sessions';
+    console.log('Revoke API request:', url, 'request_ids:', ids);
     fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -700,6 +704,7 @@ function revokeSelectedDatabaseSessions() {
         .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, status: r.status, data: data }; }); })
         .then(function(result) {
             var data = result.data;
+            console.log('Revoke API response:', result.status, result.ok, data);
             if (!result.ok) {
                 alert('Revoke failed: ' + (data && data.error ? data.error : result.status));
                 return;

@@ -1841,7 +1841,9 @@ def admin_revoke_database_sessions():
     reason = str(data.get('reason') or 'Emergency revoke by admin').strip()
     if not isinstance(request_ids, list):
         request_ids = []
-    print(f"Admin revoke-database-sessions: request_ids={request_ids}, requests_db keys count={len(requests_db)}")
+    request_ids = [str(x).strip() for x in request_ids if x is not None]
+    request_ids = [x for x in request_ids if x]
+    print(f"Admin revoke-database-sessions: request_ids={request_ids}, requests_db keys count={len(requests_db)}", flush=True)
     revoked = []
     failed = []
     for req_id in request_ids:
@@ -1874,6 +1876,7 @@ def admin_revoke_database_sessions():
         req['db_password'] = ''
         revoked.append(req_id)
     _save_requests()
+    print(f"Admin revoke-database-sessions result: revoked={len(revoked)} {revoked}, failed={len(failed)} {failed}", flush=True)
     return jsonify({'revoked': revoked, 'failed': failed, 'reason': reason})
 
 
