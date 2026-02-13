@@ -2330,6 +2330,42 @@ td {
     height: 180px;
     object-fit: contain;
 }
+/* Admin PAM integration cards: keep logo size visible (override 180px) */
+.integrations-grid-pam .integration-logo {
+    width: 48px !important;
+    height: 48px !important;
+    min-width: 48px;
+    min-height: 48px;
+}
+.integrations-grid-pam .integration-logo svg {
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+}
+.integrations-grid-pam .integration-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+/* Ticketing / SIEM / IGP: Font Awesome icons with brand colors */
+.integrations-grid-pam .integration-logo-icon {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    min-height: 48px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    color: #fff !important;
+    flex-shrink: 0;
+}
+.integrations-grid-pam .integration-logo-icon.integration-logo-jira { background: #0052CC; }
+.integrations-grid-pam .integration-logo-icon.integration-logo-servicenow { background: #81B5A1; }
+.integrations-grid-pam .integration-logo-icon.integration-logo-confluence { background: #172B4D; }
+.integrations-grid-pam .integration-logo-icon.integration-logo-chronicle { background: #4285F4; }
+.integrations-grid-pam .integration-logo-icon.integration-logo-jumpcloud { background: #E31937; }
 
 .integrations-grid .integration-logo.logo-large {
     width: 160px;
