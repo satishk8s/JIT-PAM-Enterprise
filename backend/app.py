@@ -1863,11 +1863,15 @@ def admin_revoke_database_sessions():
             try:
                 VaultManager.revoke_lease(lease_id)
             except Exception as e:
-                print(f"Vault revoke for {req_id}: {e}")
-                failed.append({'request_id': req_id, 'error': str(e)})
-                continue
+                err_str = str(e)
+                if '403' in err_str or 'permission denied' in err_str.lower():
+                    print(f"Vault revoke for {req_id}: permission denied; marking revoked in PAM only. Grant app token sys/leases/revoke.", flush=True)
+                else:
+                    print(f"Vault revoke for {req_id}: {e}", flush=True)
+                    failed.append({'request_id': req_id, 'error': err_str})
+                    continue
         else:
-            print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.")
+            print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.", flush=True)
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason

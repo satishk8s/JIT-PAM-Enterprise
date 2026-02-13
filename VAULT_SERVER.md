@@ -119,4 +119,24 @@ Admins can revoke active database access from **Admin → Database Sessions**. T
 
 The app does **not** revoke by role name. Session records store `lease_id` (full string), `role_name`, and `db_username`. Revoke workflow: call Vault lease revoke with the full `lease_id` → verify success → then mark the session revoked and remove it from the PAM UI. **Vault owns lifecycle:** when the lease is revoked, Vault runs the role’s `revocation_statements` (e.g. `DROP USER` in MySQL). No direct MySQL DROP USER in the app.
 
-The token used by the app must have `sys/leases/revoke` (or a policy that allows revoking leases created by the database engine). No extra Vault configuration is required.
+**Token must allow lease revoke.** The app token (e.g. from AppRole) must have permission to revoke leases. If you see `Vault HTTP 403: permission denied` when clicking "Revoke selected", add a policy and attach it to the app's token/role:
+
+```hcl
+# Allow revoking leases (e.g. database credential leases)
+path "sys/leases/revoke" {
+  capabilities = ["update"]
+}
+```
+
+Or with a policy name, e.g. `npamx-revoke`:
+
+```bash
+vault policy write npamx-revoke - <<EOF
+path "sys/leases/revoke" {
+  capabilities = ["update"]
+}
+EOF
+# Attach to the AppRole used by the app (add npamx-revoke to the role's token_policies).
+```
+
+Until this is set, the app will still **mark the session as revoked in the PAM UI** (session disappears) when you click revoke, but Vault will not run revocation_statements (e.g. DROP USER). Fix the policy so future revokes also revoke the lease in Vault.
