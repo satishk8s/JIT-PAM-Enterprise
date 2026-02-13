@@ -1677,41 +1677,55 @@
                                 </div>
                             </div>
                             <p class="admin-role-hint">Default groups with predefined roles. Attach a role when creating a group.</p>
-                            <div class="groups-list">
+                            <div class="groups-list groups-list-enterprise">
                                 <div class="group-detail-card group-role-readaccess">
                                     <div class="group-detail-header">
                                         <h4><i class="fas fa-eye"></i> readaccess</h4>
-                                        <div>
-                                            <span class="badge badge-readaccess">Readaccess</span>
-                                            <button class="btn-secondary btn-sm" onclick="editGroup('readaccess')">Edit</button>
-                                        </div>
+                                        <span class="badge badge-readaccess">Read-only</span>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-role-desc">Read-only access to PAM solution.</p>
+                                        <p class="group-role-desc">View-only access to the PAM console. No configuration or user management.</p>
+                                        <ul class="group-capabilities">
+                                            <li>View access requests and approval queue</li>
+                                            <li>View active sessions and audit logs</li>
+                                            <li>Read-only dashboards and reports</li>
+                                        </ul>
+                                    </div>
+                                    <div class="group-card-actions">
+                                        <button class="btn-secondary btn-pam btn-sm" onclick="editGroup('readaccess')"><i class="fas fa-edit"></i> Edit</button>
                                     </div>
                                 </div>
                                 <div class="group-detail-card group-role-manager">
                                     <div class="group-detail-header">
                                         <h4><i class="fas fa-user-tie"></i> manager</h4>
-                                        <div>
-                                            <span class="badge badge-manager">Manager</span>
-                                            <button class="btn-secondary btn-sm" onclick="editGroup('manager')">Edit</button>
-                                        </div>
+                                        <span class="badge badge-manager">Manager</span>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-role-desc">Create users/groups, download logs, create guardrails, reset MFA for others, integrations.</p>
+                                        <p class="group-role-desc">Operational administration: manage users, groups, and integrations. No system-wide configuration.</p>
+                                        <ul class="group-capabilities">
+                                            <li>Create and assign users to groups</li>
+                                            <li>Download logs and create guardrails</li>
+                                            <li>Reset MFA for users; manage integrations</li>
+                                        </ul>
+                                    </div>
+                                    <div class="group-card-actions">
+                                        <button class="btn-secondary btn-pam btn-sm" onclick="editGroup('manager')"><i class="fas fa-edit"></i> Edit</button>
                                     </div>
                                 </div>
                                 <div class="group-detail-card group-role-admin">
                                     <div class="group-detail-header">
                                         <h4><i class="fas fa-crown"></i> admin</h4>
-                                        <div>
-                                            <span class="badge badge-admin">Admin</span>
-                                            <button class="btn-secondary btn-sm" onclick="editGroup('admin')">Edit</button>
-                                        </div>
+                                        <span class="badge badge-admin">Admin</span>
                                     </div>
                                     <div class="group-permissions">
-                                        <p class="group-role-desc">Full access to PAM plus all Manager capabilities.</p>
+                                        <p class="group-role-desc">Full PAM administrative access. All Manager capabilities plus system configuration.</p>
+                                        <ul class="group-capabilities">
+                                            <li>All Manager capabilities</li>
+                                            <li>Full PAM configuration and policy management</li>
+                                        </ul>
+                                    </div>
+                                    <div class="group-card-actions">
+                                        <button class="btn-secondary btn-pam btn-sm" onclick="editGroup('admin')"><i class="fas fa-edit"></i> Edit</button>
                                     </div>
                                 </div>
                             </div>
@@ -1824,8 +1838,8 @@
                             </div>
                         </div>
                         
-                        <!-- Step-by-Step Builder -->
-                        <div class="builder-steps">
+                        <!-- Policy builder tiles (same logic, tile layout) -->
+                        <div class="builder-steps builder-steps-tiles">
                             <div class="step-card active" id="step1">
                                 <div class="step-header" onclick="toggleStep('step1')">
                                     <span class="step-number">1</span>
@@ -2201,73 +2215,83 @@
 
                 </div>
 
-                <!-- Admin Integrations Tab (PAM theme: Cloud AWS/GCP, Ticketing Jira/Confluence, SIEM Chronicle, IGP JumpCloud) -->
+                <!-- Admin Integrations Tab: sub-tabs Cloud | Ticketing | SIEM | IGP -->
                 <div id="adminIntegrationsTab" class="admin-tab admin-tab-pam" style="display: none;">
+                    <div class="admin-subtabs">
+                        <button class="btn-secondary btn-pam admin-subtab active" id="intCloudSubTab" onclick="showIntegrationsSubTab('cloud')"><i class="fab fa-aws"></i> Cloud</button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="intTicketingSubTab" onclick="showIntegrationsSubTab('ticketing')"><i class="fas fa-ticket-alt"></i> Ticketing</button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="intSiemSubTab" onclick="showIntegrationsSubTab('siem')"><i class="fas fa-shield-alt"></i> SIEM</button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="intIgpSubTab" onclick="showIntegrationsSubTab('igp')"><i class="fas fa-id-badge"></i> IGP</button>
+                    </div>
                     <div class="integrations-section">
-                        <h4 class="integrations-subtitle"><i class="fab fa-aws"></i> Cloud Integration</h4>
-                        <div class="integrations-grid integrations-grid-pam">
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <i class="fab fa-aws integration-icon-aws"></i>
-                                    <h3>AWS</h3>
+                        <div id="intCloudSection" class="integrations-tab-pane">
+                            <div class="integrations-grid integrations-grid-pam">
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <i class="fab fa-aws integration-icon-aws"></i>
+                                        <h3>AWS</h3>
+                                    </div>
+                                    <p>Amazon Web Services</p>
+                                    <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
+                                    <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('aws')"><i class="fas fa-cog"></i> Configure</button>
                                 </div>
-                                <p>Amazon Web Services</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('aws')"><i class="fas fa-cog"></i> Configure</button>
-                            </div>
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <i class="fab fa-google integration-icon-gcp"></i>
-                                    <h3>GCP</h3>
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <i class="fab fa-google integration-icon-gcp"></i>
+                                        <h3>GCP</h3>
+                                    </div>
+                                    <p>Google Cloud Platform</p>
+                                    <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                    <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('gcp')"><i class="fas fa-plug"></i> Connect</button>
                                 </div>
-                                <p>Google Cloud Platform</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('gcp')"><i class="fas fa-plug"></i> Connect</button>
-                            </div>
-                        </div>
-                        <h4 class="integrations-subtitle"><i class="fas fa-ticket-alt"></i> Ticketing</h4>
-                        <div class="integrations-grid integrations-grid-pam">
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <div class="integration-logo app-logo-jira">J</div>
-                                    <h3>Jira</h3>
-                                </div>
-                                <p>Issue & Project Tracking</p>
-                                <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
-                                <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('jira')"><i class="fas fa-cog"></i> Configure</button>
-                            </div>
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <div class="integration-logo">C</div>
-                                    <h3>Confluence</h3>
-                                </div>
-                                <p>Documentation & Wiki</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('confluence')"><i class="fas fa-plug"></i> Connect</button>
                             </div>
                         </div>
-                        <h4 class="integrations-subtitle"><i class="fas fa-shield-alt"></i> SIEM</h4>
-                        <div class="integrations-grid integrations-grid-pam">
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <div class="integration-logo">Ch</div>
-                                    <h3>Chronicle</h3>
+                        <div id="intTicketingSection" class="integrations-tab-pane" style="display: none;">
+                            <div class="integrations-grid integrations-grid-pam">
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <span class="integration-logo integration-logo-jira" title="Jira"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="#0052CC" d="M11.571 11.513H0a5.218 5.218 0 0 0 5.232 5.215h2.13v2.057A5.215 5.215 0 0 0 12.575 24V12.518a1.005 1.005 0 0 0-1.005-1.005zm5.723-5.756H5.736a5.215 5.215 0 0 0 5.215 5.214h2.129v2.058a5.218 5.218 0 0 0 5.215 5.215h2.129A5.215 5.215 0 0 0 24 12.518V6.758a1.001 1.001 0 0 0-1.001-1.001zM23.721 0H11.455a5.215 5.215 0 0 0 5.215 5.215h2.129v2.057a5.215 5.215 0 0 0 5.215 5.214h2.129A1.001 1.001 0 0 0 24 16.57V1.005A1.001 1.001 0 0 0 23.721 0z"/></svg></span>
+                                        <h3>Jira</h3>
+                                    </div>
+                                    <p>Issue & Project Tracking</p>
+                                    <div class="integration-status connected"><i class="fas fa-check-circle"></i> Connected</div>
+                                    <button class="btn-secondary btn-pam btn-sm" onclick="configureIntegration('jira')"><i class="fas fa-cog"></i> Configure</button>
                                 </div>
-                                <p>SIEM & Security Analytics</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('chronicle')"><i class="fas fa-plug"></i> Connect</button>
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <span class="integration-logo integration-logo-confluence" title="Confluence"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="#172B4D" d="M.87 18.257c-.248.382-.53.875-.763 1.245a.764.764 0 0 0 .255 1.04l4.965 3.054a.764.764 0 0 0 1.058-.26c.199-.332.454-.763.733-1.221 1.967-3.247 3.945-2.853 7.508-1.146l4.957 2.549a.764.764 0 0 0 1.028-.382l2.364-5.348a.764.764 0 0 0-.382-1.027l-5.53-2.845c.576-.696 1.037-1.427 1.384-2.195.308-.682.46-1.345.46-1.992 0-.655-.155-1.323-.461-2.009-.313-.697-.758-1.429-1.333-2.197-.61-.818-1.33-1.559-2.16-2.226C9.336.964 7.305.257 4.955.257c-1.927 0-3.585.47-4.976 1.406C1.403 2.309.257 3.758.257 5.9v9.2c0 .977.211 1.899.613 2.757z"/></svg></span>
+                                        <h3>Confluence</h3>
+                                    </div>
+                                    <p>Documentation & Wiki</p>
+                                    <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                    <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('confluence')"><i class="fas fa-plug"></i> Connect</button>
+                                </div>
                             </div>
                         </div>
-                        <h4 class="integrations-subtitle"><i class="fas fa-id-badge"></i> IGP</h4>
-                        <div class="integrations-grid integrations-grid-pam">
-                            <div class="integration-card integration-card-pam">
-                                <div class="integration-header">
-                                    <div class="integration-logo">JC</div>
-                                    <h3>JumpCloud</h3>
+                        <div id="intSiemSection" class="integrations-tab-pane" style="display: none;">
+                            <div class="integrations-grid integrations-grid-pam">
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <span class="integration-logo integration-logo-chronicle" title="Chronicle"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="#4285F4" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></span>
+                                        <h3>Chronicle</h3>
+                                    </div>
+                                    <p>SIEM & Security Analytics</p>
+                                    <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                    <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('chronicle')"><i class="fas fa-plug"></i> Connect</button>
                                 </div>
-                                <p>Identity & Device Management</p>
-                                <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
-                                <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
+                            </div>
+                        </div>
+                        <div id="intIgpSection" class="integrations-tab-pane" style="display: none;">
+                            <div class="integrations-grid integrations-grid-pam">
+                                <div class="integration-card integration-card-pam">
+                                    <div class="integration-header">
+                                        <span class="integration-logo integration-logo-jumpcloud" title="JumpCloud"><svg viewBox="0 0 24 24" width="28" height="28"><circle cx="12" cy="12" r="10" fill="#CC0000"/><text x="12" y="16" text-anchor="middle" fill="#fff" font-size="12" font-weight="bold" font-family="Inter,sans-serif">J</text></svg></span>
+                                        <h3>JumpCloud</h3>
+                                    </div>
+                                    <p>Identity & Device Management</p>
+                                    <div class="integration-status disconnected"><i class="fas fa-times-circle"></i> Not Connected</div>
+                                    <button class="btn-primary btn-pam btn-sm" onclick="configureIntegration('jumpcloud')"><i class="fas fa-plug"></i> Connect</button>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2672,6 +2696,19 @@
             var activeBtn = tab === 'security' ? securityBtn : (tab === 'guardrails' ? guardrailsBtn : auditBtn);
             if (activeBtn) activeBtn.classList.add('active');
         }
+        function showIntegrationsSubTab(tab) {
+            var ids = ['intCloudSection', 'intTicketingSection', 'intSiemSection', 'intIgpSection'];
+            var map = { cloud: 0, ticketing: 1, siem: 2, igp: 3 };
+            ids.forEach(function(id, i) {
+                var el = document.getElementById(id);
+                if (el) el.style.display = (map[tab] === i) ? 'block' : 'none';
+            });
+            var btnIds = ['intCloudSubTab', 'intTicketingSubTab', 'intSiemSubTab', 'intIgpSubTab'];
+            btnIds.forEach(function(id, i) {
+                var btn = document.getElementById(id);
+                if (btn) btn.classList.toggle('active', map[tab] === i);
+            });
+        }
             
         // Security Copilot Functions
         function toggleSecurityCopilot() {
@@ -2723,21 +2760,32 @@
             <div class="modal-body">
                 <form id="createUserForm">
                     <div class="form-group">
-                        <label>Username <span class="required">*</span></label>
-                        <input type="text" id="userFirstName" required placeholder="Username">
-                    </div>
-                    <div class="form-group">
-                        <label>Email <span class="required">*</span></label>
+                        <label>Email address <span class="required">*</span></label>
                         <input type="email" id="userEmail" required placeholder="user@company.com">
                     </div>
+                    <div class="form-row-pam">
+                        <div class="form-group">
+                            <label>First name <span class="required">*</span></label>
+                            <input type="text" id="userFirstName" required placeholder="First name">
+                        </div>
+                        <div class="form-group">
+                            <label>Last name <span class="required">*</span></label>
+                            <input type="text" id="userLastName" required placeholder="Last name">
+                        </div>
+                    </div>
                     <div class="form-group">
-                        <label>Attach predefined role <span class="required">*</span></label>
-                        <select id="userRole" required>
-                            <option value="">Select Role</option>
-                            <option value="Readaccess">Readaccess</option>
-                            <option value="Manager">Manager</option>
-                            <option value="Admin">Admin</option>
+                        <label>Display name</label>
+                        <input type="text" id="userDisplayName" placeholder="Display name (optional)">
+                    </div>
+                    <div class="form-group">
+                        <label>Attach to group <span class="required">*</span></label>
+                        <select id="userGroup" required>
+                            <option value="">Select group</option>
+                            <option value="readaccess">readaccess</option>
+                            <option value="manager">manager</option>
+                            <option value="admin">admin</option>
                         </select>
+                        <small class="form-hint">Role is determined by the selected group.</small>
                     </div>
                     <div class="modal-actions">
                         <button type="button" class="btn-secondary btn-pam" onclick="closeModal()">Cancel</button>

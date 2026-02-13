@@ -97,11 +97,10 @@ function openUserMgmtModal(modalId) {
 function showCreateUserModal() {
     openUserMgmtModal('createUserModal');
     populateGroupDropdown();
-    document.getElementById('createUserForm').reset();
-    var roleSel = document.getElementById('userRole');
+    var form = document.getElementById('createUserForm');
+    if (form) form.reset();
     var groupSel = document.getElementById('userGroup');
-    if (roleSel && !roleSel.value) roleSel.value = 'Readaccess';
-    if (groupSel && !groupSel.value) groupSel.value = _groupForRole(roleSel ? roleSel.value : 'Readaccess');
+    if (groupSel && !groupSel.value) groupSel.value = 'readaccess';
 }
 
 // Show create new group modal (Group Name + Role)
@@ -119,19 +118,13 @@ function showCreateGroupModal() {
     if (form) form.reset();
 }
 
-// Populate group dropdown (readaccess, manager, admin) and role dropdown
+// Populate group dropdown (readaccess, manager, admin)
 function populateGroupDropdown() {
     var sel = document.getElementById('userGroup');
     if (sel) {
         var groups = window.USER_MGMT_GROUPS || [];
-        sel.innerHTML = '<option value="">Select Group (optional)</option>' +
+        sel.innerHTML = '<option value="">Select group</option>' +
             groups.map(function(g) { return '<option value="' + (g.id || g.name) + '">' + (g.name || g.id) + '</option>'; }).join('');
-    }
-    var roleSel = document.getElementById('userRole');
-    if (roleSel && !roleSel.dataset.populated) {
-        var roles = window.PAM_ROLES || [{ id: 'Readaccess', name: 'Readaccess' }, { id: 'Manager', name: 'Manager' }, { id: 'Admin', name: 'Admin' }];
-        roleSel.innerHTML = '<option value="">Select Role</option>' + roles.map(function(r) { return '<option value="' + (r.id || r.name) + '">' + (r.name || r.id) + '</option>'; }).join('');
-        roleSel.dataset.populated = 'true';
     }
 }
 
@@ -157,57 +150,46 @@ function populateGroupUsersList() {
 document.addEventListener('DOMContentLoaded', function() {
     var createUserForm = document.getElementById('createUserForm');
     if (createUserForm) {
-        // Keep role/group in sync (predefined mapping)
-        var roleSel = document.getElementById('userRole');
-        var groupSel = document.getElementById('userGroup');
-        if (roleSel) {
-            roleSel.addEventListener('change', function() {
-                if (!groupSel) return;
-                var g = _groupForRole(roleSel.value);
-                if (g) groupSel.value = g;
-            });
-        }
-        if (groupSel) {
-            groupSel.addEventListener('change', function() {
-                if (!roleSel) return;
-                var r = _roleForGroup(groupSel.value);
-                if (r) roleSel.value = r;
-            });
-        }
-
         createUserForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            var fullName = (document.getElementById('userFirstName') && document.getElementById('userFirstName').value || '').trim();
-            var parts = fullName.split(/\s+/).filter(Boolean);
-            var firstName = parts[0] || '';
-            var lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
             var email = (document.getElementById('userEmail') && document.getElementById('userEmail').value || '').trim();
-            var role = _normalizeRole(document.getElementById('userRole') ? document.getElementById('userRole').value : '');
+            var firstName = (document.getElementById('userFirstName') && document.getElementById('userFirstName').value || '').trim();
+            var lastName = (document.getElementById('userLastName') && document.getElementById('userLastName').value || '').trim();
+            var displayName = (document.getElementById('userDisplayName') && document.getElementById('userDisplayName').value || '').trim();
             var group = (document.getElementById('userGroup') && document.getElementById('userGroup').value || '').trim();
-            if (!group) group = _groupForRole(role);
             if (!email) {
                 alert('Email address is required.');
                 return;
             }
+            if (!firstName || !lastName) {
+                alert('First name and last name are required.');
+                return;
+            }
+            if (!group) {
+                alert('Please select a group.');
+                return;
+            }
+            var role = _roleForGroup(group) || _normalizeRole('');
             var userData = {
                 first_name: firstName,
                 last_name: lastName,
+                display_name: displayName || (firstName + ' ' + lastName).trim(),
                 email: email,
                 role: role,
-                group: group || null
+                group: group
             };
             fetch((window.API_BASE || 'http://127.0.0.1:5000/api') + '/admin/create-user', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(userData)
             }).then(function(r) { return r.json(); }).then(function(result) {
-                alert('User created: ' + (fullName || (firstName + ' ' + lastName)).trim());
+                alert('User created: ' + (userData.display_name || firstName + ' ' + lastName));
                 closeModal();
                 addUserToStore(userData);
                 if (typeof loadUsersManagement === 'function') loadUsersManagement();
             }).catch(function(err) {
                 addUserToStore(userData);
-                alert('User added locally: ' + (fullName || (firstName + ' ' + lastName)).trim() + '\n(API unavailable - saved for demo)');
+                alert('User added locally: ' + (userData.display_name || firstName + ' ' + lastName) + '\n(API unavailable - saved for demo)');
                 closeModal();
                 if (typeof loadUsersManagement === 'function') loadUsersManagement();
             });

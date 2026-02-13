@@ -427,11 +427,11 @@ function toggleSidebar(e) {
     sidebar.classList.toggle('sidebar-collapsed', collapsed);
     if (main) main.classList.toggle('main-expanded', collapsed);
     if (container) container.classList.toggle('sidebar-collapsed', collapsed);
-    toggle.title = collapsed ? 'Expand sidebar (>>)' : 'Collapse sidebar (<<)';
+    toggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
     const icon = document.getElementById('sidebarToggleIcon');
     const label = document.getElementById('sidebarToggleLabel');
     if (icon) icon.className = collapsed ? 'fas fa-chevron-right' : 'fas fa-chevron-left';
-    if (label) label.textContent = collapsed ? '>>' : '<<';
+    if (label) label.textContent = collapsed ? 'Show Menu' : 'Hide Menu';
     if (expandFab) expandFab.style.display = collapsed ? 'flex' : 'none';
     localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 }
@@ -449,8 +449,12 @@ document.addEventListener('DOMContentLoaded', function() {
         sidebar.classList.add('sidebar-collapsed');
         main.classList.add('main-expanded');
         if (container) container.classList.add('sidebar-collapsed');
-        if (toggle) toggle.title = 'Expand sidebar (>>)';
+        if (toggle) toggle.title = 'Show sidebar';
         if (expandFab) expandFab.style.display = 'flex';
+        var icon = document.getElementById('sidebarToggleIcon');
+        var label = document.getElementById('sidebarToggleLabel');
+        if (icon) icon.className = 'fas fa-chevron-right';
+        if (label) label.textContent = 'Show Menu';
     }
 });
 

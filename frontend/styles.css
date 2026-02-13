@@ -2026,11 +2026,18 @@ td {
     background: var(--bg-primary);
 }
 
+/* Admin tab/button active = same glow as My Requests (blue) */
 .admin-tab-btn.active {
-    background: rgba(139, 92, 246, 0.15);
-    border: 1px solid #8B5CF6;
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid #3b82f6;
     color: var(--text-primary);
-    animation: tab-glow-purple 1.5s ease-in-out infinite;
+    animation: requests-bulb-blue 1.5s ease-in-out infinite;
+}
+.admin-subtab.active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: #3b82f6;
+    color: var(--text-primary);
+    animation: requests-bulb-blue 1.5s ease-in-out infinite;
 }
 
 .admin-tab {
@@ -2079,7 +2086,8 @@ td {
 .template-card-pam { border: 1px solid var(--border-color); background: var(--bg-secondary); border-radius: 12px; }
 .template-card-pam .template-icon { color: var(--primary-color); font-size: 1.5rem; }
 .admin-subtabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px; flex-wrap: wrap; }
-.admin-subtab.active { background: color-mix(in srgb, var(--primary-color) 20%, var(--bg-secondary)); border-color: var(--primary-color); color: var(--primary-color); }
+.admin-subtab { border: 1.5px solid var(--border-color); background: var(--bg-secondary); color: var(--text-primary); border-radius: 8px; padding: 10px 18px; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; transition: all 0.2s; }
+.admin-subtab:hover:not(.active) { background: var(--bg-primary); }
 
 /* Roles tab (PAM cards) */
 .roles-management { background: var(--bg-primary); padding: 1.5rem; border-radius: 12px; border: 1px solid var(--border-color); }
@@ -2100,6 +2108,8 @@ td {
 .role-card-pam .role-desc { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
 .role-card-pam .role-actions { margin: 0; padding-left: 1.2rem; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .role-card-pam.role-admin .role-icon { color: #f59e0b; }
+
+.form-row-pam { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 
 /* PAM notice boxes (light/dark compatible) */
 .notice-warning-pam {
@@ -2133,6 +2143,13 @@ td {
 .integration-card-pam:hover { border-color: var(--primary-color); box-shadow: 0 4px 12px rgba(56, 189, 248, 0.12); }
 .integration-icon-aws { color: #ff9900; }
 .integration-icon-gcp { color: #4285f4; }
+.integration-logo { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 10px; overflow: hidden; flex-shrink: 0; }
+.integration-logo svg { width: 28px; height: 28px; }
+.integration-logo-jira { background: rgba(0, 82, 204, 0.12); }
+.integration-logo-confluence { background: rgba(23, 43, 77, 0.12); }
+.integration-logo-chronicle { background: rgba(66, 133, 244, 0.12); }
+.integration-logo-jumpcloud { background: rgba(204, 0, 0, 0.1); }
+.integrations-tab-pane { padding-top: 1rem; }
 
 /* Terminal pages: ensure content visible when active */
 #databaseTerminalPage.page.active,
@@ -3502,6 +3519,9 @@ td {
 .group-members {
     color: var(--text-primary);
 }
+.groups-list-enterprise { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.25rem; }
+.group-detail-card .group-capabilities { margin: 12px 0 0 0; padding-left: 1.2rem; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.group-card-actions { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color); }
 
 .permission-checks {
     display: grid;
@@ -3810,15 +3830,36 @@ td {
 }
 
 .builder-steps {
-    /* Grid layout defined inline in HTML */
     gap: 15px;
 }
 
-.step-card {
-    background: var(--bg-primary);
+/* Management tab: tile layout (2x2) */
+.builder-steps-tiles {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.25rem;
+}
+@media (max-width: 900px) {
+    .builder-steps-tiles { grid-template-columns: 1fr; }
+}
+.builder-steps-tiles .step-card {
+    border-radius: 12px;
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+}
+.builder-steps-tiles .step-header {
+    border-radius: 12px 12px 0 0;
+    padding: 1rem 1.25rem;
+}
+.builder-steps-tiles .step-content {
+    padding: 1.25rem;
+}
+
+.step-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
     overflow: hidden;
+    min-width: 0;
 }
 
 .step-card.active {
