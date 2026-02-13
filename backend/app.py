@@ -1713,6 +1713,7 @@ def revoke_access(request_id):
     if access_request.get('type') == 'database_access':
         lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
         role_name = str(access_request.get('role_name') or access_request.get('vault_role_name') or '').strip()
+        db_username = str(access_request.get('db_username') or '').strip()
         try:
             if lease_id:
                 VaultManager.revoke_lease(lease_id)
@@ -1720,6 +1721,7 @@ def revoke_access(request_id):
                 VaultManager.delete_database_role(role_name)
         except Exception as e:
             print(f"Vault revoke (best-effort) for {request_id}: {e}")
+        _drop_mysql_user_if_configured(db_username)
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
@@ -1855,6 +1857,7 @@ def admin_revoke_database_sessions():
             continue
         lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
         role_name = str(req.get('role_name') or req.get('vault_role_name') or '').strip()
+        db_username = str(req.get('db_username') or '').strip()
         try:
             if lease_id:
                 VaultManager.revoke_lease(lease_id)
@@ -1864,6 +1867,7 @@ def admin_revoke_database_sessions():
             print(f"Vault revoke for {req_id}: {e}")
             failed.append({'request_id': req_id, 'error': str(e)})
             continue
+        _drop_mysql_user_if_configured(db_username)
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason
@@ -4017,6 +4021,32 @@ def manage_ai_config():
 # Database endpoints
 from database_manager import create_database_user, execute_query, revoke_database_access, generate_password
 from vault_manager import VaultManager
+
+
+def _drop_mysql_user_if_configured(db_username):
+    """When DB_ADMIN_* env vars are set, DROP the MySQL user so revoke is guaranteed even if Vault revocation didn't run."""
+    if not db_username or not isinstance(db_username, str):
+        return
+    username = str(db_username).strip()
+    if not username:
+        return
+    host = str(os.getenv("DB_ADMIN_HOST") or os.getenv("DB_CONNECT_PROXY_HOST") or "127.0.0.1").strip()
+    try:
+        port = int(os.getenv("DB_ADMIN_PORT") or os.getenv("DB_CONNECT_PROXY_PORT") or 3306)
+    except Exception:
+        port = 3306
+    admin_user = str(os.getenv("DB_ADMIN_USER") or "").strip()
+    admin_password = str(os.getenv("DB_ADMIN_PASSWORD") or "").strip()
+    if not admin_user or not admin_password:
+        return
+    try:
+        out = revoke_database_access(host, port, admin_user, admin_password, username)
+        if out.get("error"):
+            print(f"DB DROP USER fallback for {username}: {out['error']}")
+        else:
+            print(f"DB DROP USER fallback succeeded for {username}")
+    except Exception as e:
+        print(f"DB DROP USER fallback for {username}: {e}")
 
 # Database AI conversation storage
 db_conversations = {}

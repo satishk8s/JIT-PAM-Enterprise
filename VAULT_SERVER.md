@@ -115,9 +115,19 @@ curl -s http://127.0.0.1:5000/api/health
 
 ## Admin: Emergency revoke (Database Sessions)
 
-Admins can revoke active database access from **Admin → Database Sessions**: the app calls Vault to revoke the lease and (optionally) delete the dynamic role. **No extra Vault configuration is required.** The token used by the app (`VAULT_TOKEN` or AppRole) must have:
+Admins can revoke active database access from **Admin → Database Sessions**: the app calls Vault to revoke the lease and (optionally) delete the dynamic role. **No extra Vault configuration is required** for lease/role revoke. The token used by the app (`VAULT_TOKEN` or AppRole) must have:
 
 - `sys/leases/revoke` (or a policy that allows revoking leases created by the database engine)
 - Delete on `database/roles/<role_name>` for the dynamic roles created by the app
 
-If the app already creates dynamic DB roles and issues credentials, the same token typically has these capabilities. If revoke fails with permission denied, add a policy that allows `sys/leases/revoke` and `database/roles/*` delete.
+**Ensuring the MySQL user is removed:** Vault may run `revocation_statements` (e.g. `DROP USER`) when the lease is revoked, but in some setups the user can remain in MySQL. To **guarantee** the DB user is dropped on revoke, set these env vars so the app can run `DROP USER` directly:
+
+```bash
+export DB_ADMIN_USER=root
+export DB_ADMIN_PASSWORD=YourRootPassword
+# Optional (defaults below):
+export DB_ADMIN_HOST=127.0.0.1
+export DB_ADMIN_PORT=3306
+```
+
+With these set, when you revoke a database session the app will (1) revoke the Vault lease, (2) delete the Vault role, and (3) run `DROP USER IF EXISTS 'username'@'%'` on MySQL. The dynamic user (e.g. `D-jit_satish-6aa386ef-PEEw`) will be removed from the database.
