@@ -186,10 +186,10 @@ class VaultManager:
         """
         Generate a Vault `username_template` that embeds the requester identity.
 
-        Target format (example): d_<user>_<rid>_<rand>
+        Target format (example): D-jit_<user>-<rid>-<rand>
         Must respect engine identifier limits (MySQL users: 32 chars; Postgres: 63).
         """
-        user_frag = VaultManager._normalize_user_fragment(requester)[:12]
+        user_frag = VaultManager._normalize_user_fragment(requester)[:12].replace("_", "-")
         rid_clean = re.sub(r"[^a-z0-9]", "", str(request_id or "").lower())
         rid_short = (rid_clean[:8] or "req")
 
@@ -198,15 +198,15 @@ class VaultManager:
 
         # Keep a small random suffix to avoid collisions if creds are minted more than once.
         rand_len = 4
-        suffix = f"_{{{{random {rand_len}}}}}"
+        suffix = f"-{{{{random {rand_len}}}}}"
 
-        base = f"d_{user_frag}_{rid_short}"
+        base = f"D-jit_{user_frag}-{rid_short}"
         base_max = max_len - len(suffix)
         if base_max < 1:
             base = base[: max_len]
             return base
         if len(base) > base_max:
-            base = base[:base_max].rstrip("_")
+            base = base[:base_max].rstrip("_-")
         return base + suffix
 
     @staticmethod
