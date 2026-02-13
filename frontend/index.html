@@ -1609,13 +1609,16 @@
 
                 <!-- Admin Users & Groups Tab -->
                 <div id="adminUsersTab" class="admin-tab active" style="font-family: 'Inter', sans-serif;">
-                    <!-- Sub-tabs -->
-                    <div style="display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px;">
-                        <button class="btn-secondary" id="usersSubTab" onclick="showUsersSubTab('users')" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; font-family: 'Inter', sans-serif;">
+                    <!-- Sub-tabs (PAM theme) -->
+                    <div class="admin-subtabs">
+                        <button class="btn-secondary btn-pam admin-subtab active" id="usersSubTab" onclick="showUsersSubTab('users')">
                             <i class="fas fa-user"></i> Users
                         </button>
-                        <button class="btn-secondary" id="groupsSubTab" onclick="showUsersSubTab('groups')" style="font-family: 'Inter', sans-serif;">
+                        <button class="btn-secondary btn-pam admin-subtab" id="groupsSubTab" onclick="showUsersSubTab('groups')">
                             <i class="fas fa-users-cog"></i> Groups
+                        </button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="rolesSubTab" onclick="showUsersSubTab('roles')">
+                            <i class="fas fa-user-shield"></i> Roles
                         </button>
                     </div>
 
@@ -1628,7 +1631,7 @@
                                     <i class="fas fa-user-plus"></i> Create User
                                 </button>
                             </div>
-                            <p class="admin-role-hint">Roles: <strong>Readaccess</strong> (read-only PAM) · <strong>Manager</strong> (create users/groups, logs, guardrails, reset MFA, integrations) · <strong>Admin</strong> (full access)</p>
+                            <p class="admin-role-hint">Assign a predefined role when creating users. See the <strong>Roles</strong> tab for capabilities.</p>
                             <div class="users-table">
                                 <table>
                                     <thead>
@@ -1664,9 +1667,14 @@
                         <div class="groups-management">
                             <div class="section-header">
                                 <h3>Groups Management</h3>
-                                <button class="btn-primary btn-pam" onclick="showCreateGroupModal()">
-                                    <i class="fas fa-plus"></i> Create Group
-                                </button>
+                                <div class="header-actions">
+                                    <button class="btn-primary btn-pam" onclick="showCreateNewGroupModal()">
+                                        <i class="fas fa-plus"></i> Create Group
+                                    </button>
+                                    <button class="btn-secondary btn-pam" onclick="showCreateGroupModal()">
+                                        <i class="fas fa-user-plus"></i> Assign Users to Group
+                                    </button>
+                                </div>
                             </div>
                             <p class="admin-role-hint">Default groups with predefined roles. Attach a role when creating a group.</p>
                             <div class="groups-list">
@@ -1709,6 +1717,58 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Roles Section (dedicated tab) -->
+                    <div id="rolesSection" style="display: none;">
+                        <div class="roles-management">
+                            <div class="section-header">
+                                <h3>PAM Roles</h3>
+                                <p class="admin-role-hint">Predefined roles and their capabilities. Attach a role when creating users or groups.</p>
+                            </div>
+                            <div class="roles-cards-pam" id="rolesCardsContainer">
+                                <div class="role-card-pam role-readaccess">
+                                    <div class="role-card-header">
+                                        <span class="role-icon"><i class="fas fa-eye"></i></span>
+                                        <h4>ReadAccess</h4>
+                                        <span class="badge badge-readaccess">Readaccess</span>
+                                    </div>
+                                    <p class="role-desc">View-only access to PAM.</p>
+                                    <ul class="role-actions">
+                                        <li>View requests and approvals</li>
+                                        <li>View sessions</li>
+                                        <li>View audit logs</li>
+                                    </ul>
+                                </div>
+                                <div class="role-card-pam role-manager">
+                                    <div class="role-card-header">
+                                        <span class="role-icon"><i class="fas fa-user-tie"></i></span>
+                                        <h4>Manager</h4>
+                                        <span class="badge badge-manager">Manager</span>
+                                    </div>
+                                    <p class="role-desc">Operational admin access (non-superuser).</p>
+                                    <ul class="role-actions">
+                                        <li>Create users / assign groups</li>
+                                        <li>Download logs</li>
+                                        <li>Create guardrails</li>
+                                        <li>Reset MFA for other users</li>
+                                        <li>Manage integrations</li>
+                                    </ul>
+                                </div>
+                                <div class="role-card-pam role-admin">
+                                    <div class="role-card-header">
+                                        <span class="role-icon"><i class="fas fa-crown"></i></span>
+                                        <h4>Admin</h4>
+                                        <span class="badge badge-admin">Admin</span>
+                                    </div>
+                                    <p class="role-desc">Full administrative access.</p>
+                                    <ul class="role-actions">
+                                        <li>All Manager capabilities</li>
+                                        <li>Full PAM configuration access</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- Admin Management Tab (PAM theme, real icons) -->
@@ -1734,7 +1794,7 @@
                                         <li>Auto-sync groups from AD</li>
                                         <li>Scheduled sync (hourly/daily)</li>
                                     </ul>
-                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure AD Sync</button>
+                                    <button class="btn-primary btn-pam btn-sm" style="margin-top: 10px;">Configure AD Sync</button>
                             </div>
                                 <div class="template-card template-card-pam" onclick="showSyncFromIdentityCenter()">
                                     <div class="template-icon"><i class="fas fa-cloud"></i></div>
@@ -1745,7 +1805,7 @@
                                         <li>Sync permission sets</li>
                                         <li>Real-time sync</li>
                                     </ul>
-                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Configure Identity Center Sync</button>
+                                    <button class="btn-primary btn-pam btn-sm" style="margin-top: 10px;">Configure Identity Center Sync</button>
                                     </div>
                                 <div class="template-card template-card-pam" onclick="showManualUserManagement()">
                                     <div class="template-icon"><i class="fas fa-user-edit"></i></div>
@@ -1756,10 +1816,10 @@
                                         <li>Create groups manually</li>
                                         <li>Push to Identity Center/AD</li>
                                     </ul>
-                                    <button class="btn-primary btn-sm" style="margin-top: 10px;">Manage Manually</button>
+                                    <button class="btn-primary btn-pam btn-sm" style="margin-top: 10px;">Manage Manually</button>
                                     </div>
                                 </div>
-                            <div style="margin-top: 20px; padding: 15px; background: #fff3cd; border-radius: 6px;">
+                            <div class="notice-warning-pam" style="margin-top: 20px;">
                                 <strong>⚠️ Security Note:</strong> Only users synced from AD or Identity Center can access cloud resources. This ensures unauthorized users cannot gain access even if they're in the company.
                             </div>
                         </div>
@@ -2319,7 +2379,7 @@
                                         <i class="fas fa-plus"></i> Add Rule
                                     </button>
                                 </div>
-                                <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 12px; margin-bottom: 15px; font-size: 12px;">
+                                <div class="notice-warning-pam" style="margin-bottom: 15px; font-size: 12px;">
                                     <strong><i class="fas fa-info-circle"></i> Guidelines:</strong> Sensitive services like KMS (encryption keys) and Secrets Manager contain critical credentials and encryption keys. Restrict access to authorized personnel only.
                                 </div>
                                 <div id="serviceRestrictionsList" style="display: flex; flex-direction: column; gap: 10px;">
@@ -2392,7 +2452,7 @@
                                         <i class="fas fa-plus"></i> Add Rule
                                     </button>
                                 </div>
-                                <div style="background: #fff3e0; border: 1px solid #ff9800; border-radius: 8px; padding: 12px; margin-bottom: 15px; font-size: 12px;">
+                                <div class="notice-warning-pam" style="margin-bottom: 15px; font-size: 12px;">
                                     <strong><i class="fas fa-info-circle"></i> Best Practice:</strong> Resource creation should go through proper change management. Block create permissions and route requests to DevOps/Infrastructure team.
                                 </div>
                                 <div id="createRestrictionsList" style="display: flex; flex-direction: column; gap: 10px;">
@@ -2445,10 +2505,10 @@
 
                             <!-- Save Button -->
                             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 30px;">
-                                <button onclick="previewGuardrails()" class="btn-secondary" style="padding: 12px 24px;">
+                                <button onclick="previewGuardrails()" class="btn-secondary btn-pam" style="padding: 12px 24px;">
                                     <i class="fas fa-eye"></i> Preview Impact
                                 </button>
-                                <button onclick="saveGuardrails()" class="btn-primary" style="padding: 12px 24px;">
+                                <button onclick="saveGuardrails()" class="btn-primary btn-pam" style="padding: 12px 24px;">
                                     <i class="fas fa-save"></i> Save Guardrails
                                 </button>
                             </div>
@@ -2470,7 +2530,7 @@
                                 </select>
                                 <input type="date" id="auditDateFrom" placeholder="From Date">
                                 <input type="date" id="auditDateTo" placeholder="To Date">
-                                <button class="btn-secondary" onclick="filterAuditLogs()">
+                                <button class="btn-secondary btn-pam" onclick="filterAuditLogs()">
                                     <i class="fas fa-filter"></i> Filter
                                 </button>
                             </div>
@@ -2562,21 +2622,19 @@
         // Start timer on page load
         resetInactivityTimer();
         
-        // Sub-tab switching functions
+        // Sub-tab switching functions (Users & Groups & Roles)
         function showUsersSubTab(tab) {
             document.getElementById('usersSection').style.display = tab === 'users' ? 'block' : 'none';
             document.getElementById('groupsSection').style.display = tab === 'groups' ? 'block' : 'none';
+            var rolesEl = document.getElementById('rolesSection');
+            if (rolesEl) rolesEl.style.display = tab === 'roles' ? 'block' : 'none';
             
-            const usersBtn = document.getElementById('usersSubTab');
-            const groupsBtn = document.getElementById('groupsSubTab');
-            
-            if (tab === 'users') {
-                usersBtn.classList.add('user-mgmt-subtab-active');
-                groupsBtn.classList.remove('user-mgmt-subtab-active');
-            } else {
-                groupsBtn.classList.add('user-mgmt-subtab-active');
-                usersBtn.classList.remove('user-mgmt-subtab-active');
-            }
+            var usersBtn = document.getElementById('usersSubTab');
+            var groupsBtn = document.getElementById('groupsSubTab');
+            var rolesBtn = document.getElementById('rolesSubTab');
+            [usersBtn, groupsBtn, rolesBtn].forEach(function(b) { if (b) b.classList.remove('active'); });
+            var activeBtn = tab === 'users' ? usersBtn : (tab === 'groups' ? groupsBtn : rolesBtn);
+            if (activeBtn) activeBtn.classList.add('active');
         }
         
         function showManagementSubTab(tab) {
@@ -2665,30 +2723,20 @@
             <div class="modal-body">
                 <form id="createUserForm">
                     <div class="form-group">
-                        <label>Name <span class="required">*</span></label>
-                        <input type="text" id="userFirstName" required placeholder="Full name">
+                        <label>Username <span class="required">*</span></label>
+                        <input type="text" id="userFirstName" required placeholder="Username">
                     </div>
                     <div class="form-group">
                         <label>Email <span class="required">*</span></label>
                         <input type="email" id="userEmail" required placeholder="user@company.com">
                     </div>
                     <div class="form-group">
-                        <label>Role <span class="required">*</span></label>
+                        <label>Attach predefined role <span class="required">*</span></label>
                         <select id="userRole" required>
                             <option value="">Select Role</option>
                             <option value="Readaccess">Readaccess</option>
                             <option value="Manager">Manager</option>
                             <option value="Admin">Admin</option>
-                        </select>
-                        <small class="form-hint">Readaccess: read-only PAM · Manager: users/groups, logs, guardrails, MFA, integrations · Admin: full access</small>
-                    </div>
-                    <div class="form-group">
-                        <label>Group</label>
-                        <select id="userGroup">
-                            <option value="">Select Group (optional)</option>
-                            <option value="readaccess">readaccess</option>
-                            <option value="manager">manager</option>
-                            <option value="admin">admin</option>
                         </select>
                     </div>
                     <div class="modal-actions">
@@ -2698,9 +2746,36 @@
                 </form>
             </div>
         </div>
+        <div id="createNewGroupModal" class="modal modal-pam">
+            <div class="modal-header">
+                <h3><i class="fas fa-users-cog"></i> Create Group</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="createNewGroupForm">
+                    <div class="form-group">
+                        <label>Group Name <span class="required">*</span></label>
+                        <input type="text" id="newGroupName" required placeholder="e.g. readaccess, manager, admin">
+                    </div>
+                    <div class="form-group">
+                        <label>Attach predefined role <span class="required">*</span></label>
+                        <select id="newGroupRole" required>
+                            <option value="">Select Role</option>
+                            <option value="Readaccess">Readaccess</option>
+                            <option value="Manager">Manager</option>
+                            <option value="Admin">Admin</option>
+                        </select>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary btn-pam" onclick="closeModal()">Cancel</button>
+                        <button type="submit" class="btn-primary btn-pam">Create Group</button>
+                    </div>
+                </form>
+            </div>
+        </div>
         <div id="createGroupModal" class="modal modal-pam">
             <div class="modal-header">
-                <h3><i class="fas fa-users-cog"></i> Assign Users to Group</h3>
+                <h3><i class="fas fa-user-plus"></i> Assign Users to Group</h3>
                 <button class="modal-close" onclick="closeModal()">&times;</button>
             </div>
             <div class="modal-body">

@@ -2081,6 +2081,44 @@ td {
 .admin-subtabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid var(--border-color); padding-bottom: 10px; flex-wrap: wrap; }
 .admin-subtab.active { background: color-mix(in srgb, var(--primary-color) 20%, var(--bg-secondary)); border-color: var(--primary-color); color: var(--primary-color); }
 
+/* Roles tab (PAM cards) */
+.roles-management { background: var(--bg-primary); padding: 1.5rem; border-radius: 12px; border: 1px solid var(--border-color); }
+.roles-management .section-header { margin-bottom: 1.5rem; }
+.roles-management .section-header h3 { color: var(--text-primary); margin: 0 0 0.5rem 0; }
+.roles-cards-pam { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.25rem; }
+.role-card-pam {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 1.25rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.role-card-pam:hover { border-color: var(--primary-color); }
+.role-card-pam .role-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.role-card-pam .role-icon { color: var(--primary-color); font-size: 1.1rem; }
+.role-card-pam .role-card-header h4 { margin: 0; color: var(--text-primary); font-size: 1rem; flex: 1; }
+.role-card-pam .role-desc { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px 0; line-height: 1.4; }
+.role-card-pam .role-actions { margin: 0; padding-left: 1.2rem; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.role-card-pam.role-admin .role-icon { color: #f59e0b; }
+
+/* PAM notice boxes (light/dark compatible) */
+.notice-warning-pam {
+    background: color-mix(in srgb, var(--warning, #f59e0b) 12%, var(--bg-secondary));
+    border: 1px solid var(--warning, #f59e0b);
+    border-radius: 8px;
+    padding: 12px 15px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+.notice-info-pam {
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-secondary));
+    border: 1px solid var(--primary-color);
+    border-radius: 8px;
+    padding: 12px 15px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
 .integrations-section { padding: 0 0 1rem; }
 .integrations-subtitle { font-size: 13px; color: var(--text-secondary); margin: 1.5rem 0 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
 .integrations-subtitle:first-child { margin-top: 0; }
@@ -3275,6 +3313,7 @@ td {
     align-items: center;
     margin-bottom: 15px;
 }
+.section-header .header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 .section-header h3 {
     margin: 0;

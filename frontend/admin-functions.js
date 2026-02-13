@@ -1,4 +1,7 @@
-// Admin Functions - User & Group Management
+// Admin Functions - User, Group & Role Management (PAM RBAC)
+
+// API base (works behind nginx reverse-proxy and localhost dev)
+window.API_BASE = window.API_BASE || 'http://127.0.0.1:5000/api';
 
 // Default groups and roles: readaccess, manager, admin (attach role when creating user/group)
 window.USER_MGMT_GROUPS = window.USER_MGMT_GROUPS || [
@@ -6,19 +9,74 @@ window.USER_MGMT_GROUPS = window.USER_MGMT_GROUPS || [
     { id: 'manager', name: 'manager', role: 'Manager' },
     { id: 'admin', name: 'admin', role: 'Admin' }
 ];
-window.PAM_ROLES = [
-    { id: 'Readaccess', name: 'Readaccess', desc: 'Read-only access to PAM' },
-    { id: 'Manager', name: 'Manager', desc: 'Create users/groups, logs, guardrails, reset MFA, integrations' },
-    { id: 'Admin', name: 'Admin', desc: 'Full access to PAM' }
+window.PAM_ROLES = window.PAM_ROLES || [
+    {
+        id: 'Readaccess',
+        name: 'Readaccess',
+        desc: 'Read-only access to the PAM console.',
+        actions: [
+            'View requests and approvals',
+            'View sessions',
+            'View audit logs'
+        ]
+    },
+    {
+        id: 'Manager',
+        name: 'Manager',
+        desc: 'Operational admin access (non-superuser).',
+        actions: [
+            'Create users / assign groups',
+            'Download logs',
+            'Create guardrails',
+            'Reset MFA for other users',
+            'Manage integrations'
+        ]
+    },
+    {
+        id: 'Admin',
+        name: 'Admin',
+        desc: 'Full administrative access.',
+        actions: [
+            'All Manager capabilities',
+            'Full PAM configuration access'
+        ]
+    }
 ];
 window.USER_MGMT_USERS = window.USER_MGMT_USERS || [];
+
+function _roleForGroup(groupId) {
+    var g = String(groupId || '').toLowerCase();
+    var groups = window.USER_MGMT_GROUPS || [];
+    var found = groups.find(function(x) { return String(x.id || x.name || '').toLowerCase() === g; });
+    return found ? String(found.role || '').trim() : '';
+}
+
+function _groupForRole(roleId) {
+    var r = String(roleId || '').toLowerCase();
+    var groups = window.USER_MGMT_GROUPS || [];
+    var found = groups.find(function(x) { return String(x.role || '').toLowerCase() === r; });
+    return found ? String(found.id || found.name || '').trim() : '';
+}
+
+function _normalizeRole(role) {
+    var v = String(role || '').trim();
+    if (!v) return 'Readaccess';
+    var low = v.toLowerCase();
+    if (low === 'readonly' || low === 'read' || low === 'readaccess') return 'Readaccess';
+    if (low === 'manager') return 'Manager';
+    if (low === 'admin' || low === 'administrator' || low === 'system administrator') return 'Admin';
+    return v;
+}
 
 // Show admin panel button only for admins
 function checkAdminAccess() {
     var adminBtn = document.getElementById('adminPanelBtn');
     if (!adminBtn) return;
-    var isAdmin = localStorage.getItem('isAdmin') === 'true';
-    if (isAdmin) {
+    // Allow Manager/Admin to access the Admin panel (keep legacy isAdmin behavior too)
+    var legacyAdmin = localStorage.getItem('isAdmin') === 'true';
+    var role = _normalizeRole(localStorage.getItem('userRole'));
+    var canAdmin = legacyAdmin || role === 'Admin' || role === 'Manager';
+    if (canAdmin) {
         adminBtn.style.setProperty('display', 'inline-flex', 'important');
     } else {
         adminBtn.style.setProperty('display', 'none', 'important');
@@ -40,13 +98,25 @@ function showCreateUserModal() {
     openUserMgmtModal('createUserModal');
     populateGroupDropdown();
     document.getElementById('createUserForm').reset();
+    var roleSel = document.getElementById('userRole');
+    var groupSel = document.getElementById('userGroup');
+    if (roleSel && !roleSel.value) roleSel.value = 'Readaccess';
+    if (groupSel && !groupSel.value) groupSel.value = _groupForRole(roleSel ? roleSel.value : 'Readaccess');
 }
 
-// Show create group modal (Assign Users to Group)
+// Show create new group modal (Group Name + Role)
+function showCreateNewGroupModal() {
+    openUserMgmtModal('createNewGroupModal');
+    var form = document.getElementById('createNewGroupForm');
+    if (form) form.reset();
+}
+
+// Show assign users to group modal
 function showCreateGroupModal() {
     openUserMgmtModal('createGroupModal');
     populateGroupUsersList();
-    document.getElementById('createGroupForm').reset();
+    var form = document.getElementById('createGroupForm');
+    if (form) form.reset();
 }
 
 // Populate group dropdown (readaccess, manager, admin) and role dropdown
@@ -76,7 +146,7 @@ function populateGroupUsersList() {
     }
     container.innerHTML = '<div class="users-checklist-inner">' +
         users.map(function(u) {
-            var name = (u.first_name || '') + ' ' + (u.middle_name || '') + ' ' + (u.last_name || '');
+            var name = (u.first_name || '') + ' ' + (u.last_name || '');
             name = name.trim() || u.email || u.name || 'Unknown';
             return '<label class="user-check-item"><input type="checkbox" name="groupUser" value="' + (u.email || u.id) + '"> ' + name + ' (' + (u.email || '') + ')</label>';
         }).join('') +
@@ -87,41 +157,89 @@ function populateGroupUsersList() {
 document.addEventListener('DOMContentLoaded', function() {
     var createUserForm = document.getElementById('createUserForm');
     if (createUserForm) {
+        // Keep role/group in sync (predefined mapping)
+        var roleSel = document.getElementById('userRole');
+        var groupSel = document.getElementById('userGroup');
+        if (roleSel) {
+            roleSel.addEventListener('change', function() {
+                if (!groupSel) return;
+                var g = _groupForRole(roleSel.value);
+                if (g) groupSel.value = g;
+            });
+        }
+        if (groupSel) {
+            groupSel.addEventListener('change', function() {
+                if (!roleSel) return;
+                var r = _roleForGroup(groupSel.value);
+                if (r) roleSel.value = r;
+            });
+        }
+
         createUserForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            var firstName = document.getElementById('userFirstName').value.trim();
-            var middleName = document.getElementById('userMiddleName').value.trim();
-            var lastName = document.getElementById('userLastName').value.trim();
-            var email = document.getElementById('userEmail').value.trim();
-            var role = document.getElementById('userRole').value;
-            var group = document.getElementById('userGroup').value;
+            var fullName = (document.getElementById('userFirstName') && document.getElementById('userFirstName').value || '').trim();
+            var parts = fullName.split(/\s+/).filter(Boolean);
+            var firstName = parts[0] || '';
+            var lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
+            var email = (document.getElementById('userEmail') && document.getElementById('userEmail').value || '').trim();
+            var role = _normalizeRole(document.getElementById('userRole') ? document.getElementById('userRole').value : '');
+            var group = (document.getElementById('userGroup') && document.getElementById('userGroup').value || '').trim();
+            if (!group) group = _groupForRole(role);
             if (!email) {
                 alert('Email address is required.');
                 return;
             }
             var userData = {
                 first_name: firstName,
-                middle_name: middleName,
                 last_name: lastName,
                 email: email,
                 role: role,
                 group: group || null
             };
-            fetch('http://127.0.0.1:5000/api/admin/create-user', {
+            fetch((window.API_BASE || 'http://127.0.0.1:5000/api') + '/admin/create-user', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(userData)
             }).then(function(r) { return r.json(); }).then(function(result) {
-                alert('User created: ' + firstName + ' ' + lastName);
+                alert('User created: ' + (fullName || (firstName + ' ' + lastName)).trim());
                 closeModal();
                 addUserToStore(userData);
                 if (typeof loadUsersManagement === 'function') loadUsersManagement();
             }).catch(function(err) {
                 addUserToStore(userData);
-                alert('User added locally: ' + firstName + ' ' + lastName + '\n(API unavailable - saved for demo)');
+                alert('User added locally: ' + (fullName || (firstName + ' ' + lastName)).trim() + '\n(API unavailable - saved for demo)');
                 closeModal();
                 if (typeof loadUsersManagement === 'function') loadUsersManagement();
             });
+        });
+    }
+
+    var createNewGroupForm = document.getElementById('createNewGroupForm');
+    if (createNewGroupForm) {
+        createNewGroupForm.addEventListener('submit', function(e) {
+            e.preventDefault();
+            var nameInput = document.getElementById('newGroupName');
+            var roleInput = document.getElementById('newGroupRole');
+            var groupName = (nameInput && nameInput.value || '').trim().toLowerCase().replace(/\s+/g, '');
+            var role = _normalizeRole(roleInput ? roleInput.value : '');
+            if (!groupName) {
+                alert('Please enter a group name.');
+                return;
+            }
+            if (!role) {
+                alert('Please select a role.');
+                return;
+            }
+            var groups = window.USER_MGMT_GROUPS || [];
+            if (groups.some(function(g) { return (g.id || g.name || '').toLowerCase() === groupName; })) {
+                alert('A group with this name already exists.');
+                return;
+            }
+            groups.push({ id: groupName, name: groupName, role: role });
+            window.USER_MGMT_GROUPS = groups;
+            alert('Group created: ' + groupName + ' (' + role + ')');
+            closeModal();
+            if (typeof loadUsersManagement === 'function') loadUsersManagement();
         });
     }
 
