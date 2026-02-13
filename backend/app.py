@@ -1808,6 +1808,7 @@ def revoke_access(request_id):
 @app.route('/api/admin/database-sessions', methods=['GET'])
 def admin_list_database_sessions():
     """List all active database access sessions (for admin emergency revoke)."""
+    _load_requests()
     sessions = []
     now = datetime.now()
     for req_id, req in requests_db.items():
@@ -1834,11 +1835,13 @@ def admin_list_database_sessions():
 @app.route('/api/admin/revoke-database-sessions', methods=['POST'])
 def admin_revoke_database_sessions():
     """Revoke selected database access sessions. Calls Vault lease revoke with full lease_id; Vault runs revocation_statements."""
+    _load_requests()
     data = request.json or {}
     request_ids = data.get('request_ids') or []
     reason = str(data.get('reason') or 'Emergency revoke by admin').strip()
     if not isinstance(request_ids, list):
         request_ids = []
+    print(f"Admin revoke-database-sessions: request_ids={request_ids}, requests_db keys count={len(requests_db)}")
     revoked = []
     failed = []
     for req_id in request_ids:
