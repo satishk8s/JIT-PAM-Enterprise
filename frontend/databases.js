@@ -6,11 +6,14 @@ let currentDbAccount = '';
 let dbConversationId = null;
 let selectedEngine = null;
 let dbRequestDraft = null;
-let dbStatusFilter = 'all';
+let dbStatusFilter = 'active';
 let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 let dbAccessMode = 'ai'; // 'ai' | 'structured'
 let dbStructuredPermissions = [];
 const dbCredCache = {}; // requestId -> { data, fetchedAt }
+let dbRequestsPage = 1;
+let dbRequestsPageSize = 20;
+let dbRequestsSearch = '';
 
 // Structured permission catalog (engine-specific filtering applied at render time)
 const DB_STRUCTURED_PERMISSIONS = [
@@ -1802,24 +1805,77 @@ async function submitDbRequestViaAi(opts = {}) {
 }
 
 function filterDbRequests(status) {
-    dbStatusFilter = status;
+    dbStatusFilter = (status || 'active');
+    dbRequestsPage = 1;
     loadDbRequests();
+}
+
+function onDbRequestsSearchChange() {
+    dbRequestsSearch = (document.getElementById('dbRequestsSearchInput')?.value || '').trim();
+    dbRequestsPage = 1;
+    loadDbRequests();
+}
+
+function setDbRequestsPage(nextPage) {
+    const p = parseInt(nextPage, 10);
+    if (!p || p < 1) return;
+    dbRequestsPage = p;
+    loadDbRequests();
+}
+
+function renderDbRequestsPager(meta) {
+    const pager = document.getElementById('dbRequestsPager');
+    if (!pager) return;
+    const page = parseInt(meta?.page || 1, 10) || 1;
+    const pageSize = parseInt(meta?.page_size || meta?.pageSize || 20, 10) || 20;
+    const total = parseInt(meta?.total || 0, 10) || 0;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const start = total === 0 ? 0 : ((page - 1) * pageSize + 1);
+    const end = Math.min(total, page * pageSize);
+
+    if (totalPages <= 1) {
+        pager.innerHTML = total ? `<span class="db-requests-pager-meta">${start}-${end} of ${total}</span>` : '';
+        return;
+    }
+
+    const prevDisabled = page <= 1 ? 'disabled' : '';
+    const nextDisabled = page >= totalPages ? 'disabled' : '';
+    pager.innerHTML = `
+        <span class="db-requests-pager-meta">${start}-${end} of ${total}</span>
+        <button class="db-requests-pager-btn" ${prevDisabled} onclick="setDbRequestsPage(${page - 1})" title="Previous page">
+            <i class="fas fa-chevron-left"></i>
+        </button>
+        <span class="db-requests-pager-page">Page ${page} / ${totalPages}</span>
+        <button class="db-requests-pager-btn" ${nextDisabled} onclick="setDbRequestsPage(${page + 1})" title="Next page">
+            <i class="fas fa-chevron-right"></i>
+        </button>
+    `;
 }
 
 async function loadDbRequests() {
     const userEmail = localStorage.getItem('userEmail') || 'satish@nykaa.com';
     try {
-        const res = await fetch(`${DB_API_BASE}/api/databases/requests?user_email=${encodeURIComponent(userEmail)}&status=${dbStatusFilter}`);
+        const url = new URL(`${DB_API_BASE}/api/databases/requests`);
+        url.searchParams.set('user_email', userEmail);
+        url.searchParams.set('status', dbStatusFilter || 'active');
+        url.searchParams.set('page', String(dbRequestsPage || 1));
+        url.searchParams.set('page_size', String(dbRequestsPageSize || 20));
+        if (dbRequestsSearch) url.searchParams.set('q', dbRequestsSearch);
+
+        const res = await fetch(url.toString());
         const data = await res.json();
         const list = document.getElementById('dbRequestsList');
         if (!list) return;
-        if (!data.requests || data.requests.length === 0) {
-            list.innerHTML = `<div class="db-requests-empty">No ${dbStatusFilter === 'all' ? '' : dbStatusFilter.replace('_', ' ') + ' '}database requests</div>`;
+        const requests = data.requests || [];
+        renderDbRequestsPager(data);
+        if (!requests || requests.length === 0) {
+            const label = dbStatusFilter ? dbStatusFilter : 'active';
+            list.innerHTML = `<div class="db-requests-empty">No ${escapeHtml(label)} database requests</div>`;
             return;
         }
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
         const isAdminUser = (typeof currentUser !== 'undefined' && currentUser && currentUser.isAdmin) || localStorage.getItem('isAdmin') === 'true';
-        list.innerHTML = data.requests.map(req => {
+        list.innerHTML = requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = String(db?.engine || 'db');
             const dbNames = Array.isArray(req.databases)
@@ -1834,39 +1890,46 @@ async function loadDbRequests() {
             const justification = String(req.justification || '').trim();
             const requestIdRaw = String(req.request_id || '');
             const requestIdEsc = requestIdRaw.replace(/'/g, "\\'");
-            const isActive = req.status === 'in_progress';
-            const statusLabel = req.status === 'in_progress'
-                ? 'active'
-                : req.status === 'completed'
-                    ? 'expired'
-                    : String(req.status || '').replace(/_/g, ' ');
+            const isActive = req.status === 'active';
+            const statusLabel = String(req.status || '').replace(/_/g, ' ');
             const domId = domIdFromRequestId(requestIdRaw);
-            return `<div class="db-request-card db-request-${req.status}">
-                <div class="db-request-header">
-                    <span class="db-request-id">${(req.request_id || '').slice(0, 8)}</span>
-                    <span class="db-request-status db-status-badge-${req.status}">${escapeHtml(statusLabel)}</span>
+            return `<details class="db-request-item db-request-${escapeAttr(req.status)}">
+                <summary class="db-request-summary">
+                    <div class="db-request-summary-left">
+                        <span class="db-request-id">${escapeHtml((req.request_id || '').slice(0, 8))}</span>
+                        <span class="db-request-title"><strong>${escapeHtml(eng)}</strong>${dbNames ? ` • ${escapeHtml(dbNames)}` : ''}</span>
+                    </div>
+                    <div class="db-request-summary-right">
+                        <span class="db-request-status db-status-badge-${escapeAttr(req.status)}">${escapeHtml(statusLabel)}</span>
+                        <span class="db-request-expiry">Expires: ${escapeHtml(expires)}</span>
+                        <i class="fas fa-chevron-down db-request-chevron" aria-hidden="true"></i>
+                    </div>
+                </summary>
+                <div class="db-request-details">
+                    <div class="db-request-body">
+                        <p><span class="db-req-proxy">Proxy:</span> <code>${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</code></p>
+                        <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
+                        <p>Role: ${escapeHtml(roleLabel(req.role))} | ${escapeHtml(String(req.duration_hours || 2))}h</p>
+                        ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
+                        ${isActive ? `<div class="db-cred-inline" id="dbCredInline-${escapeAttr(domId)}" style="display:none;"></div>` : ''}
+                    </div>
+                    <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
+                        <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${requestIdEsc}')"><i class="fas fa-circle-info"></i> View</button>
+                        ${isActive ? `
+                            <button class="btn-primary btn-sm" onclick="connectToDatabase('${String(db?.host || '').replace(/'/g, "\\'")}', '${String(db?.port || '').replace(/'/g, "\\'")}', '${eng.replace(/'/g, "\\'")}', '${requestIdEsc}', '${firstDbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
+                            <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Credentials</button>
+                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-up-right-from-square"></i> External Tool</button>
+                        ` : ''}
+                        ${req.status === 'approved' ? `
+                            <button class="btn-secondary btn-sm" onclick="retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>
+                        ` : ''}
+                        ${isAdminUser && req.status === 'pending' ? `
+                        <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
+                        <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
+                        ` : ''}
+                    </div>
                 </div>
-                <div class="db-request-body">
-                    <p><strong>${escapeHtml(eng)}</strong> • <span class="db-req-proxy">Proxy:</span> <code>${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</code></p>
-                    ${dbNames ? `<p>Database(s): <strong>${escapeHtml(dbNames)}</strong></p>` : ''}
-                    <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
-                    <p>Role: ${roleLabel(req.role)} | ${req.duration_hours}h | Expires: ${escapeHtml(expires)}</p>
-                    ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
-                    ${isActive ? `<div class="db-cred-inline" id="dbCredInline-${escapeAttr(domId)}" style="display:none;"></div>` : ''}
-                </div>
-                <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
-                    <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${requestIdEsc}')"><i class="fas fa-circle-info"></i> View</button>
-                    ${isActive ? `
-                        <button class="btn-primary btn-sm" onclick="connectToDatabase('${String(db?.host || '').replace(/'/g, "\\'")}', '${String(db?.port || '').replace(/'/g, "\\'")}', '${eng.replace(/'/g, "\\'")}', '${requestIdEsc}', '${firstDbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
-                        <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Credentials</button>
-                        <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-up-right-from-square"></i> External Tool</button>
-                    ` : ''}
-                    ${isAdminUser && req.status === 'pending' ? `
-                    <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
-                    <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
-                    ` : ''}
-                </div>
-            </div>`;
+            </details>`;
         }).join('');
     } catch (e) {
         const list = document.getElementById('dbRequestsList');
@@ -1917,6 +1980,28 @@ async function approveDbRequest(requestId) {
     }
 }
 
+async function retryDbActivation(requestId) {
+    if (!requestId) return;
+    const userEmail = localStorage.getItem('userEmail') || '';
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/activate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_email: userEmail })
+        });
+        const data = await res.json();
+        if (data.error) {
+            // `error` is sanitized server-side; still run client-side safety sanitizer.
+            throw new Error(data.error);
+        }
+        alert(data.message || 'Activation requested.');
+        loadDbRequests();
+        refreshApprovedDatabases();
+    } catch (e) {
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
+    }
+}
+
 function closeDbRequestDetailsModal() {
     const el = document.getElementById('dbRequestDetailsModal');
     if (el) el.remove();
@@ -1947,7 +2032,13 @@ async function copyToClipboard(text) {
 async function fetchDbCredentials(requestId) {
     const rid = String(requestId || '').trim();
     if (!rid) throw new Error('Missing request id');
-    if (dbCredCache[rid]?.data) return dbCredCache[rid].data;
+    if (dbCredCache[rid]?.data) {
+        const cached = dbCredCache[rid].data;
+        const isIam = String(cached?.effective_auth || '').toLowerCase() === 'iam';
+        // IAM tokens are short-lived; refresh frequently to avoid stale tokens.
+        if (!isIam) return cached;
+        if (Date.now() - (dbCredCache[rid].fetchedAt || 0) < 60 * 1000) return cached;
+    }
 
     const userEmail = localStorage.getItem('userEmail') || '';
     const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(rid)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
@@ -1964,6 +2055,7 @@ function renderDbCredentialsInline(containerEl, creds) {
     const expires = creds.expires_at ? new Date(creds.expires_at).toLocaleString() : '—';
     const password = creds.password || creds.vault_token || '';
     const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
+    const tokenExpires = creds.iam_token_expires_at ? new Date(creds.iam_token_expires_at).toLocaleString() : '';
 
     containerEl.innerHTML = `
         <div class="db-cred-inline-grid">
@@ -1972,22 +2064,19 @@ function renderDbCredentialsInline(containerEl, creds) {
             <div><div class="db-cred-k">DB Username</div><div class="db-cred-v"><code>${escapeHtml(username)}</code></div></div>
             <div><div class="db-cred-k">Expiry</div><div class="db-cred-v">${escapeHtml(expires)}</div></div>
         </div>
-        ${isIam ? `
-            <div class="db-cred-note">IAM auth is enabled for this request. Use IAM token authentication via the approved permission set.</div>
-        ` : `
-            <div class="db-cred-password">
-                <div class="db-cred-k">Password</div>
-                <div class="db-cred-password-row">
-                    <input id="dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}" type="password" value="${escapeAttr(password)}" readonly>
-                    <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; el.type = (el.type==='password')?'text':'password';})()">
-                        <i class="fas fa-eye"></i> Show
-                    </button>
-                    <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
-                        <i class="fas fa-copy"></i> Copy
-                    </button>
-                </div>
+        <div class="db-cred-password">
+            <div class="db-cred-k">${isIam ? 'IAM Token (Password)' : 'Password'}</div>
+            ${isIam && tokenExpires ? `<div class="db-cred-note">Token valid until ${escapeHtml(tokenExpires)} (generate a fresh token if it expires).</div>` : ''}
+            <div class="db-cred-password-row">
+                <input id="dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}" type="password" value="${escapeAttr(password)}" readonly>
+                <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; el.type = (el.type==='password')?'text':'password';})()">
+                    <i class="fas fa-eye"></i> Show
+                </button>
+                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                    <i class="fas fa-copy"></i> Copy
+                </button>
             </div>
-        `}
+        </div>
     `;
 }
 
@@ -2011,7 +2100,7 @@ async function toggleDbCredInline(requestId) {
         const creds = await fetchDbCredentials(rid);
         renderDbCredentialsInline(el, creds);
     } catch (e) {
-        el.innerHTML = `<div class="db-cred-error">Failed to load credentials: ${escapeHtml(e.message || String(e))}</div>`;
+        el.innerHTML = `<div class="db-cred-error">Failed to load credentials: ${escapeHtml(safeUserFacingErrorMessage(e))}</div>`;
     }
 }
 
@@ -2035,10 +2124,12 @@ async function openDbExternalToolModal(requestId) {
         const dbName = data.database || 'default';
         const isIam = String(data.effective_auth || '').toLowerCase() === 'iam';
 
-        const tokenField = !isIam ? `
+        const tokenExpires = data.iam_token_expires_at ? new Date(data.iam_token_expires_at).toLocaleString() : '';
+        const tokenField = `
             <div class="db-modal-grid" style="margin-top:14px;">
                 <div style="grid-column: 1 / -1;">
-                    <strong>Password (Vault Token)</strong>
+                    <strong>${isIam ? 'IAM Token (Password)' : 'Password (Vault Token)'}</strong>
+                    ${isIam && tokenExpires ? `<div class="db-step-hint" style="margin-top:6px;">Token valid until <strong>${escapeHtml(tokenExpires)}</strong>. Generate a fresh token if it expires.</div>` : ''}
                     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
                         <input id="dbVaultTokenInput" type="password" value="${escapeAttr(data.password || data.vault_token || '')}" readonly
                                style="flex:1;min-width:240px;padding:10px 12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);">
@@ -2050,14 +2141,9 @@ async function openDbExternalToolModal(requestId) {
                         </button>
                     </div>
                     <small class="db-step-hint" style="display:block;margin-top:8px;">
-                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (proxy only). Credentials expire automatically.
+                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (proxy only). Access expires automatically.
                     </small>
                 </div>
-            </div>
-        ` : `
-            <div class="db-modal-justification" style="margin-top:14px;">
-                <div class="db-modal-justification-label"><strong>IAM Token Authentication</strong></div>
-                <div class="db-modal-justification-text">This request uses IAM database authentication. Use the approved permission set to generate an IAM DB token and connect via the proxy endpoint.</div>
             </div>
         `;
 
@@ -2202,14 +2288,12 @@ async function refreshApprovedDatabases() {
             const dbName = (db.db_name || db.engine || '').replace(/'/g, "\\'");
             const effectiveAuth = String(db.effective_auth || 'password').toLowerCase();
             const userDisplay = effectiveAuth === 'iam'
-                ? `<span class="badge">IAM token</span>`
+                ? `<span class="badge">IAM</span> <code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`
                 : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`;
-            const actionBtn = effectiveAuth === 'iam'
-                ? `<button class="btn-secondary btn-sm" onclick="alert('IAM auth is enabled for this request. Use IAM token authentication via the approved permission set.')"><i class="fas fa-circle-info"></i> IAM Info</button>`
-                : `
-                    <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
-                    <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> External Tool</button>
-                `;
+            const actionBtn = `
+                <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
+                <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> External Tool</button>
+            `;
             return `<tr>
                 <td>${db.engine}</td>
                 <td><strong>${db.host}:${db.port}</strong></td>

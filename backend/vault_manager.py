@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 import urllib.error
@@ -172,7 +173,53 @@ class VaultManager:
         return ", ".join(privs), with_grant_option
 
     @staticmethod
-    def create_database_session(*, request_id: str, engine: str, db_names, allowed_ops: list[str], duration_hours: int) -> dict:
+    def _normalize_user_fragment(value: str) -> str:
+        s = str(value or "").strip().lower()
+        if "@" in s:
+            s = s.split("@", 1)[0]
+        s = re.sub(r"[^a-z0-9]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip("_")
+        return s or "user"
+
+    @staticmethod
+    def _username_template_for(*, requester: str, request_id: str, engine: str) -> str:
+        """
+        Generate a Vault `username_template` that embeds the requester identity.
+
+        Target format (example): d_<user>_<rid>_<rand>
+        Must respect engine identifier limits (MySQL users: 32 chars; Postgres: 63).
+        """
+        user_frag = VaultManager._normalize_user_fragment(requester)[:12]
+        rid_clean = re.sub(r"[^a-z0-9]", "", str(request_id or "").lower())
+        rid_short = (rid_clean[:8] or "req")
+
+        eng = str(engine or "").lower()
+        max_len = 63 if "postgres" in eng else 32
+
+        # Keep a small random suffix to avoid collisions if creds are minted more than once.
+        rand_len = 4
+        suffix = f"_{{{{random {rand_len}}}}}"
+
+        base = f"d_{user_frag}_{rid_short}"
+        base_max = max_len - len(suffix)
+        if base_max < 1:
+            base = base[: max_len]
+            return base
+        if len(base) > base_max:
+            base = base[:base_max].rstrip("_")
+        return base + suffix
+
+    @staticmethod
+    def create_database_session(
+        *,
+        request_id: str,
+        engine: str,
+        db_names,
+        allowed_ops: list[str],
+        duration_hours: int,
+        requester: str = "",
+        auth_type: str = "password",
+    ) -> dict:
         """
         Create a per-request Vault DB role and mint one set of dynamic DB credentials.
 
@@ -213,20 +260,35 @@ class VaultManager:
         connection = VaultManager._env("VAULT_DB_CONNECTION_NAME") or "my-mysql"
 
         # Per-request Vault role name (Vault config object).
-        # Spec: role_name = "jit_" + request_id
-        role_name = f"jit_{rid}"
+        # Updated: include requester identity for traceability.
+        requester_frag = VaultManager._normalize_user_fragment(requester)[:20]
+        role_name = f"jit_{requester_frag}_{rid}" if requester_frag else f"jit_{rid}"
+        # Keep role names URL-safe.
+        role_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", role_name)
 
         engine_l = str(engine or "").lower()
+        auth_l = str(auth_type or "password").strip().lower()
+        use_iam_auth = auth_l == "iam"
         if "postgres" in engine_l:
             db_name = db_names[0]
             # Basic Postgres grants (public schema); can be extended later.
-            # Note: Postgres uses "role" as a user; Vault will create a user with a password.
-            creation_statements = [
-                "CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';",
-                f"GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{{{{name}}}}\";",
-                f"GRANT USAGE ON SCHEMA public TO \"{{{{name}}}}\";",
-                f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
-            ]
+            if use_iam_auth:
+                creation_statements = [
+                    "CREATE ROLE \"{{name}}\" WITH LOGIN;",
+                    # RDS IAM auth for Postgres requires membership in rds_iam.
+                    "GRANT rds_iam TO \"{{name}}\";",
+                    f"GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{{{{name}}}}\";",
+                    f"GRANT USAGE ON SCHEMA public TO \"{{{{name}}}}\";",
+                    f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
+                ]
+            else:
+                # Note: Postgres uses "role" as a user; Vault will create a user with a password.
+                creation_statements = [
+                    "CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';",
+                    f"GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{{{{name}}}}\";",
+                    f"GRANT USAGE ON SCHEMA public TO \"{{{{name}}}}\";",
+                    f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
+                ]
             revocation_statements = [
                 "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM \"{{name}}\";",
                 "REVOKE USAGE ON SCHEMA public FROM \"{{name}}\";",
@@ -237,12 +299,20 @@ class VaultManager:
             # Default: MySQL/MariaDB/Aurora style
             privs_csv, with_grant = VaultManager._mysql_privileges_from_ops(allowed_ops or [])
             grant_opt = " WITH GRANT OPTION" if with_grant else ""
-            # Use backticks for db name and include IDENTIFIED BY so Vault controls password.
-            creation_statements = [
-                "CREATE USER '{{name}}'@'%' IDENTIFIED BY '{{password}}';",
-                *[f"GRANT {privs_csv} ON `{db_name}`.* TO '{{{{name}}}}'@'%'{grant_opt};" for db_name in db_names],
-                "FLUSH PRIVILEGES;"
-            ]
+            if use_iam_auth:
+                # IAM auth: DB user authenticates via AWSAuthenticationPlugin (token as password).
+                creation_statements = [
+                    "CREATE USER '{{name}}'@'%' IDENTIFIED WITH AWSAuthenticationPlugin as 'RDS';",
+                    *[f"GRANT {privs_csv} ON `{db_name}`.* TO '{{{{name}}}}'@'%'{grant_opt};" for db_name in db_names],
+                    "FLUSH PRIVILEGES;",
+                ]
+            else:
+                # Use backticks for db name and include IDENTIFIED BY so Vault controls password.
+                creation_statements = [
+                    "CREATE USER '{{name}}'@'%' IDENTIFIED BY '{{password}}';",
+                    *[f"GRANT {privs_csv} ON `{db_name}`.* TO '{{{{name}}}}'@'%'{grant_opt};" for db_name in db_names],
+                    "FLUSH PRIVILEGES;",
+                ]
             revocation_statements = [
                 "DROP USER IF EXISTS '{{name}}'@'%';",
                 "FLUSH PRIVILEGES;"
@@ -260,6 +330,8 @@ class VaultManager:
                 "db_name": connection,
                 "creation_statements": creation_statements,
                 "revocation_statements": revocation_statements,
+                # Embed requester identity into the generated DB username.
+                "username_template": VaultManager._username_template_for(requester=requester, request_id=rid, engine=engine_l),
                 "default_ttl": f"{duration_hours}h",
                 "max_ttl": f"{duration_hours}h",
             },
@@ -273,14 +345,17 @@ class VaultManager:
         db_password = str(data.get("password") or "").strip()
         lease_id = str(creds.get("lease_id") or "").strip()
         lease_duration = int(creds.get("lease_duration") or 0)
-        if not db_username or not db_password or not lease_id:
+        if not db_username or not lease_id:
             raise RuntimeError("Vault did not return dynamic DB credentials")
+        if not db_password and not use_iam_auth:
+            raise RuntimeError("Vault did not return a database password")
 
         expires_at = (datetime.now() + timedelta(hours=duration_hours)).isoformat()
         return {
             "vault_role_name": role_name,
             "db_username": db_username,
-            "vault_token": db_password,  # treated as session token for proxy/external tools
+            # For IAM auth, password is not used; an IAM token is generated on demand.
+            "vault_token": "" if use_iam_auth else db_password,
             "lease_id": lease_id,
             "lease_duration": lease_duration,
             "expires_at": expires_at,

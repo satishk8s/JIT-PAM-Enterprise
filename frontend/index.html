@@ -501,13 +501,20 @@
                     <div class="requests-category-card">
                         <h3 class="requests-category-title"><i class="fas fa-database"></i> Databases</h3>
                         <div class="requests-status-buttons">
-                            <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="databases" data-status="all" onclick="filterRequestsByCategory('databases', 'all')"><i class="fas fa-list"></i> All</button>
+                            <button class="requests-status-btn requests-status-inprogress requests-status-glow" data-category="databases" data-status="active" onclick="filterRequestsByCategory('databases', 'active')"><i class="fas fa-bolt"></i> Active</button>
                             <button class="requests-status-btn requests-status-pending" data-category="databases" data-status="pending" onclick="filterRequestsByCategory('databases', 'pending')"><i class="fas fa-clock"></i> Pending</button>
-                            <button class="requests-status-btn requests-status-inprogress" data-category="databases" data-status="in_progress" onclick="filterRequestsByCategory('databases', 'in_progress')"><i class="fas fa-spinner"></i> In Progress</button>
-                            <button class="requests-status-btn requests-status-completed" data-category="databases" data-status="completed" onclick="filterRequestsByCategory('databases', 'completed')"><i class="fas fa-check-circle"></i> Completed</button>
+                            <button class="requests-status-btn requests-status-completed" data-category="databases" data-status="approved" onclick="filterRequestsByCategory('databases', 'approved')"><i class="fas fa-check"></i> Approved</button>
+                            <button class="requests-status-btn requests-status-completed" data-category="databases" data-status="expired" onclick="filterRequestsByCategory('databases', 'expired')"><i class="fas fa-hourglass-end"></i> Expired</button>
                             <button class="requests-status-btn requests-status-rejected" data-category="databases" data-status="rejected" onclick="filterRequestsByCategory('databases', 'rejected')"><i class="fas fa-times-circle"></i> Rejected</button>
                         </div>
-                        <div id="dbRequestsList" class="requests-list">
+                        <div class="db-requests-toolbar">
+                            <div class="db-requests-search">
+                                <i class="fas fa-search"></i>
+                                <input id="dbRequestsSearchInput" type="text" placeholder="Search by request id, database, instance, user…" oninput="onDbRequestsSearchChange()" />
+                            </div>
+                            <div id="dbRequestsPager" class="db-requests-pager"></div>
+                        </div>
+                        <div id="dbRequestsList" class="requests-list db-requests-list">
                             <div class="requests-empty">No database requests</div>
                         </div>
                         <div class="requests-approved-db">

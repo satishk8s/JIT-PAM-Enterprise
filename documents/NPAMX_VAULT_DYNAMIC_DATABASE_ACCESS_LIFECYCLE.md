@@ -1,6 +1,6 @@
 # NPAMX Vault Dynamic Database Access (JIT) - Project Document
 
-Last updated: 2026-02-12
+Last updated: 2026-02-13
 
 ## 1) Executive Summary (Plain English)
 
@@ -11,9 +11,10 @@ Now, a database access request works like this:
 1. A user selects account, engine, instance, database(s), SQL operations, duration (TTL), and justification.
 2. The request goes through approvals (Manager / DB Owner / CISO) based on environment and data sensitivity.
 3. Once approvals are complete, the backend calls HashiCorp Vault (Database Secrets Engine) to mint:
-   - A short-lived DB username
-   - A short-lived DB password (shown to the user as the request "password")
+   - A short-lived DB username (traceable to the requester)
+   - A short-lived DB password (password-mode only)
    - A Vault lease that expires automatically at TTL
+   - If IAM auth is used, Vault creates the DB user and grants, but NPAMX generates an IAM token on demand (no password is shown/stored).
 4. NPAMX shows the user only the DB proxy endpoint (never the real DB endpoint) and two ways to connect:
    - PAM Terminal (browser-based query terminal)
    - External tool credentials (DBeaver / Workbench) via proxy host/port
@@ -24,20 +25,23 @@ Now, a database access request works like this:
 ### Before
 
 - DB credentials were created at request time (or approval time) by directly connecting as a DB admin user.
-- Requests stored a plaintext `db_password` in the backend storage.
+- Requests were persisted in a JSON file (`backend/data/requests.json`).
 - UI responses could include the real RDS endpoint (host/port).
 - Background cleanup used DB admin credentials to drop users (manual cleanup approach).
 
 ### After
 
 - Requests are created as `pending`. TTL does not start until the request becomes active.
+- Persistence is in SQLite (no JSON file writes):
+  - `requests`, `db_sessions`, `approvals`, `audit_logs`
 - After final approval, backend activates the request by minting a Vault lease:
-  - `db_username` (dynamic)
-  - `password` (dynamic DB password)
-  - `lease_id` and `role_name`
+  - `db_username` (dynamic, includes requester identity)
+  - `password` (dynamic DB password, password-mode only)
+  - `lease_id` and `vault_role_name`
   - `expiry_time`
 - UI never displays the real DB endpoint. It displays only the configured proxy endpoint.
 - Cleanup no longer drops users directly; Vault handles revocation via TTL. NPAMX only marks the request expired and clears stored secrets.
+- Activation failures do not "fail" the request permanently: the request stays `approved` so operators/users can retry activation.
 
 ## 3) Security Principles Enforced
 
@@ -66,6 +70,8 @@ def _activate_database_access_request(request_id: str) -> dict:
         db_names=db_names,
         allowed_ops=allowed_ops,
         duration_hours=duration_hours,
+        requester=req.get("user_email") or "",
+        auth_type=("iam" if effective_auth == "iam" else "password"),
     )
     req['role_name'] = vault_creds.get('vault_role_name', '')
     req['lease_id'] = vault_creds.get('lease_id', '')
@@ -74,6 +80,34 @@ def _activate_database_access_request(request_id: str) -> dict:
     req['expiry_time'] = vault_creds.get('expires_at') or ...
     req['status'] = 'ACTIVE'
 ```
+
+### 4.2 Traceable DB Usernames (Requester + Request ID)
+
+Goal:
+- DB usernames must be traceable to the requester.
+
+Implementation:
+- Vault role creation sets `username_template` so the generated DB user looks like:
+  - `d_<user>_<rid>_<rand>`
+
+`backend/vault_manager.py`:
+
+```python
+body={
+  "db_name": connection,
+  "creation_statements": creation_statements,
+  "revocation_statements": revocation_statements,
+  "username_template": VaultManager._username_template_for(
+      requester=requester, request_id=rid, engine=engine_l
+  ),
+  "default_ttl": f"{duration_hours}h",
+  "max_ttl": f"{duration_hours}h",
+}
+```
+
+Notes:
+- MySQL usernames are limited to 32 chars, so NPAMX truncates the template safely.
+- A small random suffix is included to avoid collisions if credentials are minted more than once.
 
 ### 4.2 Approval Hook Calls Activation
 
@@ -172,6 +206,29 @@ creation_statements = [
 ]
 ```
 
+### 5.3 IAM Database Authentication (Optional)
+
+If the selected RDS instance has IAM DB authentication enabled and the request uses IAM mode:
+- Vault creates the DB user using the IAM auth plugin (no password is required/used).
+- NPAMX generates the IAM token on demand (valid ~15 minutes).
+
+MySQL IAM creation (simplified):
+
+```python
+"CREATE USER '{{name}}'@'%' IDENTIFIED WITH AWSAuthenticationPlugin as 'RDS';"
+```
+
+Token generation (server-side only):
+
+```python
+tok = rds.generate_db_auth_token(
+  DBHostname=rds_endpoint,
+  Port=rds_port,
+  DBUsername=db_username,
+  Region=region,
+)
+```
+
 ## 6) Frontend Changes
 
 ### 6.0 No RDS Endpoint Collection (Strict)
@@ -199,6 +256,17 @@ Required variables for Vault dynamic DB access:
 Required variables for proxy-only connectivity:
 - `DB_CONNECT_PROXY_HOST`
 - `DB_CONNECT_PROXY_PORT`
+
+SQLite persistence (optional override):
+- `NPAMX_DB_PATH` (default: `backend/data/npamx.db`)
+
+IAM token/TLS (optional):
+- `DB_SSL_CA_BUNDLE` path to an RDS CA bundle (recommended for IAM auth)
+- `DB_SSL_REQUIRE=true` to force TLS even without an explicit CA path (use with care)
+
+Troubleshooting (operator-only):
+- If activation fails, NPAMX returns a generic error to the browser.
+- The full internal error is logged to `journalctl -u npam-backend` and stored in SQLite (`requests.payload_json.activation_error`).
 
 ### 6.1 Approved Databases Actions
 

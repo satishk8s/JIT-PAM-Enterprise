@@ -55,17 +55,33 @@ def create_database_user(host, port, admin_user, admin_password, new_user, new_p
     except Exception as e:
         return {'error': str(e)}
 
-def execute_query(host, port, username, password, database, query):
-    """Execute SQL query"""
+def execute_query(host, port, username, password, database, query, *, ssl=None, connect_timeout=10, read_timeout=30, write_timeout=30, client_flag=0, auth_plugin_map=None):
+    """Execute SQL query.
+
+    Notes:
+    - `ssl` can be provided for IAM auth / TLS-required databases (dict passed to PyMySQL).
+    - `auth_plugin_map` can be provided to enable special auth plugins when required.
+    """
     try:
-        conn = pymysql.connect(
-            host=host,
-            port=port,
-            user=username,
-            password=password,
-            database=database,
-            cursorclass=pymysql.cursors.DictCursor
-        )
+        kwargs = {
+            "host": host,
+            "port": port,
+            "user": username,
+            "password": password,
+            "database": database,
+            "cursorclass": pymysql.cursors.DictCursor,
+            "connect_timeout": int(connect_timeout or 10),
+            "read_timeout": int(read_timeout or 30),
+            "write_timeout": int(write_timeout or 30),
+        }
+        if ssl:
+            kwargs["ssl"] = ssl
+        if client_flag:
+            kwargs["client_flag"] = int(client_flag)
+        if auth_plugin_map:
+            kwargs["auth_plugin_map"] = auth_plugin_map
+
+        conn = pymysql.connect(**kwargs)
         cursor = conn.cursor()
         
         cursor.execute(query)

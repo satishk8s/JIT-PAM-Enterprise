@@ -14,6 +14,7 @@ from strict_policies import StrictPolicies
 from ai_validator import AIValidator
 from user_sync_engine import UserSyncEngine
 from enforcement_engine import EnforcementEngine
+from persistence import NpamxStore
 
 load_dotenv()
 
@@ -135,35 +136,31 @@ def initialize_aws_config():
         CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
         CONFIG['permission_sets'] = [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}]
 
-# Persistent storage (survives backend restart)
-REQUESTS_FILE = os.path.join(os.path.dirname(__file__), 'data', 'requests.json')
+# Persistent storage (SQLite, survives backend restart)
+NPAMX_DB_PATH = os.getenv('NPAMX_DB_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'npamx.db')
+STORE = NpamxStore(NPAMX_DB_PATH)
 
 def _load_requests():
     global requests_db, approvals_db
-    requests_db = {}
-    approvals_db = {}
     try:
-        os.makedirs(os.path.dirname(REQUESTS_FILE), exist_ok=True)
-        if os.path.exists(REQUESTS_FILE):
-            with open(REQUESTS_FILE, 'r') as f:
-                data = json.load(f)
-                requests_db = {k: v for k, v in (data.get('requests') or {}).items()}
-                approvals_db = {k: v for k, v in (data.get('approvals') or {}).items()}
-            print(f"Loaded {len(requests_db)} requests from {REQUESTS_FILE}")
+        # One-time migration: if legacy requests.json exists and DB is empty, import it.
+        legacy_path = os.path.join(os.path.dirname(__file__), 'data', 'requests.json')
+        if STORE.is_empty() and os.path.exists(legacy_path):
+            rcount, acount = STORE.import_legacy_requests_json(legacy_path)
+            print(f"Migrated legacy JSON storage -> SQLite: requests={rcount}, approvals={acount}")
+
+        requests_db, approvals_db = STORE.load_all()
+        print(f"Loaded {len(requests_db)} requests from {NPAMX_DB_PATH}")
     except Exception as e:
-        print(f"Could not load requests: {e}")
+        print(f"Could not load requests from SQLite: {e}")
+        requests_db = {}
+        approvals_db = {}
 
 def _save_requests():
     try:
-        os.makedirs(os.path.dirname(REQUESTS_FILE), exist_ok=True)
-        def _serialize(obj):
-            if hasattr(obj, 'isoformat'):
-                return obj.isoformat()
-            raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
-        with open(REQUESTS_FILE, 'w') as f:
-            json.dump({'requests': requests_db, 'approvals': approvals_db}, f, indent=0, default=_serialize)
+        STORE.sync_from_memory(requests_db, approvals_db)
     except Exception as e:
-        print(f"Could not save requests: {e}")
+        print(f"Could not save requests to SQLite: {e}")
 
 _load_requests()
 
@@ -1431,38 +1428,76 @@ def get_request_details(request_id):
 
 @app.route('/api/databases/requests', methods=['GET'])
 def get_database_requests():
-    """Get database access requests for current user, filterable by status"""
-    user_email = request.args.get('user_email')
-    status_filter = request.args.get('status')  # pending, approved, denied, all
+    """
+    Get database access requests for current user.
+
+    Supports:
+    - status: active|pending|approved|expired|rejected|all
+    - q: search by request id, db name, instance id, permissions, user email
+    - page/page_size: pagination
+    """
+    user_email = str(request.args.get('user_email') or '').strip()
+    status_filter = str(request.args.get('status') or 'all').strip().lower()
+    q = str(request.args.get('q') or '').strip().lower()
+    try:
+        page = int(request.args.get('page') or 1)
+    except Exception:
+        page = 1
+    try:
+        page_size = int(request.args.get('page_size') or 20)
+    except Exception:
+        page_size = 20
+
     if not user_email:
         return jsonify({'error': 'user_email required'}), 400
-    db_requests = []
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 20
+    if page_size > 100:
+        page_size = 100
+
     proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+    items = []
     for req_id, req in requests_db.items():
-        if req.get('type') != 'database_access' or req.get('user_email') != user_email:
+        if not isinstance(req, dict) or req.get('type') != 'database_access':
             continue
-        s = str(req.get('status', '') or '').strip().lower()
+        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+            continue
+
+        lifecycle = str(req.get('status', '') or '').strip().lower()
         expires_at = str(req.get('expires_at', '') or '').strip()
         is_expired = _is_db_request_expired(req)
-        # Map to UI status
-        if s == 'pending':
+
+        # UI status buckets (stable + searchable)
+        if lifecycle == 'pending':
             ui_status = 'pending'
-        elif s in ('denied', 'rejected'):
+        elif lifecycle in ('denied', 'rejected', 'failed'):
             ui_status = 'rejected'
-        elif s in ('active', 'approved') and not is_expired:
-            ui_status = 'in_progress'
-        elif s in ('expired',) or (s in ('active', 'approved') and is_expired):
-            ui_status = 'completed'
-        elif s == 'failed':
-            ui_status = 'rejected'
+        elif lifecycle in ('expired', 'revoked'):
+            ui_status = 'expired'
+        elif lifecycle == 'active' and not is_expired:
+            ui_status = 'active'
+        elif lifecycle == 'active' and is_expired:
+            ui_status = 'expired'
+        elif lifecycle == 'approved' and not is_expired:
+            ui_status = 'approved'
+        elif lifecycle == 'approved' and is_expired:
+            ui_status = 'expired'
         else:
-            ui_status = s
+            ui_status = lifecycle or 'pending'
+
         if status_filter and status_filter != 'all' and ui_status != status_filter:
             continue
+
         safe_dbs = []
+        db_names_for_search = []
         for db in (req.get('databases') or []):
             if not isinstance(db, dict):
                 continue
+            n = str(db.get('name') or '').strip()
+            if n:
+                db_names_for_search.append(n.lower())
             safe_dbs.append({
                 'id': db.get('id', ''),
                 'name': db.get('name', ''),
@@ -1470,7 +1505,30 @@ def get_database_requests():
                 'host': proxy_host,
                 'port': proxy_port,
             })
-        db_requests.append({
+
+        perms = req.get('permissions', [])
+        if isinstance(perms, str):
+            perms_text = perms
+        elif isinstance(perms, list):
+            perms_text = ",".join([str(p) for p in perms if str(p).strip()])
+        else:
+            perms_text = ""
+
+        search_hay = " ".join(
+            [
+                str(req_id).lower(),
+                str(req.get('db_instance_id') or '').lower(),
+                str(req.get('db_resource_id') or '').lower(),
+                " ".join(db_names_for_search),
+                str(perms_text).lower(),
+                str(req.get('role') or '').lower(),
+                str(req.get('user_email') or '').lower(),
+            ]
+        )
+        if q and q not in search_hay:
+            continue
+
+        items.append({
             'request_id': req_id,
             'status': ui_status,
             'lifecycle_status': str(req.get('status') or ''),
@@ -1489,8 +1547,22 @@ def get_database_requests():
             'expires_at': expires_at,
             'expiry_time': str(req.get('expiry_time') or expires_at or ''),
             'db_username': str(req.get('db_username') or ''),
+            'user_email': str(req.get('user_email') or ''),
         })
-    return jsonify({'requests': db_requests})
+
+    # Sort newest first
+    def _sort_key(r):
+        try:
+            return datetime.fromisoformat(str(r.get('created_at') or '').replace('Z', '+00:00'))
+        except Exception:
+            return datetime.min
+
+    items.sort(key=_sort_key, reverse=True)
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = items[start:end]
+    return jsonify({'requests': page_items, 'page': page, 'page_size': page_size, 'total': total})
 
 
 @app.route('/api/databases/request/<request_id>/update-duration', methods=['POST'])
@@ -1517,6 +1589,7 @@ def update_database_request_duration(request_id):
     # TTL starts at activation (after approvals). Do not set expires_at while pending.
     req['expires_at'] = ''
     req['modified_at'] = datetime.now().isoformat()
+    _save_requests()
     return jsonify({'status': 'updated', 'request_id': request_id, 'duration_hours': duration})
 
 
@@ -1545,6 +1618,7 @@ def modify_request(request_id):
         if 'justification' in data:
             access_request['justification'] = data['justification']
         access_request['modified_at'] = datetime.now().isoformat()
+        _save_requests()
         return jsonify({
             'status': 'modified',
             'request': {
@@ -1735,14 +1809,22 @@ def approve_request(request_id):
             # Activate (mint Vault credentials / IAM assignment) once approvals are complete.
             activate_result = _activate_database_access_request(request_id)
             if activate_result.get('error'):
+                try:
+                    print(f"❌ Approval-triggered activation failed for request {request_id}: {activate_result.get('error')}")
+                except Exception:
+                    pass
                 # Do not leak internal Vault/config details to the UI.
                 safe_msg, _safe_code = _public_db_activation_error(activate_result['error'])
-                return jsonify({'status': 'failed', 'error': safe_msg}), 500
+                return jsonify({
+                    'status': 'approved',
+                    'message': "✅ Approved. Activation is pending. Please retry in a few minutes.",
+                    'error': safe_msg
+                }), 200
 
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
             approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
             if effective_auth == 'iam':
-                approved_msg = '✅ Database IAM access is active. Use IAM token authentication via the approved permission set.'
+                approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Credentials (expires in ~15 minutes).'
             return jsonify({
                 'status': access_request.get('status', 'active'),
                 'message': approved_msg,
@@ -2728,6 +2810,7 @@ def background_cleanup():
             print("🧹 Running background cleanup...")
             
             now = datetime.now()
+            changed = False
             for request_id, access_request in list(requests_db.items()):
                 if 'instance_id' not in access_request:
                     continue
@@ -2749,6 +2832,7 @@ def background_cleanup():
                         access_request['user_removed'] = True
                         access_request['removed_at'] = now.isoformat()
                         print(f"✅ Cleaned up: {username} from {instance_id}")
+                        changed = True
             
             # Cleanup expired database access - revoke DB users
             for request_id, access_request in list(requests_db.items()):
@@ -2787,6 +2871,7 @@ def background_cleanup():
                                 pass
                     except Exception as db_err:
                         print(f"❌ DB expiry handling error: {db_err}")
+                    changed = True
 
             # Cleanup stale in-memory DB chat conversations/state to prevent unbounded growth.
             try:
@@ -2804,6 +2889,12 @@ def background_cleanup():
                         db_conversations.pop(cid, None)
             except Exception:
                 pass
+
+            if changed:
+                try:
+                    _save_requests()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"❌ Background cleanup error: {e}")
 
@@ -4097,6 +4188,51 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         profile['source'] = 'error'
         return profile
 
+
+def _describe_rds_instance_endpoint(*, instance_id: str, region: str) -> dict:
+    """
+    Server-side helper to resolve an RDS instance endpoint.
+
+    IMPORTANT: Never return this endpoint to the browser. Users must connect via proxy only.
+    """
+    inst = str(instance_id or "").strip()
+    reg = str(region or "").strip() or "ap-south-1"
+    if not inst:
+        raise RuntimeError("db_instance_id is required")
+    rds = boto3.client("rds", region_name=reg, config=AWS_CONFIG)
+    resp = rds.describe_db_instances(DBInstanceIdentifier=inst)
+    dbi = (resp.get("DBInstances") or [None])[0]
+    if not dbi:
+        raise RuntimeError("RDS instance not found")
+    ep = dbi.get("Endpoint") or {}
+    addr = str(ep.get("Address") or "").strip()
+    port = int(ep.get("Port") or 0) if ep.get("Port") else 0
+    if not addr or port <= 0:
+        raise RuntimeError("RDS endpoint is unavailable")
+    return {"address": addr, "port": port, "engine": str(dbi.get("Engine") or ""), "region": reg}
+
+
+def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_username: str) -> dict:
+    """
+    Generate an IAM DB auth token (short-lived, ~15 minutes).
+
+    NOTE: The token string itself typically includes the RDS hostname. Do not display the hostname separately.
+    """
+    user = str(db_username or "").strip()
+    if not user:
+        raise RuntimeError("db_username is required for IAM token generation")
+    info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region)
+    rds = boto3.client("rds", region_name=info["region"], config=AWS_CONFIG)
+    token = rds.generate_db_auth_token(
+        DBHostname=info["address"],
+        Port=int(info["port"]),
+        DBUsername=user,
+        Region=info["region"],
+    )
+    # AWS documents 15 minutes validity for the generated token.
+    expires_at = (datetime.utcnow() + timedelta(minutes=15)).isoformat() + "Z"
+    return {"token": token, "token_expires_at": expires_at}
+
 def _auth_mode_user_hint(profile):
     mode = str((profile or {}).get('auth_mode') or 'password_only')
     if mode == 'iam_only':
@@ -4214,30 +4350,29 @@ def _activate_database_access_request(request_id: str) -> dict:
 
     try:
         if effective_auth == 'iam':
-            # IAM DB auth: assign a scoped rds-db:connect permission set (best-effort).
-            profile = {
-                'auth_mode': req.get('auth_mode', 'iam_and_password'),
-                'region': req.get('db_region', os.getenv('AWS_REGION') or 'ap-south-1'),
-                'db_resource_id': req.get('db_resource_id', ''),
-                'instance_id': req.get('db_instance_id', '')
-            }
-            username = str(req.get('requested_db_username') or '').strip() or str(req.get('user_email') or '').split('@')[0]
-            assignment = _create_and_assign_dbconnect_access(
-                user_email=req.get('user_email'),
-                account_id=req.get('account_id'),
-                db_username=username,
-                db_name=db_names[0],
+            # IAM DB auth:
+            # 1) Vault creates the DB user + grants (no password shown/used).
+            # 2) IAM auth token is generated on demand (credentials endpoint / PAM terminal).
+            vault_creds = VaultManager.create_database_session(
+                request_id=rid,
+                engine=engine,
+                db_names=db_names,
+                allowed_ops=allowed_ops,
                 duration_hours=duration_hours,
-                auth_profile=profile,
-                request_id=rid
+                requester=req.get('user_email') or '',
+                auth_type='iam',
             )
-            if assignment.get('error'):
-                raise RuntimeError(str(assignment.get('error')))
-            req['iam_permission_set_name'] = assignment.get('permission_set_name', '')
-            req['iam_permission_set_arn'] = assignment.get('permission_set_arn', '')
-            req['db_connect_arn'] = assignment.get('db_connect_arn', '')
-            req['db_username'] = username
-            req['expires_at'] = (now + timedelta(hours=duration_hours)).isoformat()
+            role_name = vault_creds.get('vault_role_name', '')
+            lease_id = vault_creds.get('lease_id', '')
+            req['vault_role_name'] = role_name
+            req['role_name'] = role_name
+            req['vault_lease_id'] = lease_id
+            req['lease_id'] = lease_id
+            req['vault_token'] = ''
+            req['password'] = ''
+            req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
+            req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
+            req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
         else:
@@ -4248,6 +4383,8 @@ def _activate_database_access_request(request_id: str) -> dict:
                 db_names=db_names,
                 allowed_ops=allowed_ops,
                 duration_hours=duration_hours,
+                requester=req.get('user_email') or '',
+                auth_type='password',
             )
             role_name = vault_creds.get('vault_role_name', '')
             lease_id = vault_creds.get('lease_id', '')
@@ -4264,10 +4401,20 @@ def _activate_database_access_request(request_id: str) -> dict:
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
     except Exception as e:
-        req['status'] = 'failed'
+        # Log full error server-side for operators; user-facing APIs will sanitize this.
+        try:
+            print(f"❌ DB activation failed for request {rid}: {e}")
+        except Exception:
+            pass
+        # Approval may have succeeded but activation failed (Vault unreachable, misconfigured, etc).
+        # Keep the request approved so it can be retried without re-requesting approvals.
+        req['status'] = 'approved'
         req['activation_error'] = str(e)
+        # Clear sensitive/partial fields (defense-in-depth).
+        for k in ('vault_token', 'password', 'db_password'):
+            req[k] = ''
         _save_requests()
-        return {'status': 'failed', 'error': str(e)}
+        return {'status': 'approved', 'error': str(e)}
 
     _save_requests()
     return {'status': req.get('status', 'ACTIVE')}
@@ -5487,7 +5634,8 @@ def request_database_access():
             'justification': justification,
             'ai_generated': ai_generated,
             'conversation_id': conversation_id,
-            'status': 'pending' if initial_status == 'pending' else 'pending',  # upgraded during activation
+            # If auto-approved (NONPROD read-only), keep status as approved even if activation is pending.
+            'status': 'approved' if initial_status == 'approved' else 'pending',
             'approval_required': approval_required,
             'approval_note': approval_message,
             # Vault session fields (populated only after approval/activation)
@@ -5526,6 +5674,11 @@ def request_database_access():
             except Exception as e:
                 create_error = str(e)
                 create_error_public, _ = _public_db_activation_error(create_error)
+            if create_error:
+                try:
+                    print(f"❌ Auto-activation failed for request {request_id}: {create_error}")
+                except Exception:
+                    pass
 
         # Update conversation state (helps prevent accidental duplicate submissions).
         if conversation_id and conversation_id in db_conversation_states:
@@ -5542,6 +5695,11 @@ def request_database_access():
             msg = (
                 "✅ Access is active. Temporary credentials are available under My Requests > Databases "
                 "and will expire automatically."
+            )
+        elif str(status).strip().lower() == 'approved':
+            msg = (
+                "✅ Request approved. Activating database access now. "
+                "If credentials are not visible yet, please retry in a few minutes."
             )
         elif str(status).strip().lower() == 'pending':
             msg = approval_message
@@ -5570,7 +5728,7 @@ def get_approved_databases():
         for req_id, req in requests_db.items():
             if (req.get('type') == 'database_access' and 
                 req.get('user_email') == user_email and 
-                str(req.get('status') or '').lower() in ('active', 'approved')):
+                str(req.get('status') or '').lower() in ('active',)):
                 
                 # Skip expired - only show databases you can actually use
                 if _is_db_request_expired(req):
@@ -5592,7 +5750,7 @@ def get_approved_databases():
                         'auth_mode': req.get('auth_mode', 'password_only'),
                         'iam_permission_set_name': req.get('iam_permission_set_name', ''),
                         'credentials_note': (
-                            'Use IAM token authentication after approval.'
+                            'Generate an IAM token under Credentials when you need to connect (valid ~15 minutes).'
                             if effective_auth == 'iam'
                             else 'Temporary username/password available in this request.'
                         ),
@@ -5639,15 +5797,28 @@ def get_database_request_credentials(request_id):
         db_name = db_names[0] if db_names else 'default'
 
         if effective_auth == 'iam':
-            return jsonify({
-                'request_id': request_id,
-                'effective_auth': 'iam',
-                'proxy_host': proxy_host,
-                'proxy_port': proxy_port,
-                'db_username': str(req.get('db_username') or '').strip(),
-                'expires_at': str(req.get('expires_at') or '').strip(),
-                'note': 'IAM database authentication is enabled for this request. Use IAM token authentication via the approved permission set.'
-            })
+            username = str(req.get('db_username') or '').strip()
+            if not username:
+                return jsonify({'error': 'Credentials are not available (request may be pending or expired).'}), 400
+            try:
+                tok = _generate_rds_iam_db_auth_token(
+                    instance_id=str(req.get('db_instance_id') or '').strip(),
+                    region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
+                    db_username=username,
+                )
+                return jsonify({
+                    'request_id': request_id,
+                    'effective_auth': 'iam',
+                    'proxy_host': proxy_host,
+                    'proxy_port': proxy_port,
+                    'db_username': username,
+                    'password': tok.get('token', ''),
+                    'iam_token_expires_at': tok.get('token_expires_at', ''),
+                    'expires_at': str(req.get('expires_at') or '').strip(),
+                    'note': 'IAM token expires in ~15 minutes. Generate a fresh token if it expires.',
+                })
+            except Exception:
+                return jsonify({'error': 'Failed to generate IAM token. Please retry or contact an administrator.'}), 500
 
         username = str(req.get('db_username') or '').strip()
         token = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
@@ -5667,6 +5838,38 @@ def get_database_request_credentials(request_id):
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/databases/request/<request_id>/activate', methods=['POST'])
+def activate_database_request(request_id):
+    """Owner-only retry endpoint for approved (but not active) DB requests."""
+    try:
+        data = request.get_json(silent=True) or {}
+        user_email = str(data.get('user_email') or request.args.get('user_email') or '').strip()
+        if not user_email:
+            return jsonify({'error': 'user_email required'}), 400
+        if request_id not in requests_db:
+            return jsonify({'error': 'Request not found'}), 404
+        req = requests_db[request_id]
+        if req.get('type') != 'database_access':
+            return jsonify({'error': 'Not a database request'}), 400
+        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+            return jsonify({'error': 'Access denied'}), 403
+
+        status = str(req.get('status') or '').strip().lower()
+        if status == 'active' and not _is_db_request_expired(req):
+            return jsonify({'status': 'active', 'message': '✅ Access is already active.', 'expires_at': req.get('expires_at', '')})
+        if status not in ('approved',):
+            return jsonify({'error': 'Request is not approved yet.'}), 400
+
+        result = _activate_database_access_request(request_id)
+        if result.get('error'):
+            safe_msg, _safe_code = _public_db_activation_error(result['error'])
+            return jsonify({'status': 'approved', 'error': safe_msg, 'message': '✅ Approved. Activation is pending. Please retry in a few minutes.'}), 200
+
+        return jsonify({'status': str(req.get('status') or 'active').lower(), 'message': '✅ Access is active.', 'expires_at': req.get('expires_at', '')})
+    except Exception:
+        return jsonify({'error': 'Activation failed. Please retry or contact an administrator.'}), 500
 
 
 @app.route('/vault/create-db-session', methods=['POST'])
@@ -5732,14 +5935,35 @@ def execute_database_query():
         port = int(proxy_port or 3306)
         database = db_name or db_info.get('name', '')
         username = db_request.get('db_username')
+        effective_auth = _normalize_auth_choice(db_request.get('effective_auth')) or 'password'
         # Vault password is stored as password/vault_token (ephemeral). Legacy fallback: db_password.
         password = db_request.get('password') or db_request.get('vault_token') or db_request.get('db_password')
+
+        if effective_auth == 'iam':
+            # Generate a short-lived IAM auth token on demand (do not persist the token).
+            try:
+                tok = _generate_rds_iam_db_auth_token(
+                    instance_id=str(db_request.get('db_instance_id') or '').strip(),
+                    region=str(db_request.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
+                    db_username=str(username or '').strip(),
+                )
+                password = tok.get('token') or password
+            except Exception:
+                return jsonify({'error': 'IAM token generation failed. Please retry or use External Tool credentials.'}), 500
         
         if not all([host, username, password, database]):
             return jsonify({'error': 'Database credentials not available. Request may have expired.'}), 400
 
         # Execute directly (DB privileges enforce allowed operations; proxy is a TCP router outside NPAMX).
-        result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query)
+        ssl_cfg = None
+        if effective_auth == 'iam':
+            # Many IAM-auth DBs require TLS. Allow ops to configure a CA bundle path.
+            ca_path = str(os.getenv('DB_SSL_CA_BUNDLE') or '').strip()
+            if ca_path:
+                ssl_cfg = {'ca': ca_path}
+            elif str(os.getenv('DB_SSL_REQUIRE') or '').strip().lower() in ('1', 'true', 'yes'):
+                ssl_cfg = {}
+        result = execute_query(host=host, port=port, username=username, password=password, database=database, query=query, ssl=ssl_cfg)
         
         # MVP 2: Audit log
         try:
