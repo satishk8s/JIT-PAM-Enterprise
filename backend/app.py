@@ -1035,6 +1035,80 @@ def _display_name_from_saml_session(email=''):
     return 'User'
 
 
+def _display_name_from_identity_center(email=''):
+    """
+    Resolve human display name from AWS IAM Identity Center by email/username.
+    Best-effort only; returns empty string on lookup failure.
+    """
+    em = str(email or '').strip().lower()
+    if not em or '@' not in em:
+        return ''
+    identity_store_id = str(CONFIG.get('identity_store_id') or '').strip()
+    if not identity_store_id:
+        return ''
+
+    def _name_from_user(user):
+        if not isinstance(user, dict):
+            return ''
+        display = str(user.get('DisplayName') or '').strip()
+        if display:
+            return display
+        name_obj = user.get('Name') or {}
+        first = str(name_obj.get('GivenName') or '').strip()
+        last = str(name_obj.get('FamilyName') or '').strip()
+        full = (first + ' ' + last).strip()
+        if full:
+            return full
+        return ''
+
+    try:
+        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        searches = [
+            ('Emails.Value', em),
+            ('UserName', em),
+            ('UserName', em.split('@', 1)[0]),
+        ]
+        seen = set()
+        for attr_path, attr_value in searches:
+            if not attr_value:
+                continue
+            sig = f"{attr_path}:{str(attr_value).strip().lower()}"
+            if sig in seen:
+                continue
+            seen.add(sig)
+            try:
+                resp = identitystore.list_users(
+                    IdentityStoreId=identity_store_id,
+                    Filters=[{'AttributePath': attr_path, 'AttributeValue': attr_value}]
+                )
+                users = resp.get('Users') or []
+                if users:
+                    return _name_from_user(users[0]) or ''
+            except Exception:
+                continue
+
+        # Fallback: scan users and compare case-insensitively.
+        next_token = None
+        while True:
+            kwargs = {'IdentityStoreId': identity_store_id}
+            if next_token:
+                kwargs['NextToken'] = next_token
+            page = identitystore.list_users(**kwargs)
+            users = page.get('Users') or []
+            for u in users:
+                uname = str(u.get('UserName') or '').strip().lower()
+                emails = u.get('Emails') or []
+                email_values = [str(x.get('Value') or '').strip().lower() for x in emails if isinstance(x, dict)]
+                if em == uname or em in email_values:
+                    return _name_from_user(u) or ''
+            next_token = page.get('NextToken')
+            if not next_token:
+                break
+    except Exception:
+        return ''
+    return ''
+
+
 @app.route('/saml/complete', methods=['GET'])
 def saml_complete():
     """After SAML login: render a page that sets localStorage and redirects to the app.
@@ -1047,7 +1121,7 @@ def saml_complete():
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
         email = ''
-    display_name = _display_name_from_saml_session(email=email)
+    display_name = _display_name_from_identity_center(email=email) or _display_name_from_saml_session(email=email)
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
@@ -2214,9 +2288,9 @@ def approve_request(request_id):
             'approved_at': datetime.now().isoformat()
         })
 
-        configured_required = set([str(r).strip().lower() for r in (access_request.get('approval_required') or []) if str(r).strip()]) or {'self'}
-        # Current requirement: allow self-approval path for DB requests.
-        required = {'self'} if role_norm == 'self' else configured_required
+        # Temporary mode: single-step approval for DB requests.
+        # The selected approver role (manager/db_owner/ciso/self) is sufficient to activate access.
+        required = {role_norm or 'self'}
         received = set([str(a.get('approver_role') or '').strip().lower() for a in approvals_db.get(request_id, [])])
 
         if required.issubset(received):

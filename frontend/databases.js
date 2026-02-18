@@ -2144,12 +2144,14 @@ async function denyDbRequest(requestId) {
 }
 
 async function approveDbRequest(requestId) {
-    if (!confirm('Approve this database access request as self-approval?')) return;
+    if (!confirm('Approve this database access request?')) return;
+    const role = (prompt('Approve as which role? (manager, db_owner, ciso)', 'manager') || '').trim().toLowerCase();
+    if (!role) return;
     try {
         const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ approver_role: 'self' })
+            body: JSON.stringify({ approver_role: role })
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
