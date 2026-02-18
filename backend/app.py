@@ -183,6 +183,95 @@ def _identitystore_client():
 def _organizations_client():
     return _aws_client('organizations', assume_idc_role=True)
 
+# Request-level activation coordination (prevents duplicate Vault user creation under concurrent retries).
+_DB_ACTIVATION_LOCKS = {}
+_DB_ACTIVATION_LOCKS_GUARD = threading.Lock()
+
+
+def _db_activation_lock_for(request_id):
+    rid = str(request_id or '').strip()
+    if not rid:
+        rid = 'unknown'
+    with _DB_ACTIVATION_LOCKS_GUARD:
+        lock = _DB_ACTIVATION_LOCKS.get(rid)
+        if lock is None:
+            lock = threading.Lock()
+            _DB_ACTIVATION_LOCKS[rid] = lock
+        return lock
+
+
+_DB_ACTIVATION_STEP_DEFS = [
+    ('vault_user_created', 'User created'),
+    ('db_permissions_attached', 'Attached DB permissions'),
+    ('permission_set_attached', 'Permission set created and attached to user'),
+    ('access_ready', 'Access is ready'),
+]
+
+
+def _new_activation_progress():
+    return {
+        'steps': [{'key': k, 'label': label, 'status': 'pending'} for k, label in _DB_ACTIVATION_STEP_DEFS],
+        'current_step': '',
+        'message': '',
+        'error': '',
+        'updated_at': datetime.now().isoformat(),
+    }
+
+
+def _ensure_activation_progress(req):
+    pg = req.get('activation_progress')
+    if not isinstance(pg, dict):
+        pg = _new_activation_progress()
+    if not isinstance(pg.get('steps'), list) or not pg.get('steps'):
+        pg['steps'] = [{'key': k, 'label': label, 'status': 'pending'} for k, label in _DB_ACTIVATION_STEP_DEFS]
+    known = {str(x.get('key') or '') for x in pg.get('steps', []) if isinstance(x, dict)}
+    for k, label in _DB_ACTIVATION_STEP_DEFS:
+        if k not in known:
+            pg['steps'].append({'key': k, 'label': label, 'status': 'pending'})
+    pg.setdefault('current_step', '')
+    pg.setdefault('message', '')
+    pg.setdefault('error', '')
+    pg['updated_at'] = datetime.now().isoformat()
+    req['activation_progress'] = pg
+    return pg
+
+
+def _set_activation_step(req, step_key, status, message=''):
+    pg = _ensure_activation_progress(req)
+    for step in pg.get('steps', []):
+        if str(step.get('key') or '') == str(step_key):
+            step['status'] = str(status)
+            break
+    if status == 'in_progress':
+        pg['current_step'] = str(step_key)
+    if status == 'done' and pg.get('current_step') == str(step_key):
+        pg['current_step'] = ''
+    if message:
+        pg['message'] = str(message)
+    pg['updated_at'] = datetime.now().isoformat()
+    req['activation_progress'] = pg
+
+
+def _set_activation_error(req, message):
+    pg = _ensure_activation_progress(req)
+    pg['error'] = str(message or '')
+    if message:
+        pg['message'] = str(message)
+    pg['updated_at'] = datetime.now().isoformat()
+    req['activation_progress'] = pg
+
+
+def _activation_progress_for_response(req):
+    pg = _ensure_activation_progress(req)
+    return {
+        'steps': pg.get('steps', []),
+        'current_step': pg.get('current_step', ''),
+        'message': pg.get('message', ''),
+        'error': pg.get('error', ''),
+        'updated_at': pg.get('updated_at', ''),
+    }
+
+
 # Synced Identity Center users/groups (persisted in memory; used by Management tab and for PAM admin search)
 identity_center_synced_users = []
 identity_center_synced_groups = []
@@ -2748,7 +2837,8 @@ def approve_request(request_id):
                 return jsonify({
                     'status': 'approved',
                     'message': _activation_message_for_code(safe_code),
-                    'error': safe_msg
+                    'error': safe_msg,
+                    'activation_progress': _activation_progress_for_response(access_request)
                 }), 200
 
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
@@ -5246,6 +5336,11 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         return ("Database access service is not configured. Please contact an administrator.", "DB_PROXY_NOT_CONFIGURED")
 
     # Identity Center / assignment failures
+    if 'activation in progress' in low:
+        return (
+            "Access is being prepared. Please wait a few seconds and retry.",
+            "ACTIVATION_IN_PROGRESS",
+        )
     if ('accessdeniedexception' in low or 'not authorized to perform' in low) and ('sso:' in low or 'identitystore:' in low):
         return (
             "Backend IAM role does not have IAM Identity Center permissions required to create/assign permission sets. Please contact an administrator.",
@@ -5277,13 +5372,13 @@ def _public_db_activation_error(err) -> tuple[str, str]:
 def _is_retryable_activation_code(code: str) -> bool:
     """Whether UI should keep showing 'activation pending, retry shortly'."""
     c = str(code or '').strip().upper()
-    return c in {'VAULT_UNREACHABLE', 'IDC_ASSIGNMENT_FAILED'}
+    return c in {'VAULT_UNREACHABLE', 'IDC_ASSIGNMENT_FAILED', 'ACTIVATION_IN_PROGRESS'}
 
 
 def _activation_message_for_code(code: str) -> str:
     if _is_retryable_activation_code(code):
         return "✅ Approved. Activation is pending. Please retry in a few minutes."
-    return "❌ Activation is blocked due to configuration/permissions. Please contact an administrator."
+    return "❌ Something went wrong while preparing access. Please inform administrator."
 
 def _sanitize_database_request_for_client(req: dict) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
@@ -5703,6 +5798,14 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
     req = requests_db[rid]
     if req.get('type') != 'database_access':
         return {'error': 'Not a database request'}
+    _ensure_activation_progress(req)
+    if force_retry:
+        req['activation_error'] = ''
+        pg = _ensure_activation_progress(req)
+        pg['error'] = ''
+        pg['message'] = 'Retrying activation...'
+        pg['updated_at'] = datetime.now().isoformat()
+        req['activation_progress'] = pg
 
     # If last activation failed with a non-retryable error (e.g., IAM AccessDenied),
     # do not auto-retry on every credentials poll. Allow explicit/manual retries only.
@@ -5711,10 +5814,12 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         if prev_err:
             _msg, prev_code = _public_db_activation_error(prev_err)
             if not _is_retryable_activation_code(prev_code):
+                _set_activation_error(req, _msg)
                 return {'status': str(req.get('status') or 'approved'), 'error': prev_err}
 
     # Idempotency: if already ACTIVE and not expired, do nothing.
     if str(req.get('status') or '').strip().lower() == 'active' and not _is_db_request_expired(req):
+        _set_activation_step(req, 'access_ready', 'done', 'Access is ready.')
         return {'status': 'ACTIVE'}
 
     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
@@ -5771,6 +5876,7 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         if effective_auth == 'iam':
             # IAM DB auth: create DB user in Vault once, then retry only the SSO permission-set path.
             # This prevents duplicate DB users when activation is retried after IAM permission errors.
+            _set_activation_step(req, 'vault_user_created', 'in_progress', 'Creating database user in Vault...')
             existing_db_user = str(req.get('db_username') or '').strip()
             existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
             vault_session_expired = _is_db_request_expired(req, now=now)
@@ -5788,33 +5894,55 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
                 req['status'] = 'approved'
                 req['iam_permission_set_arn'] = ''
                 req['iam_permission_set_name'] = ''
+                _set_activation_step(req, 'vault_user_created', 'done', f"User created: {existing_db_user}")
+                _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
             else:
-                requester = _resolve_requester_for_vault(req)
-                vault_creds = VaultManager.create_database_session(
-                    request_id=rid,
-                    engine=engine,
-                    db_names=db_names,
-                    allowed_ops=allowed_ops,
-                    duration_hours=duration_hours,
-                    requester=requester,
-                    auth_type='iam',
-                )
-                role_name = vault_creds.get('vault_role_name', '')
-                lease_id = vault_creds.get('lease_id', '')
-                req['vault_role_name'] = role_name
-                req['role_name'] = role_name
-                req['vault_lease_id'] = lease_id
-                req['lease_id'] = lease_id
-                req['vault_token'] = ''
-                req['password'] = ''
-                req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
-                req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
-                req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
-                req['expiry_time'] = req['expires_at']
-                # Keep approved until permission set is successfully created/assigned to requester.
-                req['status'] = 'approved'
-                req['iam_permission_set_arn'] = ''
-                req['iam_permission_set_name'] = ''
+                vault_lock = _db_activation_lock_for(rid)
+                if not vault_lock.acquire(blocking=False):
+                    raise RuntimeError('Activation in progress')
+                try:
+                    # Re-check after lock acquisition to avoid duplicate Vault user creation under parallel polls.
+                    existing_db_user = str(req.get('db_username') or '').strip()
+                    existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+                    has_materialized_vault_user = bool(existing_db_user) and not _is_db_request_expired(req, now=now)
+                    if has_materialized_vault_user:
+                        req['db_username'] = existing_db_user
+                        if existing_lease:
+                            req['vault_lease_id'] = existing_lease
+                            req['lease_id'] = existing_lease
+                    else:
+                        requester = _resolve_requester_for_vault(req)
+                        vault_creds = VaultManager.create_database_session(
+                            request_id=rid,
+                            engine=engine,
+                            db_names=db_names,
+                            allowed_ops=allowed_ops,
+                            duration_hours=duration_hours,
+                            requester=requester,
+                            auth_type='iam',
+                        )
+                        role_name = vault_creds.get('vault_role_name', '')
+                        lease_id = vault_creds.get('lease_id', '')
+                        req['vault_role_name'] = role_name
+                        req['role_name'] = role_name
+                        req['vault_lease_id'] = lease_id
+                        req['lease_id'] = lease_id
+                        req['vault_token'] = ''
+                        req['password'] = ''
+                        req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
+                        req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
+                        req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
+                        req['expiry_time'] = req['expires_at']
+                        # Keep approved until permission set is successfully created/assigned to requester.
+                        req['status'] = 'approved'
+                        req['iam_permission_set_arn'] = ''
+                        req['iam_permission_set_name'] = ''
+                finally:
+                    vault_lock.release()
+
+                created_name = str(req.get('db_username') or '').strip()
+                _set_activation_step(req, 'vault_user_created', 'done', f"User created: {created_name}" if created_name else 'User created.')
+                _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
             db_resource_id = str(req.get('db_resource_id') or '').strip()
             if not db_resource_id and req.get('db_instance_id') and req.get('db_region'):
                 try:
@@ -5834,6 +5962,7 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             if not auth_profile.get('db_resource_id'):
                 raise RuntimeError("DB resource ID not available for IAM DB connect policy generation.")
 
+            _set_activation_step(req, 'permission_set_attached', 'in_progress', 'Creating permission set and attaching to user...')
             ps_result = _create_and_assign_dbconnect_access(
                 user_email=req.get('user_email') or '',
                 account_id=req.get('account_id') or '',
@@ -5848,12 +5977,15 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
 
             req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
             req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
+            _set_activation_step(req, 'permission_set_attached', 'done', 'Permission set created and attached to user.')
             req['status'] = 'ACTIVE'
             req.pop('activation_error', None)
+            _set_activation_step(req, 'access_ready', 'done', 'Access is ready. Follow DB login details to connect.')
             print(f"DB IAM: permission set created and assigned for {rid}", flush=True)
         else:
             # Password flow: mint dynamic user/password via Vault DB secrets engine.
             requester = _resolve_requester_for_vault(req)
+            _set_activation_step(req, 'vault_user_created', 'in_progress', 'Creating database user in Vault...')
             vault_creds = VaultManager.create_database_session(
                 request_id=rid,
                 engine=engine,
@@ -5877,6 +6009,9 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
+            _set_activation_step(req, 'vault_user_created', 'done', f"User created: {req.get('db_username') or ''}".strip())
+            _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
+            _set_activation_step(req, 'access_ready', 'done', 'Access is ready. Credentials are available.')
     except Exception as e:
         # Log full error and traceback for operators (check journalctl / backend logs).
         try:
@@ -5888,6 +6023,8 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         # Approval may have succeeded but activation failed (Vault unreachable, misconfigured, etc).
         req['status'] = 'approved'
         req['activation_error'] = str(e)
+        safe_msg, _safe_code = _public_db_activation_error(str(e))
+        _set_activation_error(req, safe_msg)
         for k in ('vault_token', 'password', 'db_password'):
             req[k] = ''
         _save_requests()
@@ -7306,7 +7443,8 @@ def get_database_request_credentials(request_id):
                     return jsonify({
                         'status': 'approved',
                         'message': _activation_message_for_code(safe_code),
-                        'error': safe_msg
+                        'error': safe_msg,
+                        'activation_progress': _activation_progress_for_response(req)
                     }), 400
                 req = requests_db.get(request_id, req)
                 status = str(req.get('status') or '').lower()
@@ -7317,7 +7455,8 @@ def get_database_request_credentials(request_id):
             return jsonify({
                 'status': 'approved',
                 'message': '✅ Approved. IAM permission assignment is pending.',
-                'error': 'IAM permission assignment is not complete yet. Please retry shortly.'
+                'error': 'IAM permission assignment is not complete yet. Please retry shortly.',
+                'activation_progress': _activation_progress_for_response(req)
             }), 400
 
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
@@ -7330,7 +7469,10 @@ def get_database_request_credentials(request_id):
         if effective_auth == 'iam':
             username = str(req.get('db_username') or '').strip()
             if not username:
-                return jsonify({'error': 'Credentials are not available (request may be pending or expired).'}), 400
+                return jsonify({
+                    'error': 'Credentials are not available (request may be pending or expired).',
+                    'activation_progress': _activation_progress_for_response(req)
+                }), 400
             try:
                 local_instructions = _local_iam_token_instructions(
                     instance_id=str(req.get('db_instance_id') or '').strip(),
@@ -7359,7 +7501,10 @@ def get_database_request_credentials(request_id):
         username = str(req.get('db_username') or '').strip()
         token = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
         if not username or not token:
-            return jsonify({'error': 'Credentials are not available (request may be pending or expired).'}), 400
+            return jsonify({
+                'error': 'Credentials are not available (request may be pending or expired).',
+                'activation_progress': _activation_progress_for_response(req)
+            }), 400
 
         return jsonify({
             'request_id': request_id,
@@ -7401,9 +7546,19 @@ def activate_database_request(request_id):
         result = _activate_database_access_request(request_id, force_retry=True)
         if result.get('error'):
             safe_msg, safe_code = _public_db_activation_error(result['error'])
-            return jsonify({'status': 'approved', 'error': safe_msg, 'message': _activation_message_for_code(safe_code)}), 200
+            return jsonify({
+                'status': 'approved',
+                'error': safe_msg,
+                'message': _activation_message_for_code(safe_code),
+                'activation_progress': _activation_progress_for_response(req),
+            }), 200
 
-        return jsonify({'status': str(req.get('status') or 'active').lower(), 'message': '✅ Access is active.', 'expires_at': req.get('expires_at', '')})
+        return jsonify({
+            'status': str(req.get('status') or 'active').lower(),
+            'message': '✅ Access is active.',
+            'expires_at': req.get('expires_at', ''),
+            'activation_progress': _activation_progress_for_response(req),
+        })
     except Exception:
         return jsonify({'error': 'Activation failed. Please retry or contact an administrator.'}), 500
 

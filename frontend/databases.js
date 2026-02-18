@@ -2293,7 +2293,10 @@ async function fetchDbCredentials(requestId, opts = {}) {
     const data = await res.json();
     if (data.error) {
         const msg = [data.error, data.message].filter(Boolean).join(' ').trim() || data.error;
-        throw new Error(msg);
+        const err = new Error(msg);
+        err.activationProgress = data.activation_progress || null;
+        err.apiMessage = data.message || '';
+        throw err;
     }
     dbCredCache[rid] = { data, fetchedAt: Date.now() };
     return data;
@@ -2304,6 +2307,8 @@ function isDbCredentialPreparingMessage(message) {
     return (
         msg.includes('credentials are not available') ||
         msg.includes('request is not active yet') ||
+        msg.includes('access is being prepared') ||
+        msg.includes('activation in progress') ||
         msg.includes('activation is pending') ||
         msg.includes('retry in a few minutes') ||
         msg.includes('approved. activation is pending')
@@ -2312,14 +2317,34 @@ function isDbCredentialPreparingMessage(message) {
 
 function renderDbPreparingHtml(secondsElapsed, details) {
     const sec = Math.max(0, parseInt(secondsElapsed || 0, 10) || 0);
-    const msg = details
-        ? escapeHtml(String(details))
-        : 'This can take up to 2-3 minutes while access is being prepared.';
+    let msg = 'This can take up to 2-3 minutes while access is being prepared.';
+    let steps = null;
+    if (details && typeof details === 'object') {
+        if (details.message) msg = String(details.message);
+        if (details.progress && Array.isArray(details.progress.steps)) steps = details.progress.steps;
+    } else if (details) {
+        msg = String(details);
+    }
+    const stepsHtml = Array.isArray(steps) && steps.length
+        ? `
+            <div class="db-step-hint" style="margin-top:8px;">
+                ${(steps || []).map((s, idx) => {
+                    const status = String(s.status || 'pending').toLowerCase();
+                    const icon = status === 'done'
+                        ? '<i class="fas fa-check-circle" style="color:#22c55e;"></i>'
+                        : status === 'in_progress'
+                            ? '<i class="fas fa-spinner fa-spin" style="color:#f59e0b;"></i>'
+                            : '<i class="far fa-circle" style="opacity:0.7;"></i>';
+                    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0;">${icon}<span>${idx + 1}. ${escapeHtml(String(s.label || s.key || 'Step'))}</span></div>`;
+                }).join('')}
+            </div>`
+        : '';
     return `
         <div class="db-cred-loading">
             <i class="fas fa-spinner fa-spin"></i>
             Preparing access...
-            <div class="db-step-hint" style="margin-top:6px;">${msg}</div>
+            <div class="db-step-hint" style="margin-top:6px;">${escapeHtml(msg)}</div>
+            ${stepsHtml}
             <div class="db-step-hint" style="margin-top:2px; opacity:0.85;">Elapsed: ${sec}s</div>
         </div>
     `;
@@ -2348,7 +2373,11 @@ async function fetchDbCredentialsWithPreparation(requestId, opts = {}) {
                     attempt,
                     elapsedMs,
                     elapsedSec: Math.floor(elapsedMs / 1000),
-                    message: raw
+                    message: raw,
+                    detail: {
+                        message: (e && e.apiMessage) || raw,
+                        progress: (e && e.activationProgress) || null
+                    }
                 });
             }
             if (elapsedMs >= timeoutMs) {
@@ -2462,7 +2491,10 @@ async function toggleDbCredInline(requestId) {
         const creds = await fetchDbCredentialsWithPreparation(rid, {
             onPreparing: (info) => {
                 if (el.style.display === 'block') {
-                    el.innerHTML = renderDbPreparingHtml(info.elapsedSec, 'Waiting for DB user and permissions to finish provisioning.');
+                    el.innerHTML = renderDbPreparingHtml(
+                        info.elapsedSec,
+                        info.detail || { message: 'Waiting for DB user and permissions to finish provisioning.' }
+                    );
                 }
             }
         });
@@ -2503,7 +2535,7 @@ async function openDbExternalToolModal(requestId) {
                 if (!body) return;
                 body.innerHTML = renderDbPreparingHtml(
                     info.elapsedSec,
-                    'Waiting for DB user, policy assignment, and credential activation.'
+                    info.detail || { message: 'Waiting for DB user, policy assignment, and credential activation.' }
                 );
             }
         });
