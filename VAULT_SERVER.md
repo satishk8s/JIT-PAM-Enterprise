@@ -111,6 +111,29 @@ curl -s http://127.0.0.1:5000/api/health
 
 ---
 
+## Database access: IAM-based authentication (additional path)
+
+Alongside Vault password and Vault IAM (AWSAuthenticationPlugin) flows, the app supports **IAM permission set**–based DB access when the user chooses IAM auth:
+
+1. **On approval/activation (IAM auth):**  
+   - Vault still creates the DB user (IAM plugin) and grants.  
+   - The app also creates an **AWS SSO permission set** whose name is derived from the requester and request (e.g. `NPAMX_DB_<account>_<user>_<reqid>`).  
+   - The permission set’s **inline policy** allows `rds-db:connect` for the requested **RDS DB resource** and **DB username** (resource ARN: `arn:aws:rds-db:<region>:<account>:dbuser:<resource-id>/<db_username>`).  
+   - The permission set is **assigned** to the requesting user and the target AWS account.
+
+2. **Token in the app:**  
+   The app continues to generate the IAM DB auth token using its own credentials (same as today) and shows it under the user’s profile (Credentials / External Tool). No change to existing behaviour.
+
+3. **Generate token on your machine:**  
+   If the user prefers not to use the app-generated token, the UI shows a collapsible **“Generate IAM token on your machine”** section with:  
+   - Configure AWS credentials (e.g. `aws sso login` or access key).  
+   - Run: `aws rds generate-db-auth-token --hostname <rds-endpoint> --port <port> --username <db_username> --region <region>`.  
+   - Use the command output as the password when connecting (host/port as shown in NPAMX).
+
+Existing Vault-only (password and IAM) behaviour is unchanged.
+
+---
+
 ## Admin: Emergency revoke (Database Sessions)
 
 Admins can revoke active database access from **Admin → Database Sessions**. The app stores the **full lease_id** returned by Vault (e.g. `database/creds/jit_satish-6aa386ef/dfthU8XSCELjomCDym8Y5HTp`) and revokes only via:

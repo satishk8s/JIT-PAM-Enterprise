@@ -4329,6 +4329,42 @@ def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_usernam
     expires_at = (datetime.utcnow() + timedelta(minutes=15)).isoformat() + "Z"
     return {"token": token, "token_expires_at": expires_at}
 
+
+def _local_iam_token_instructions(instance_id: str, region: str, db_username: str) -> dict:
+    """Build instructions and CLI command for generating IAM DB auth token on the user's machine."""
+    try:
+        info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region)
+        hostname = info.get("address") or ""
+        port = info.get("port") or 3306
+        reg = info.get("region") or region
+        user = str(db_username or "").strip()
+        if not hostname or not user:
+            return {"available": False, "reason": "Endpoint or username not available"}
+        cli_cmd = (
+            f"aws rds generate-db-auth-token "
+            f"--hostname {hostname} --port {port} --username {user} --region {reg}"
+        )
+        return {
+            "available": True,
+            "heading": "Generate IAM token on your machine (optional)",
+            "steps": [
+                "1. Configure AWS credentials (e.g. AWS SSO login or access key):",
+                "   aws configure   # or use a profile with SSO",
+                "   # For SSO: aws sso login --profile YourProfile",
+                "2. Generate the token (valid ~15 minutes):",
+                f"   {cli_cmd}",
+                "3. Use the output as the password when connecting to the database (host/port as provided by NPAMX).",
+            ],
+            "cli_command": cli_cmd,
+            "hostname": hostname,
+            "port": port,
+            "username": user,
+            "region": reg,
+        }
+    except Exception:
+        return {"available": False, "reason": "Could not resolve RDS endpoint for instructions"}
+
+
 def _auth_mode_user_hint(profile):
     mode = str((profile or {}).get('auth_mode') or 'password_only')
     if mode == 'iam_only':
@@ -4448,7 +4484,8 @@ def _activate_database_access_request(request_id: str) -> dict:
         if effective_auth == 'iam':
             # IAM DB auth:
             # 1) Vault creates the DB user + grants (no password shown/used).
-            # 2) IAM auth token is generated on demand (credentials endpoint / PAM terminal).
+            # 2) IAM permission set: create PS with RDS db identifier + db name, assign to user (so user can generate token via SSO).
+            # 3) IAM auth token is generated on demand (credentials endpoint / PAM terminal) using app credentials.
             vault_creds = VaultManager.create_database_session(
                 request_id=rid,
                 engine=engine,
@@ -4471,6 +4508,26 @@ def _activate_database_access_request(request_id: str) -> dict:
             req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
+            # Additionally: create AWS permission set with RDS identifier + db name, assign to user (IAM-based auth path).
+            auth_profile = {
+                'region': str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
+                'db_resource_id': str(req.get('db_resource_id') or '').strip(),
+            }
+            if auth_profile.get('db_resource_id'):
+                ps_result = _create_and_assign_dbconnect_access(
+                    user_email=req.get('user_email') or '',
+                    account_id=req.get('account_id') or '',
+                    db_username=req['db_username'],
+                    db_name=db_names[0] if db_names else 'default',
+                    duration_hours=duration_hours,
+                    auth_profile=auth_profile,
+                    request_id=rid,
+                )
+                if ps_result and 'error' not in ps_result:
+                    req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
+                    req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
+                else:
+                    print(f"DB IAM permission set (best-effort) for {rid}: {ps_result.get('error', 'unknown')}", flush=True)
         else:
             # Password flow: mint dynamic user/password via Vault DB secrets engine.
             vault_creds = VaultManager.create_database_session(
@@ -5902,7 +5959,12 @@ def get_database_request_credentials(request_id):
                     region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
                     db_username=username,
                 )
-                return jsonify({
+                local_instructions = _local_iam_token_instructions(
+                    instance_id=str(req.get('db_instance_id') or '').strip(),
+                    region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
+                    db_username=username,
+                )
+                payload = {
                     'request_id': request_id,
                     'effective_auth': 'iam',
                     'proxy_host': proxy_host,
@@ -5912,7 +5974,10 @@ def get_database_request_credentials(request_id):
                     'iam_token_expires_at': tok.get('token_expires_at', ''),
                     'expires_at': str(req.get('expires_at') or '').strip(),
                     'note': 'IAM token expires in ~15 minutes. Generate a fresh token if it expires.',
-                })
+                }
+                if local_instructions.get('available'):
+                    payload['local_token_instructions'] = local_instructions
+                return jsonify(payload)
             except Exception:
                 return jsonify({'error': 'Failed to generate IAM token. Please retry or contact an administrator.'}), 500
 

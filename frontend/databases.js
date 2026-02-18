@@ -2062,6 +2062,22 @@ function renderDbCredentialsInline(containerEl, creds) {
     const password = creds.password || creds.vault_token || '';
     const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
     const tokenExpires = creds.iam_token_expires_at ? new Date(creds.iam_token_expires_at).toLocaleString() : '';
+    const localInstr = creds.local_token_instructions;
+    const localBlock = (localInstr && localInstr.available && Array.isArray(localInstr.steps))
+        ? `
+        <details class="db-cred-local-instr" style="margin-top:14px;border:1px solid var(--border-color);border-radius:10px;overflow:hidden;">
+            <summary style="padding:10px 14px;cursor:pointer;font-weight:600;background:var(--bg-secondary);">
+                <i class="fas fa-laptop-code"></i> ${escapeHtml(localInstr.heading || 'Generate IAM token on your machine')}
+            </summary>
+            <div style="padding:12px 14px;font-size:13px;">
+                <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (SSO or access key), then run:</p>
+                <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command || '')}</pre>
+                <ol style="margin:8px 0 0 0;padding-left:18px;">
+                    ${(localInstr.steps || []).map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}
+                </ol>
+            </div>
+        </details>`
+        : '';
 
     containerEl.innerHTML = `
         <div class="db-cred-inline-grid">
@@ -2083,6 +2099,7 @@ function renderDbCredentialsInline(containerEl, creds) {
                 </button>
             </div>
         </div>
+        ${localBlock}
     `;
 }
 
@@ -2153,6 +2170,21 @@ async function openDbExternalToolModal(requestId) {
             </div>
         `;
 
+        const localInstr = data.local_token_instructions;
+        const localBlock = (localInstr && localInstr.available && localInstr.cli_command)
+            ? `
+            <details class="db-cred-local-instr" style="margin-top:14px;border:1px solid var(--border-color);border-radius:10px;overflow:hidden;">
+                <summary style="padding:10px 14px;cursor:pointer;font-weight:600;background:var(--bg-secondary);">
+                    <i class="fas fa-laptop-code"></i> ${escapeHtml(localInstr.heading || 'Generate IAM token on your machine')}
+                </summary>
+                <div style="padding:12px 14px;font-size:13px;">
+                    <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (e.g. <code>aws sso login</code> or access key), then run:</p>
+                    <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command)}</pre>
+                    ${Array.isArray(localInstr.steps) && localInstr.steps.length ? `<ol style="margin:8px 0 0 0;padding-left:18px;">${localInstr.steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol>` : ''}
+                </div>
+            </details>`
+            : '';
+
         modal.innerHTML = `
           <div class="db-modal-backdrop" onclick="closeDbExternalToolModal()"></div>
           <div class="db-modal">
@@ -2172,6 +2204,7 @@ async function openDbExternalToolModal(requestId) {
                 <div><strong>Expires:</strong> ${escapeHtml(expires)}</div>
               </div>
               ${tokenField}
+              ${localBlock}
             </div>
           </div>
         `;
