@@ -131,7 +131,58 @@ def _identity_local_part(value):
     return raw
 
 
-def _pam_admin_record_for_identity(email='', nameid=''):
+def _saml_identity_hints():
+    """
+    Return best-effort identity hints (email/username/nameid-like) from SAML session.
+    Used when IdP omits canonical email claim.
+    """
+    hints = []
+    seen = set()
+
+    def _add(val):
+        v = str(val or '').strip()
+        if not v:
+            return
+        k = v.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        hints.append(v)
+
+    _add(session.get('user'))
+    attrs = session.get('attributes') or {}
+    if isinstance(attrs, dict):
+        preferred_keys = (
+            'email', 'mail', 'emailaddress',
+            'username', 'user_name', 'preferred_username',
+            'name', 'upn', 'userprincipalname',
+            'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress',
+            'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn',
+            'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name',
+        )
+        attrs_ci = {str(k).lower(): k for k in attrs.keys()}
+        for key in preferred_keys:
+            actual = attrs_ci.get(str(key).lower())
+            if not actual:
+                continue
+            raw = attrs.get(actual)
+            vals = raw if isinstance(raw, list) else [raw]
+            for v in vals:
+                _add(v)
+
+        # Last resort: scan all values for username/email-like strings.
+        for raw in attrs.values():
+            vals = raw if isinstance(raw, list) else [raw]
+            for v in vals:
+                s = str(v or '').strip()
+                if not s:
+                    continue
+                if '@' in s or re.match(r'^[a-zA-Z0-9._-]{3,}$', s):
+                    _add(s)
+    return hints
+
+
+def _pam_admin_record_for_identity(email='', nameid='', hints=None):
     """
     Resolve PAM admin by exact email first, then by unique local-part match.
     This helps when SAML NameID is username-like and email claim is missing.
@@ -140,17 +191,39 @@ def _pam_admin_record_for_identity(email='', nameid=''):
     if direct:
         return direct
 
-    ident_local = _identity_local_part(email) or _identity_local_part(nameid)
-    if not ident_local:
+    local_parts = []
+    seen_locals = set()
+
+    def _add_local(v):
+        lp = _identity_local_part(v)
+        if not lp or lp in seen_locals:
+            return
+        seen_locals.add(lp)
+        local_parts.append(lp)
+
+    _add_local(email)
+    _add_local(nameid)
+    for h in (hints or []):
+        _add_local(h)
+
+    if not local_parts:
         return None
 
     candidates = []
     for admin in _load_pam_admins():
         a_email = str(admin.get('email') or '').strip().lower()
-        if _identity_local_part(a_email) == ident_local:
-            candidates.append(admin)
+        a_local = _identity_local_part(a_email)
+        if a_local in local_parts:
+            candidates.append((admin, a_local))
     if len(candidates) == 1:
-        return candidates[0]
+        return candidates[0][0]
+    if len(candidates) > 1:
+        # Prefer exact local-part match from explicit email first.
+        em_local = _identity_local_part(email)
+        if em_local:
+            for admin, a_local in candidates:
+                if a_local == em_local:
+                    return admin
     return None
 
 def _save_pam_admins(admins):
@@ -1027,7 +1100,7 @@ def _email_from_saml_session():
     return email
 
 
-def _resolve_identity_center_identity(nameid='', email_hint=''):
+def _resolve_identity_center_identity(nameid='', email_hint='', hints=None):
     """
     Best-effort resolution from AWS Identity Center user record.
     Returns: {'email': str, 'display_name': str}
@@ -1065,6 +1138,14 @@ def _resolve_identity_center_identity(nameid='', email_hint=''):
             candidates.append(('UserName', email_hint))
             if '@' in email_hint:
                 candidates.append(('UserName', email_hint.split('@', 1)[0]))
+        for hint in (hints or []):
+            h = str(hint or '').strip()
+            if not h:
+                continue
+            candidates.append(('UserName', h))
+            if '@' in h:
+                candidates.append(('Emails.Value', h))
+                candidates.append(('UserName', h.split('@', 1)[0]))
         if nameid:
             candidates.append(('UserName', nameid))
             # Some NameID values are UserId-like; describe_user may work.
@@ -1281,10 +1362,13 @@ def saml_complete():
         return redirect('/')
     nameid = str(session.get('user') or '').strip()
     email = _email_from_saml_session()
-    idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
+    identity_hints = _saml_identity_hints()
+    idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email, hints=identity_hints)
     if not email:
         email = str(idc_identity.get('email') or '').strip()
-    admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
+    admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid, hints=identity_hints)
+    if not email and admin_record:
+        email = str(admin_record.get('email') or '').strip()
     is_admin = bool(admin_record)
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
@@ -1336,20 +1420,27 @@ def saml_profile():
 
         nameid = str(session.get('user') or '').strip()
         email = _email_from_saml_session()
-        idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
+        identity_hints = _saml_identity_hints()
+        idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email, hints=identity_hints)
         if not email:
             email = str(idc_identity.get('email') or '').strip()
+        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid, hints=identity_hints)
+        if (not email or str(email).lower() == 'email') and admin_record:
+            email = str(admin_record.get('email') or '').strip()
         if not email or str(email).lower() == 'email':
             email = ''
 
         display_name = (
             str(idc_identity.get('display_name') or '').strip()
             or _display_name_from_identity_center(email=email)
-            or _display_name_from_saml_session(email=email)
+            or (
+                _display_name_from_identity_center(email=str(admin_record.get('email') or '').strip())
+                if admin_record else ''
+            )
+            or _display_name_from_saml_session(email=email, nameid=nameid)
             or 'User'
         )
 
-        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
         is_admin = bool(admin_record)
         role = str(admin_record.get('role') or 'Admin') if is_admin else 'user'
 
@@ -3844,16 +3935,17 @@ def check_pam_admin():
     """Check if the given email is a PAM solution admin (for login / UI). Returns isAdmin and role."""
     try:
         email = str(request.args.get('email') or '').strip()
+        identity_hints = _saml_identity_hints()
         if not email or '@' not in email:
             # Fallback for SSO browser sessions where frontend storage may be stale.
             email = _email_from_saml_session()
             if not email:
                 nameid = str(session.get('user') or '').strip()
-                idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='')
+                idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='', hints=identity_hints)
                 email = str(idc_identity.get('email') or '').strip()
 
         nameid = str(session.get('user') or '').strip()
-        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
+        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid, hints=identity_hints)
         if admin_record:
             return jsonify({'isAdmin': True, 'role': admin_record.get('role', 'Admin')})
         return jsonify({'isAdmin': False})
