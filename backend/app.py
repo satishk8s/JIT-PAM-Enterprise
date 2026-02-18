@@ -79,9 +79,33 @@ CONFIG = {
 # Short timeout so expired AWS creds don't hang the app
 AWS_CONFIG = Config(connect_timeout=3, read_timeout=5)
 
-# Synced Identity Center users/groups (persisted in memory; after sync-from-identity-center, Admin Users tab shows these)
+# Synced Identity Center users/groups (persisted in memory; used by Management tab and for PAM admin search)
 identity_center_synced_users = []
 identity_center_synced_groups = []
+
+# PAM solution admins: users who can manage this PAM (Admin panel). Stored in data/pam_admins.json.
+PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
+
+def _load_pam_admins():
+    """Load list of PAM admin emails (lowercase). Optionally seed from PAM_ADMIN_SEED_EMAIL if file missing."""
+    try:
+        if os.path.exists(PAM_ADMINS_PATH):
+            with open(PAM_ADMINS_PATH, 'r') as f:
+                data = json.load(f)
+                return [str(e).strip().lower() for e in (data if isinstance(data, list) else data.get('emails', [])) if str(e).strip()]
+        seed = os.getenv('PAM_ADMIN_SEED_EMAIL', '').strip()
+        if seed and '@' in seed:
+            _save_pam_admins([seed.lower()])
+            return [seed.lower()]
+    except Exception:
+        pass
+    return []
+
+def _save_pam_admins(emails):
+    """Save PAM admin list (emails, lowercase)."""
+    os.makedirs(os.path.dirname(PAM_ADMINS_PATH) or '.', exist_ok=True)
+    with open(PAM_ADMINS_PATH, 'w') as f:
+        json.dump({'emails': list(set(e.strip().lower() for e in emails if str(e).strip()))}, f, indent=2)
 
 def initialize_aws_config():
     """Fetch real AWS SSO configuration"""
@@ -753,20 +777,28 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
     return 'password'
 
 def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_name, duration_hours, auth_profile, request_id):
-    """Create DB Connect permission set and assign it to user for IAM DB auth flow."""
+    """Create DB Connect permission set and assign it to user for IAM DB auth flow.
+    Permission set name: JIT-DB-<username>-<accountname> (IAM-safe).
+    Inline policy: rds-db:connect only, resource = arn:aws:rds-db:region:account:dbuser:DbiResourceId/db_username.
+    """
     try:
         account_key = _ensure_account_config_key(account_id)
         account_number = CONFIG['accounts'][account_key]['id']
+        account_name = str(CONFIG['accounts'][account_key].get('name') or account_key).strip()
+        account_name_safe = re.sub(r'[^a-zA-Z0-9-]', '-', account_name)[:32].strip('-') or 'account'
         region = str((auth_profile or {}).get('region') or os.getenv('AWS_REGION') or 'ap-south-1')
         db_resource_id = str((auth_profile or {}).get('db_resource_id') or '').strip()
         if not db_resource_id:
             return {'error': 'DB resource ID not available for IAM DB connect policy generation.'}
-        safe_user = str(user_email or '').split('@')[0].replace('.', '')[:8] or 'user'
-        ps_name = f"NPAMX_DB_{account_number[-6:]}_{safe_user}_{str(request_id)[:6]}"
-        session_hours = max(1, min(int(duration_hours or 2), 12))
+        safe_user = str(user_email or '').split('@')[0].replace('.', '-').replace('_', '-')
+        safe_user = re.sub(r'[^a-zA-Z0-9-]', '', safe_user)[:24] or 'user'
+        ps_name = f"JIT-DB-{safe_user}-{account_name_safe}"
+        if len(ps_name) > 64:
+            ps_name = f"JIT-DB-{safe_user[:16]}-{account_name_safe[:32]}"
+        session_hours = max(1, min(int(duration_hours or 2), 72))
         db_connect_arn = f"arn:aws:rds-db:{region}:{account_number}:dbuser:{db_resource_id}/{db_username}"
         permissions_data = {
-            'description': f'NPAMX DB connect access for {db_name} ({region})',
+            'description': f'JIT DB connect for {db_name} ({region})',
             'actions': ['rds-db:connect'],
             'resources': [db_connect_arn]
         }
@@ -853,18 +885,13 @@ def _email_from_saml_session():
 
 @app.route('/saml/complete', methods=['GET'])
 def saml_complete():
-    """After SAML login: render a page that sets localStorage and redirects to the app."""
+    """After SAML login: render a page that sets localStorage and redirects to the app.
+    isAdmin is determined only by PAM admins list (who can manage this PAM), not by SAML attributes."""
     if not session.get('user'):
         return redirect('/')
     email = _email_from_saml_session()
-    attrs = session.get('attributes') or {}
-    is_admin = True
-    if attrs.get('isAdmin'):
-        val = attrs['isAdmin']
-        if isinstance(val, list) and val:
-            is_admin = str(val[0]).lower() == 'true'
-        else:
-            is_admin = str(val).lower() == 'true'
+    pam_admins = _load_pam_admins()
+    is_admin = email.lower() in pam_admins if email else False
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
@@ -3133,7 +3160,7 @@ def background_cleanup():
 
 @app.route('/api/admin/identity-center/users', methods=['GET'])
 def list_identity_center_users():
-    """List users from AWS Identity Center (live pull). Requires identity_store_id and AWS creds with identitystore:ListUsers."""
+    """List users from AWS Identity Center (live pull). Optional ?search= filters by name/email (case-insensitive)."""
     try:
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
@@ -3142,14 +3169,24 @@ def list_identity_center_users():
         users = []
         for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
             for u in page.get('Users', []):
+                email = (u.get('Emails') or [{}])[0].get('Value', '')
+                display_name = u.get('DisplayName', '')
+                first_name = (u.get('Name') or {}).get('GivenName', '')
+                last_name = (u.get('Name') or {}).get('FamilyName', '')
                 users.append({
                     'user_id': u.get('UserId'),
                     'username': u.get('UserName'),
-                    'email': (u.get('Emails') or [{}])[0].get('Value', ''),
-                    'display_name': u.get('DisplayName', ''),
-                    'first_name': (u.get('Name') or {}).get('GivenName', ''),
-                    'last_name': (u.get('Name') or {}).get('FamilyName', ''),
+                    'email': email,
+                    'display_name': display_name,
+                    'first_name': first_name,
+                    'last_name': last_name,
                 })
+        search = (request.args.get('search') or '').strip()
+        if search:
+            q = search.lower()
+            users = [u for u in users if q in (u.get('email') or '').lower() or q in (u.get('display_name') or '').lower()
+                     or q in (u.get('first_name') or '').lower() or q in (u.get('last_name') or '').lower()
+                     or q in (u.get('username') or '').lower()]
         return jsonify({'users': users})
     except Exception as e:
         return jsonify({'error': str(e), 'users': []}), 500
@@ -3186,6 +3223,68 @@ def list_identity_center_permission_sets():
         return jsonify({'permission_sets': sets})
     except Exception as e:
         return jsonify({'error': str(e), 'permission_sets': []}), 500
+
+
+# --- PAM solution admins (who can manage this PAM; separate from Identity Center list) ---
+
+@app.route('/api/admin/pam-admins', methods=['GET'])
+def get_pam_admins():
+    """List emails of users who can manage the PAM solution (Admin panel)."""
+    try:
+        emails = _load_pam_admins()
+        return jsonify({'emails': emails, 'pam_admins': [{'email': e} for e in emails]})
+    except Exception as e:
+        return jsonify({'error': str(e), 'emails': []}), 500
+
+
+@app.route('/api/admin/pam-admins', methods=['POST'])
+def add_pam_admin():
+    """Add a user (by email) as PAM solution admin. Only Identity Center users should be added (validate client-side from IdC search)."""
+    try:
+        data = request.get_json() or {}
+        email = str(data.get('email') or '').strip()
+        if not email or '@' not in email:
+            return jsonify({'error': 'Valid email is required'}), 400
+        emails = _load_pam_admins()
+        email_lower = email.lower()
+        if email_lower in emails:
+            return jsonify({'status': 'already_added', 'message': 'User is already a PAM admin', 'emails': emails})
+        emails.append(email_lower)
+        _save_pam_admins(emails)
+        return jsonify({'status': 'ok', 'message': f'{email} added as PAM admin', 'emails': _load_pam_admins()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/pam-admins/<path:email>', methods=['DELETE'])
+def remove_pam_admin(email):
+    """Remove a user from PAM solution admins."""
+    try:
+        email = str(email or '').strip()
+        if not email:
+            return jsonify({'error': 'Email required'}), 400
+        emails = _load_pam_admins()
+        email_lower = email.lower()
+        if email_lower not in emails:
+            return jsonify({'status': 'not_found', 'message': 'User was not a PAM admin', 'emails': emails})
+        emails = [e for e in emails if e != email_lower]
+        _save_pam_admins(emails)
+        return jsonify({'status': 'ok', 'message': f'{email} removed from PAM admins', 'emails': _load_pam_admins()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/check-pam-admin', methods=['GET'])
+def check_pam_admin():
+    """Check if the given email is a PAM solution admin (for login / UI)."""
+    try:
+        email = str(request.args.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({'isAdmin': False})
+        admins = _load_pam_admins()
+        return jsonify({'isAdmin': email in admins})
+    except Exception as e:
+        return jsonify({'isAdmin': False})
 
 
 @app.route('/api/admin/sync-from-identity-center', methods=['POST'])
@@ -4543,14 +4642,14 @@ def _local_iam_token_instructions(instance_id: str, region: str, db_username: st
         )
         return {
             "available": True,
-            "heading": "Generate IAM token on your machine (optional)",
+            "heading": "Get credentials: run these commands on your machine",
             "steps": [
-                "1. Configure AWS credentials (e.g. AWS SSO login or access key):",
-                "   aws configure   # or use a profile with SSO",
-                "   # For SSO: aws sso login --profile YourProfile",
-                "2. Generate the token (valid ~15 minutes):",
+                "1. Log in with AWS SSO (get temporary access key, secret key, session token):",
+                "   aws sso login --profile YourProfile",
+                "   # Or: configure AWS CLI with a profile that uses SSO",
+                "2. Generate the IAM DB auth token (valid ~15 minutes):",
                 f"   {cli_cmd}",
-                "3. Use the output as the password when connecting to the database (host/port as provided by NPAMX).",
+                "3. Use the username above and the token output as the password when connecting to the database (host/port as shown).",
             ],
             "cli_command": cli_cmd,
             "hostname": hostname,
@@ -4651,8 +4750,8 @@ def _activate_database_access_request(request_id: str) -> dict:
         duration_hours = 2
     if duration_hours < 1:
         duration_hours = 1
-    if duration_hours > 24:
-        duration_hours = 24
+    if duration_hours > 72:
+        duration_hours = 72
 
     now = datetime.now()
     req['approved_at'] = req.get('approved_at') or now.isoformat()
@@ -5905,6 +6004,8 @@ def request_database_access():
 
         # If chat collected the reason/duration, use it when client omitted.
         duration_hours = data.get('duration_hours', 2)
+        start_date = str(data.get('start_date') or '').strip()
+        end_date = str(data.get('end_date') or '').strip()
         if conversation_id and conversation_id in db_conversation_states:
             st = db_conversation_states[conversation_id]
             if not justification:
@@ -5912,12 +6013,26 @@ def request_database_access():
             if (not duration_hours) and st.get('duration_hours'):
                 duration_hours = st.get('duration_hours')
 
-        try:
-            duration_hours = int(duration_hours)
-        except Exception:
-            duration_hours = 2
-        if duration_hours < 1 or duration_hours > 24:
-            return jsonify({'error': 'duration_hours must be between 1 and 24'}), 400
+        if start_date and end_date:
+            try:
+                start_d = datetime.strptime(start_date, '%Y-%m-%d')
+                end_d = datetime.strptime(end_date, '%Y-%m-%d')
+                if end_d < start_d:
+                    return jsonify({'error': 'end_date must be on or after start_date'}), 400
+                delta = end_d - start_d
+                if delta.days >= 3:
+                    return jsonify({'error': 'Date range cannot exceed 3 days'}), 400
+                duration_hours = (delta.days + 1) * 24
+                duration_hours = max(1, min(72, duration_hours))
+            except ValueError:
+                return jsonify({'error': 'start_date and end_date must be YYYY-MM-DD'}), 400
+        else:
+            try:
+                duration_hours = int(duration_hours)
+            except Exception:
+                duration_hours = 2
+            if duration_hours < 1 or duration_hours > 72:
+                return jsonify({'error': 'duration_hours must be between 1 and 72 (max 3 days)'}), 400
 
         if not databases or not isinstance(databases, list):
             return jsonify({'error': 'At least one database target is required'}), 400
@@ -5981,6 +6096,8 @@ def request_database_access():
             'query_types': query_types if isinstance(query_types, list) else [],
             'role': role,
             'duration_hours': duration_hours,
+            'start_date': start_date if start_date else '',
+            'end_date': end_date if end_date else '',
             'justification': justification,
             'ai_generated': ai_generated,
             'conversation_id': conversation_id,

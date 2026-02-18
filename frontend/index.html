@@ -1111,14 +1111,28 @@
                                     </div>
                                     <div class="db-structured-form">
                                         <div class="db-structured-field">
-                                            <label for="dbStructuredDuration">Duration (hours)</label>
-                                            <div class="db-structured-duration-row">
-                                                <input type="number" id="dbStructuredDuration" min="1" max="24" step="1" value="2">
+                                            <label>Access duration</label>
+                                            <div class="db-duration-mode-row">
+                                                <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="hours" id="dbDurationModeHours" checked> Hours</label>
+                                                <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="daterange" id="dbDurationModeDaterange"> Date range (max 3 days)</label>
+                                            </div>
+                                            <div id="dbDurationHoursBlock" class="db-structured-duration-row">
+                                                <input type="number" id="dbStructuredDuration" min="1" max="72" step="1" value="2" title="1–72 hours">
                                                 <div class="db-structured-duration-chips">
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(2)">2h</button>
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(4)">4h</button>
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(8)">8h</button>
+                                                    <button type="button" class="db-duration-chip" onclick="setStructuredDuration(24)">24h</button>
                                                 </div>
+                                            </div>
+                                            <div id="dbDurationDaterangeBlock" class="db-daterange-row" style="display:none;">
+                                                <div class="db-daterange-fields">
+                                                    <label for="dbStartDate">From</label>
+                                                    <input type="date" id="dbStartDate" min="">
+                                                    <label for="dbEndDate">To</label>
+                                                    <input type="date" id="dbEndDate" min="">
+                                                </div>
+                                                <p class="db-step-hint" id="dbDaterangeHint">Select up to 3 consecutive days. End date is limited automatically.</p>
                                             </div>
                                         </div>
                                         <div class="db-structured-field">
@@ -1612,12 +1626,12 @@
                     </div>
                 </div>
 
-                <!-- Admin Users & Groups Tab -->
+                <!-- Admin Users & Groups Tab: PAM solution admins (who can manage this PAM) -->
                 <div id="adminUsersTab" class="admin-tab active" style="font-family: 'Inter', sans-serif;">
-                    <!-- Sub-tabs (PAM theme) -->
+                    <!-- Sub-tabs: PAM admins | Groups | Roles -->
                     <div class="admin-subtabs">
                         <button class="btn-secondary btn-pam admin-subtab active" id="usersSubTab" onclick="showUsersSubTab('users')">
-                            <i class="fas fa-user"></i> Users
+                            <i class="fas fa-user-shield"></i> PAM admins
                         </button>
                         <button class="btn-secondary btn-pam admin-subtab" id="groupsSubTab" onclick="showUsersSubTab('groups')">
                             <i class="fas fa-users-cog"></i> Groups
@@ -1626,41 +1640,32 @@
                             <i class="fas fa-user-shield"></i> Roles
                         </button>
                     </div>
-
-                    <!-- Users Section -->
+                    <!-- PAM admins Section (who can manage this PAM) -->
                     <div id="usersSection">
+                        <p class="admin-role-hint" style="margin-bottom: 16px;"><strong>PAM solution admins</strong> — Users who can manage this PAM (Admin panel). Add only from Identity Center users.</p>
+                        <div class="pam-admin-search-box" style="margin-bottom: 20px; padding: 16px; border: 1px solid var(--border-color); border-radius: 12px; background: var(--bg-secondary);">
+                            <h4 style="margin: 0 0 10px 0; font-size: 14px;"><i class="fas fa-search"></i> Search by name (Identity Center users)</h4>
+                            <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                                <input type="text" id="pamAdminSearchInput" placeholder="Search by name or email..." style="flex: 1; min-width: 200px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                <button type="button" class="btn-primary btn-pam" onclick="searchIdCUsersForPamAdmin()"><i class="fas fa-search"></i> Search</button>
+                            </div>
+                            <div id="pamAdminSearchResults" style="margin-top: 14px; max-height: 220px; overflow: auto;"></div>
+                        </div>
                         <div class="users-management">
                             <div class="users-header">
-                                <h3>User Management</h3>
-                                <button class="btn-primary btn-pam" onclick="showCreateUserModal()">
-                                    <i class="fas fa-user-plus"></i> Create User
-                                </button>
+                                <h3>Current PAM admins</h3>
+                                <button type="button" class="btn-secondary btn-pam" onclick="loadPamAdmins()"><i class="fas fa-sync-alt"></i> Refresh</button>
                             </div>
-                            <p class="admin-role-hint">Assign a predefined role when creating users. See the <strong>Roles</strong> tab for capabilities.</p>
                             <div class="users-table">
                                 <table>
                                     <thead>
                                         <tr>
-                                            <th>Name</th>
                                             <th>Email</th>
-                                            <th>Group</th>
-                                            <th>Role</th>
-                                            <th>Status</th>
                                             <th>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody id="usersTableBody">
-                                        <tr>
-                                            <td>Satish Korra</td>
-                                            <td>satish.korra@nykaa.com</td>
-                                            <td>admin</td>
-                                            <td><span class="badge badge-admin">Admin</span></td>
-                                            <td><span class="badge badge-success">Active</span></td>
-                                            <td>
-                                                <button class="btn-link" onclick="editUser('satish')">Edit</button>
-                                                <button class="btn-link" onclick="deleteUser('satish')">Delete</button>
-                                            </td>
-                                        </tr>
+                                        <tr><td colspan="2" class="text-muted" style="text-align: center;">Loading…</td></tr>
                                     </tbody>
                                 </table>
                             </div>
@@ -1821,9 +1826,10 @@
                             <div class="notice-warning-pam" style="margin-top: 20px;">
                                 <strong>⚠️ Security Note:</strong> Only users synced from AD or Identity Center can access cloud resources. This ensures unauthorized users cannot gain access even if they're in the company.
                             </div>
-                            <!-- Identity Center: List Users, Groups, Permission Sets -->
+                            <!-- Identity Center: List Users, Groups, Permission Sets (reference only; PAM admins are under Admin → Users & Groups) -->
                             <div class="management-identity-center-lists" style="margin-top: 24px;">
-                                <h4 style="margin-bottom: 12px;"><i class="fas fa-list"></i> Identity Center data</h4>
+                                <h4 style="margin-bottom: 12px;"><i class="fas fa-list"></i> Identity Center users and groups</h4>
+                                <p class="admin-role-hint" style="margin-bottom: 12px;">These are users and groups from AWS Identity Center (for reference). To designate who can <strong>manage this PAM solution</strong>, use <strong>Admin → Users & Groups</strong> and add PAM admins from the search there.</p>
                                 <div class="mgmt-ic-tabs" style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
                                     <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab active" data-tab="users" onclick="showManagementICTab('users')"><i class="fas fa-users"></i> List users</button>
                                     <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab" data-tab="groups" onclick="showManagementICTab('groups')"><i class="fas fa-user-friends"></i> List groups</button>

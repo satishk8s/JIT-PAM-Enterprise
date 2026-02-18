@@ -1093,14 +1093,28 @@
                                     </div>
                                     <div class="db-structured-form">
                                         <div class="db-structured-field">
-                                            <label for="dbStructuredDuration">Duration (hours)</label>
-                                            <div class="db-structured-duration-row">
-                                                <input type="number" id="dbStructuredDuration" min="1" max="24" step="1" value="2">
+                                            <label>Access duration</label>
+                                            <div class="db-duration-mode-row">
+                                                <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="hours" id="dbDurationModeHours" checked> Hours</label>
+                                                <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="daterange" id="dbDurationModeDaterange"> Date range (max 3 days)</label>
+                                            </div>
+                                            <div id="dbDurationHoursBlock" class="db-structured-duration-row">
+                                                <input type="number" id="dbStructuredDuration" min="1" max="72" step="1" value="2" title="1–72 hours">
                                                 <div class="db-structured-duration-chips">
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(2)">2h</button>
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(4)">4h</button>
                                                     <button type="button" class="db-duration-chip" onclick="setStructuredDuration(8)">8h</button>
+                                                    <button type="button" class="db-duration-chip" onclick="setStructuredDuration(24)">24h</button>
                                                 </div>
+                                            </div>
+                                            <div id="dbDurationDaterangeBlock" class="db-daterange-row" style="display:none;">
+                                                <div class="db-daterange-fields">
+                                                    <label for="dbStartDate">From</label>
+                                                    <input type="date" id="dbStartDate" min="">
+                                                    <label for="dbEndDate">To</label>
+                                                    <input type="date" id="dbEndDate" min="">
+                                                </div>
+                                                <p class="db-step-hint" id="dbDaterangeHint">Select up to 3 consecutive days. End date is limited automatically.</p>
                                             </div>
                                         </div>
                                         <div class="db-structured-field">

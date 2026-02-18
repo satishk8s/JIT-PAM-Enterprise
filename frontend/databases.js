@@ -923,6 +923,11 @@ function transitionToDbStructuredUI() {
     const engineLabel = document.getElementById('dbStructuredEngineLabel');
     if (engineLabel) engineLabel.textContent = label;
     renderStructuredPermissionGroups(engine);
+    if (typeof initDbDurationMode === 'function' && !document.getElementById('dbDurationModeHours')?.dataset.dbDurationInited) {
+        initDbDurationMode();
+        const el = document.getElementById('dbDurationModeHours');
+        if (el) el.dataset.dbDurationInited = 'true';
+    }
     hydrateStructuredSummary();
 }
 
@@ -1202,23 +1207,135 @@ function deriveStructuredQueryTypes(ops) {
     return queryTypes;
 }
 
+const DB_MAX_DURATION_DAYS = 3;
+const DB_MAX_DURATION_HOURS = DB_MAX_DURATION_DAYS * 24; // 72
+
 function setStructuredDuration(hours) {
     const el = document.getElementById('dbStructuredDuration');
     if (!el) return;
     const h = parseInt(hours, 10);
-    if (!Number.isFinite(h) || h < 1 || h > 24) return;
+    if (!Number.isFinite(h) || h < 1 || h > DB_MAX_DURATION_HOURS) return;
     el.value = String(h);
     hydrateStructuredSummary();
+}
+
+function initDbDurationMode() {
+    const modeHours = document.getElementById('dbDurationModeHours');
+    const modeDaterange = document.getElementById('dbDurationModeDaterange');
+    const hoursBlock = document.getElementById('dbDurationHoursBlock');
+    const daterangeBlock = document.getElementById('dbDurationDaterangeBlock');
+    if (!modeHours || !modeDaterange || !hoursBlock || !daterangeBlock) return;
+
+    const today = new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const startEl = document.getElementById('dbStartDate');
+    const endEl = document.getElementById('dbEndDate');
+    if (startEl) startEl.min = todayStr;
+    if (endEl) endEl.min = todayStr;
+
+    function setEndDateMax() {
+        if (!startEl || !endEl || !startEl.value) return;
+        const start = new Date(startEl.value);
+        const maxEnd = new Date(start);
+        maxEnd.setDate(maxEnd.getDate() + DB_MAX_DURATION_DAYS);
+        endEl.max = maxEnd.toISOString().slice(0, 10);
+        const end = new Date(endEl.value);
+        if (endEl.value && end > maxEnd) {
+            endEl.value = maxEnd.toISOString().slice(0, 10);
+        }
+        hydrateStructuredSummary();
+    }
+
+    function setEndMinFromStart() {
+        if (startEl && endEl && startEl.value) {
+            endEl.min = startEl.value;
+            setEndDateMax();
+        }
+    }
+
+    modeHours.addEventListener('change', function() {
+        hoursBlock.style.display = '';
+        daterangeBlock.style.display = 'none';
+        hydrateStructuredSummary();
+    });
+    modeDaterange.addEventListener('change', function() {
+        hoursBlock.style.display = 'none';
+        daterangeBlock.style.display = 'block';
+        if (startEl && !startEl.value) startEl.value = todayStr;
+        setEndMinFromStart();
+        if (endEl && !endEl.value) endEl.value = todayStr;
+        hydrateStructuredSummary();
+    });
+
+    if (startEl) startEl.addEventListener('change', setEndMinFromStart);
+    if (endEl) {
+        endEl.addEventListener('change', function() {
+            if (!startEl || !startEl.value) return;
+            const start = new Date(startEl.value);
+            const maxEnd = new Date(start);
+            maxEnd.setDate(maxEnd.getDate() + DB_MAX_DURATION_DAYS);
+            const end = new Date(endEl.value);
+            if (end > maxEnd) {
+                endEl.value = maxEnd.toISOString().slice(0, 10);
+            }
+            hydrateStructuredSummary();
+        });
+    }
 }
 
 function resetStructuredDbRequest() {
     dbStructuredPermissions = [];
     const dur = document.getElementById('dbStructuredDuration');
     const just = document.getElementById('dbStructuredJustification');
+    const modeHours = document.getElementById('dbDurationModeHours');
+    const startEl = document.getElementById('dbStartDate');
+    const endEl = document.getElementById('dbEndDate');
     if (dur) dur.value = '2';
     if (just) just.value = '';
+    if (modeHours) modeHours.checked = true;
+    const hoursBlock = document.getElementById('dbDurationHoursBlock');
+    const daterangeBlock = document.getElementById('dbDurationDaterangeBlock');
+    if (hoursBlock) hoursBlock.style.display = '';
+    if (daterangeBlock) daterangeBlock.style.display = 'none';
+    const today = new Date().toISOString().slice(0, 10);
+    if (startEl) startEl.value = '';
+    if (endEl) endEl.value = '';
     syncStructuredPermissionUI();
     hydrateStructuredSummary();
+}
+
+function getDbStructuredDurationHours() {
+    const modeDaterange = document.getElementById('dbDurationModeDaterange');
+    if (modeDaterange && modeDaterange.checked) {
+        const startEl = document.getElementById('dbStartDate');
+        const endEl = document.getElementById('dbEndDate');
+        if (!startEl?.value || !endEl?.value) return null;
+        const start = new Date(startEl.value);
+        const end = new Date(endEl.value);
+        if (end < start) return null;
+        const hours = Math.round((end - start) / (1000 * 60 * 60));
+        if (hours < 1) return 1;
+        if (hours > DB_MAX_DURATION_HOURS) return DB_MAX_DURATION_HOURS;
+        return hours;
+    }
+    const v = parseInt(document.getElementById('dbStructuredDuration')?.value || '2', 10);
+    if (!Number.isFinite(v) || v < 1) return 2;
+    return Math.min(v, DB_MAX_DURATION_HOURS);
+}
+
+function getDbStructuredDurationDisplay() {
+    const modeDaterange = document.getElementById('dbDurationModeDaterange');
+    if (modeDaterange && modeDaterange.checked) {
+        const startEl = document.getElementById('dbStartDate');
+        const endEl = document.getElementById('dbEndDate');
+        if (startEl?.value && endEl?.value) {
+            const h = getDbStructuredDurationHours();
+            return `${startEl.value} to ${endEl.value} (${h}h)`;
+        }
+        return '—';
+    }
+    const h = getDbStructuredDurationHours();
+    return h != null ? `${h}h` : '—';
 }
 
 function hydrateStructuredSummary() {
@@ -1226,7 +1343,7 @@ function hydrateStructuredSummary() {
     if (!summary) return;
     const dbs = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
     const dbNames = dbs.length ? dbs.join(', ') : (dbRequestDraft?.db_name || 'default');
-    const duration = parseInt(document.getElementById('dbStructuredDuration')?.value || '2', 10) || 2;
+    const durationDisplay = getDbStructuredDurationDisplay();
     const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
     const role = deriveStructuredRole(dbStructuredPermissions);
     const ops = dbStructuredPermissions.length ? dbStructuredPermissions.join(', ') : '—';
@@ -1237,7 +1354,7 @@ function hydrateStructuredSummary() {
             <span><strong>Database(s):</strong> ${escapeHtml(dbNames)}</span>
             <span><strong>Selected Queries:</strong> ${escapeHtml(ops)}</span>
             <span><strong>Role:</strong> ${escapeHtml(getDbRoleLabel(role))}</span>
-            <span><strong>Duration:</strong> ${escapeHtml(String(duration))}h</span>
+            <span><strong>Duration:</strong> ${escapeHtml(durationDisplay)}</span>
             <span><strong>Reason:</strong> ${escapeHtml(justification || '—')}</span>
         </div>
     `;
@@ -1253,9 +1370,18 @@ async function submitStructuredDbRequest() {
         alert('Please select at least one query permission.');
         return;
     }
-    const duration = parseInt(document.getElementById('dbStructuredDuration')?.value || '0', 10);
-    if (!duration || duration < 1 || duration > 24) {
-        alert('Duration must be between 1 and 24 hours.');
+    const duration = getDbStructuredDurationHours();
+    if (duration == null || duration < 1) {
+        const modeDaterange = document.getElementById('dbDurationModeDaterange');
+        if (modeDaterange && modeDaterange.checked) {
+            alert('Please select a valid date range (from and to, max 3 days).');
+        } else {
+            alert('Duration must be between 1 and ' + DB_MAX_DURATION_HOURS + ' hours.');
+        }
+        return;
+    }
+    if (duration > DB_MAX_DURATION_HOURS) {
+        alert('Maximum duration is ' + DB_MAX_DURATION_DAYS + ' days (' + DB_MAX_DURATION_HOURS + ' hours).');
         return;
     }
     const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
@@ -1275,25 +1401,34 @@ async function submitStructuredDbRequest() {
     const role = deriveStructuredRole(dbStructuredPermissions);
     const query_types = deriveStructuredQueryTypes(dbStructuredPermissions);
 
+    const payload = {
+        databases: selectedDatabases,
+        account_id: accountId,
+        region: inst.region || '',
+        db_instance_id: inst.id || '',
+        user_email: userEmail,
+        user_full_name: fullName,
+        db_username: userEmail.split('@')[0],
+        permissions: dbStructuredPermissions,
+        query_types,
+        role,
+        duration_hours: duration,
+        justification,
+        preferred_auth: dbRequestDraft.preferred_auth || ''
+    };
+    const modeDaterange = document.getElementById('dbDurationModeDaterange');
+    if (modeDaterange && modeDaterange.checked) {
+        const startEl = document.getElementById('dbStartDate');
+        const endEl = document.getElementById('dbEndDate');
+        if (startEl?.value) payload.start_date = startEl.value;
+        if (endEl?.value) payload.end_date = endEl.value;
+    }
+
     try {
         const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                databases: selectedDatabases,
-                account_id: accountId,
-                region: inst.region || '',
-                db_instance_id: inst.id || '',
-                user_email: userEmail,
-                user_full_name: fullName,
-                db_username: userEmail.split('@')[0],
-                permissions: dbStructuredPermissions,
-                query_types,
-                role,
-                duration_hours: duration,
-                justification,
-                preferred_auth: dbRequestDraft.preferred_auth || ''
-            })
+            body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -1945,7 +2080,7 @@ async function loadDbRequests() {
                         ${isActive ? `
                             <button class="btn-primary btn-sm" onclick="connectToDatabase('${String(db?.host || '').replace(/'/g, "\\'")}', '${String(db?.port || '').replace(/'/g, "\\'")}', '${eng.replace(/'/g, "\\'")}', '${requestIdEsc}', '${firstDbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
                             <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Credentials</button>
-                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-up-right-from-square"></i> External Tool</button>
+                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-key"></i> Get credentials</button>
                         ` : ''}
                         ${req.status === 'approved' ? `
                             <button class="btn-secondary btn-sm" onclick="retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>
@@ -2211,7 +2346,7 @@ async function openDbExternalToolModal(requestId) {
           <div class="db-modal">
             <div class="db-modal-header">
               <div class="db-modal-title">
-                <span class="db-modal-title-main">External Tool Credentials</span>
+                <span class="db-modal-title-main">Get credentials</span>
                 <span class="db-modal-sub">Request: <code>${escapeHtml(requestId)}</code></span>
               </div>
               <button class="btn-icon" onclick="closeDbExternalToolModal()" title="Close"><i class="fas fa-times"></i></button>
@@ -2351,8 +2486,8 @@ async function refreshApprovedDatabases() {
                 ? `<span class="badge">IAM</span> <code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`
                 : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`;
             const actionBtn = `
-                <button class="btn-primary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
-                <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> External Tool</button>
+                <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> Get credentials</button>
+                <button class="btn-secondary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
             `;
             return `<tr>
                 <td>${db.engine}</td>

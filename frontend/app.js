@@ -6,13 +6,22 @@ let requests = [];
 let currentTheme = 'light';
 let isAdmin = false;
 
-// Admin users list (in production, get from backend/LDAP)
-const ADMIN_USERS = [
-    'satish.korra@nykaa.com',
-    'satish@nykaa.com',
-    'admin@nykaa.com',
-    'security@nykaa.com'
-];
+// PAM admin check: isAdmin is set from API /api/admin/check-pam-admin (backend stores PAM solution admins)
+const API_BASE_FOR_ADMIN = (typeof window !== 'undefined' && window.API_BASE) ? window.API_BASE : ((!window.location.port || window.location.port === '80' || window.location.port === '443') ? '/api' : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
+
+function setPamAdminFromApi(email) {
+    if (!email || typeof fetch === 'undefined') return;
+    fetch(API_BASE_FOR_ADMIN + '/admin/check-pam-admin?email=' + encodeURIComponent(email))
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            isAdmin = d.isAdmin === true;
+            localStorage.setItem('isAdmin', String(isAdmin));
+            localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+            if (typeof currentUser !== 'undefined' && currentUser) currentUser.isAdmin = isAdmin;
+            if (typeof checkAdminAccess === 'function') checkAdminAccess();
+        })
+        .catch(function() {});
+}
 
 // API Base URL - use /api when on port 80 (nginx proxy), else hostname:5000
 // Override: set window.API_BASE before app.js loads
@@ -39,14 +48,15 @@ function verifyOTPAndLogin() {
         return;
     }
     sessionStorage.removeItem('otp_email');
-    isAdmin = ADMIN_USERS.includes(email.toLowerCase());
-    currentUser = { email: email, name: email.split('@')[0], isAdmin: isAdmin };
+    isAdmin = false;
+    currentUser = { email: email, name: email.split('@')[0], isAdmin: false };
     localStorage.setItem('isLoggedIn', 'true');
     localStorage.setItem('userEmail', email);
     localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
-    localStorage.setItem('isAdmin', isAdmin.toString());
-    localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+    localStorage.setItem('isAdmin', 'false');
+    localStorage.setItem('userRole', 'user');
     showMainApp();
+    setPamAdminFromApi(email);
 }
 if (typeof window !== 'undefined') window.verifyOTPAndLogin = verifyOTPAndLogin;
 
@@ -71,7 +81,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Check if user is logged in (in production, check JWT token)
     if (isLoggedIn === 'true') {
         showMainApp();
-        // If URL has #admin, navigate to admin panel (admin users only)
+        var storedEmail = localStorage.getItem('userEmail');
+        if (storedEmail) setPamAdminFromApi(storedEmail);
         if (window.location.hash === '#admin' && localStorage.getItem('isAdmin') === 'true') {
             setTimeout(function() { showPage('admin'); }, 100);
         }
@@ -125,21 +136,17 @@ function setupEventListeners() {
             const mfaCode = document.getElementById('mfaCode').value;
             
             if (mfaCode && mfaCode.length === 6) {
-                // Simulate successful login
                 const username = document.getElementById('username').value;
                 const email = username.includes('@') ? username : username + '@nykaa.com';
-                isAdmin = ADMIN_USERS.includes(email.toLowerCase());
-                currentUser = {
-                    email: email,
-                    name: username,
-                    isAdmin: isAdmin
-                };
-        localStorage.setItem('isLoggedIn', 'true');
-        localStorage.setItem('userEmail', email);
-        localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
-        localStorage.setItem('isAdmin', isAdmin.toString());
-        localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+                isAdmin = false;
+                currentUser = { email: email, name: username, isAdmin: false };
+                localStorage.setItem('isLoggedIn', 'true');
+                localStorage.setItem('userEmail', email);
+                localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
+                localStorage.setItem('isAdmin', 'false');
+                localStorage.setItem('userRole', 'user');
                 showMainApp();
+                setPamAdminFromApi(email);
             } else {
                 alert('❌ Invalid MFA code. Please enter 6 digits.');
             }
@@ -203,18 +210,15 @@ function setupEventListeners() {
 // Quick login for testing (bypasses OTP/MFA)
 function quickLoginAsUser(email) {
     const normalizedEmail = (email || 'user@nykaa.com').toLowerCase().trim();
-    isAdmin = ADMIN_USERS.includes(normalizedEmail);
-    currentUser = {
-        email: normalizedEmail,
-        name: normalizedEmail.split('@')[0],
-        isAdmin: isAdmin
-    };
+    isAdmin = false;
+    currentUser = { email: normalizedEmail, name: normalizedEmail.split('@')[0], isAdmin: false };
     localStorage.setItem('isLoggedIn', 'true');
     localStorage.setItem('userEmail', normalizedEmail);
     localStorage.setItem('userName', normalizedEmail.split('@')[0].replace(/\./g, ' '));
-    localStorage.setItem('isAdmin', isAdmin.toString());
-    localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+    localStorage.setItem('isAdmin', 'false');
+    localStorage.setItem('userRole', 'user');
     showMainApp();
+    setPamAdminFromApi(normalizedEmail);
 }
 
 // Login Flow Functions
@@ -272,24 +276,16 @@ function handleLogin(e) {
     const email = document.getElementById('email').value;
     const password = document.getElementById('password').value;
     
-    // In production, validate with backend
     if (email && password) {
-        // Check if user is admin
-        isAdmin = ADMIN_USERS.includes(email.toLowerCase());
-        
-        currentUser = {
-            email: email,
-            name: 'Satish Korra',
-            role: isAdmin ? 'System Administrator' : 'DevOps Engineer',
-            isAdmin: isAdmin
-        };
-        
+        isAdmin = false;
+        currentUser = { email: email, name: 'Satish Korra', role: 'DevOps Engineer', isAdmin: false };
         localStorage.setItem('isLoggedIn', 'true');
         localStorage.setItem('userEmail', email);
         localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
-        localStorage.setItem('isAdmin', isAdmin.toString());
-        localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
+        localStorage.setItem('isAdmin', 'false');
+        localStorage.setItem('userRole', 'user');
         showMainApp();
+        setPamAdminFromApi(email);
     }
 }
 
@@ -602,6 +598,7 @@ function showAdminTab(tabId, event) {
         targetTab.style.setProperty('display', 'block', 'important');
         targetTab.style.setProperty('visibility', 'visible', 'important');
         targetTab.classList.add('active');
+        if (tabId === 'users' && typeof loadPamAdmins === 'function') loadPamAdmins();
         console.log('✅ Showing admin tab:', tabId, targetTab);
     } else {
         console.error('❌ Admin tab not found:', tabId, tabMap[tabId]);

@@ -250,8 +250,8 @@ class VaultManager:
             duration_hours = 2
         if duration_hours < 1:
             duration_hours = 1
-        if duration_hours > 24:
-            duration_hours = 24
+        if duration_hours > 72:
+            duration_hours = 72
 
         addr = VaultManager._vault_addr()
         if not addr:
