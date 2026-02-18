@@ -5581,7 +5581,7 @@ def _is_db_request_expired(req, now=None):
         return False
 
 
-def _activate_database_access_request(request_id: str) -> dict:
+def _activate_database_access_request(request_id: str, force_retry: bool = False) -> dict:
     """
     Activate an approved DB access request by minting time-bound credentials.
 
@@ -5599,6 +5599,15 @@ def _activate_database_access_request(request_id: str) -> dict:
     req = requests_db[rid]
     if req.get('type') != 'database_access':
         return {'error': 'Not a database request'}
+
+    # If last activation failed with a non-retryable error (e.g., IAM AccessDenied),
+    # do not auto-retry on every credentials poll. Allow explicit/manual retries only.
+    if not force_retry:
+        prev_err = str(req.get('activation_error') or '').strip()
+        if prev_err:
+            _msg, prev_code = _public_db_activation_error(prev_err)
+            if not _is_retryable_activation_code(prev_code):
+                return {'status': str(req.get('status') or 'approved'), 'error': prev_err}
 
     # Idempotency: if already ACTIVE and not expired, do nothing.
     if str(req.get('status') or '').strip().lower() == 'active' and not _is_db_request_expired(req):
@@ -7285,7 +7294,7 @@ def activate_database_request(request_id):
         if status not in ('approved',):
             return jsonify({'error': 'Request is not approved yet.'}), 400
 
-        result = _activate_database_access_request(request_id)
+        result = _activate_database_access_request(request_id, force_retry=True)
         if result.get('error'):
             safe_msg, safe_code = _public_db_activation_error(result['error'])
             return jsonify({'status': 'approved', 'error': safe_msg, 'message': _activation_message_for_code(safe_code)}), 200
