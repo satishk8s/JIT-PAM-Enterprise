@@ -1319,6 +1319,7 @@ def saml_complete():
 
 
 @app.route('/api/saml/profile', methods=['GET'])
+@app.route('/saml/profile', methods=['GET'])
 def saml_profile():
     """
     Return current SAML session identity for frontend hydration/recovery.

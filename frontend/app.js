@@ -26,12 +26,38 @@ function setPamAdminFromApi(email) {
 }
 
 let ssoProfileSyncInFlight = false;
+
+async function fetchSsoProfileWithFallback() {
+    const urls = [
+        API_BASE_FOR_ADMIN + '/saml/profile',
+        '/saml/profile'
+    ];
+    let lastError = null;
+    for (const url of urls) {
+        try {
+            const res = await fetch(url, { credentials: 'include' });
+            if (!res.ok) {
+                lastError = new Error('HTTP ' + res.status);
+                continue;
+            }
+            const ct = String(res.headers.get('content-type') || '').toLowerCase();
+            if (!ct.includes('application/json')) {
+                lastError = new Error('Non-JSON response');
+                continue;
+            }
+            return await res.json();
+        } catch (e) {
+            lastError = e;
+        }
+    }
+    throw lastError || new Error('Failed to load SSO profile');
+}
+
 async function syncSsoProfileFromSession() {
     if (ssoProfileSyncInFlight || typeof fetch === 'undefined') return;
     ssoProfileSyncInFlight = true;
     try {
-        const res = await fetch(API_BASE_FOR_ADMIN + '/saml/profile');
-        const data = await res.json();
+        const data = await fetchSsoProfileWithFallback();
         if (!data || data.logged_in !== true) return;
 
         const email = String(data.email || '').trim();
