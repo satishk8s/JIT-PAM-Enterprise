@@ -30,6 +30,21 @@ cp ~/Downloads/idp_metadata.xml backend/saml/
 
 ---
 
+## Fix: Seeing JSON `{"message":"Login successful","user":"Email"}` and not opening the app
+
+If after signing in at AWS you land on `.../saml/acs` and see that JSON instead of being taken into the app:
+
+1. **The server is running old code.** The current code never returns that JSON; it redirects to `/saml/complete`, which then sets login state and sends you to the app.
+2. **On the EC2 (or server) that serves 52.66.172.182:**
+   - Pull the latest repo: `cd /path/to/JIT-PAM-Enterprise && git pull origin main`
+   - Restart the backend: `sudo systemctl restart npam-backend` (or however you run the Flask app)
+3. **Nginx** must proxy `/saml/` and `/login` to Flask (see “405” section below).
+4. Try **Login with SSO** again (or open the app from Identity Center again). You should briefly see “Signing you in…” then the app home with you logged in.
+
+The app accepts the SAML response via **GET** or **POST** on `/saml/acs` (AWS may use redirect or POST binding).
+
+---
+
 ## Fix: 405 Not Allowed on /saml/acs
 
 **405** means the request reached nginx but the HTTP method was not allowed. For SAML, AWS Identity Center **POSTs** the assertion to `/saml/acs`. If you get 405:

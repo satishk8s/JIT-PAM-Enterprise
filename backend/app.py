@@ -821,8 +821,9 @@ def saml_login():
         return jsonify({'error': 'SAML login failed', 'detail': str(e)}), 500
 
 
-@app.route('/saml/acs', methods=['POST'])
+@app.route('/saml/acs', methods=['GET', 'POST'])
 def saml_acs():
+    """Accept SAML response via POST (HTTP-POST binding) or GET (HTTP-Redirect binding from AWS IdC)."""
     if not _SAML_AVAILABLE:
         return jsonify({'error': 'SAML not available; install python3-saml'}), 503
     req = prepare_flask_request(request)
