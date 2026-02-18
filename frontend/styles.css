@@ -421,6 +421,19 @@ body {
     color: #667eea;
 }
 
+.profile-username {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.profile-crown-icon {
+    color: #F59E0B;
+    margin-right: 4px;
+    vertical-align: middle;
+}
+
 .profile-menu {
     position: absolute;
     top: 100%;

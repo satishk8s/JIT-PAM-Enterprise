@@ -311,7 +311,12 @@ function deleteGroup(groupName) {
 
 // --- PAM solution admins (Admin → Users & Groups: who can manage this PAM) ---
 function getAdminApiBase() {
-    return (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+    if (typeof window !== 'undefined' && window.API_BASE) return window.API_BASE;
+    if (typeof API_BASE !== 'undefined') return API_BASE;
+    var origin = window.location.origin || (window.location.protocol + '//' + window.location.hostname + (window.location.port ? ':' + window.location.port : ''));
+    var port = window.location.port;
+    if (port === '80' || port === '443' || !port) return origin + '/api';
+    return origin.replace(/:\d+$/, '') + ':5000/api';
 }
 
 async function loadPamAdmins() {
@@ -321,17 +326,19 @@ async function loadPamAdmins() {
         var apiBase = getAdminApiBase();
         var res = await fetch(apiBase + '/admin/pam-admins');
         var data = await res.json();
-        var emails = (data && data.emails) ? data.emails : (data.pam_admins && data.pam_admins.map(function(p) { return p.email; })) || [];
-        if (emails.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="2" style="text-align: center; color: var(--text-secondary);">No PAM admins yet. Search Identity Center users above and add them.</td></tr>';
+        var list = (data && data.pam_admins) ? data.pam_admins : [];
+        if (list.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">No PAM admins yet. Search Identity Center users above and add them with a role.</td></tr>';
             return;
         }
-        tbody.innerHTML = emails.map(function(email) {
+        tbody.innerHTML = list.map(function(a) {
+            var email = a.email || a;
+            var role = a.role || 'Admin';
             var safe = String(email).replace(/'/g, "\\'");
-            return '<tr><td>' + (email || '') + '</td><td><button type="button" class="btn-secondary btn-pam btn-sm" onclick="removePamAdmin(\'' + safe + '\')"><i class="fas fa-user-minus"></i> Remove</button></td></tr>';
+            return '<tr><td>' + (email || '') + '</td><td><span class="badge">' + (role || 'Admin') + '</span></td><td><button type="button" class="btn-secondary btn-pam btn-sm" onclick="removePamAdmin(\'' + safe + '\')"><i class="fas fa-user-minus"></i> Remove</button></td></tr>';
         }).join('');
     } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="2" style="text-align: center; color: var(--danger);">Failed to load. ' + (e.message || '') + '</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Failed to load. ' + (e.message || '') + '</td></tr>';
     }
 }
 
@@ -347,19 +354,30 @@ async function searchIdCUsersForPamAdmin() {
     resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Searching…</p>';
     try {
         var apiBase = getAdminApiBase();
-        var res = await fetch(apiBase + '/admin/identity-center/users?search=' + encodeURIComponent(q));
-        var data = await res.json();
-        var users = (data && data.users) ? data.users : [];
-        if (users.length === 0) {
-            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">No Identity Center users match.</p>';
+        var url = apiBase + '/admin/identity-center/users?search=' + encodeURIComponent(q);
+        var res = await fetch(url);
+        var contentType = res.headers.get('Content-Type') || '';
+        if (!contentType.toLowerCase().includes('application/json')) {
+            var text = await res.text();
+            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Server returned non-JSON. Check backend is running and API_BASE is correct. Status: ' + res.status + '</p>';
             return;
         }
-        resultsEl.innerHTML = '<table class="users-table" style="width:100%; font-size: 13px;"><thead><tr><th>Name</th><th>Email</th><th>Action</th></tr></thead><tbody>' +
+        var data = await res.json();
+        if (data && data.error) {
+            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">' + (data.error || 'Backend error') + '</p>';
+            return;
+        }
+        var users = (data && data.users) ? data.users : [];
+        if (users.length === 0) {
+            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">No Identity Center users match &quot;' + String(q).replace(/</g, '&lt;') + '&quot;.</p>';
+            return;
+        }
+        resultsEl.innerHTML = '<table class="users-table" style="width:100%; font-size: 13px;"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Action</th></tr></thead><tbody>' +
             users.map(function(u) {
                 var name = (u.display_name || ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || u.username || '—');
                 var email = u.email || '—';
-                var safeEmail = String(email).replace(/'/g, "\\'").replace(/"/g, '&quot;');
-                return '<tr><td>' + (name || '—') + '</td><td>' + (email || '—') + '</td><td><button type="button" class="btn-primary btn-pam btn-sm" onclick="addPamAdmin(\'' + safeEmail + '\')"><i class="fas fa-plus"></i> Add as PAM admin</button></td></tr>';
+                var emailAttr = String(email).replace(/"/g, '&quot;').replace(/</g, '&lt;');
+                return '<tr><td>' + (name || '—') + '</td><td>' + (email || '—') + '</td><td><select class="pam-admin-role-select"><option value="Admin">Admin</option><option value="Manager">Manager</option></select></td><td><button type="button" class="btn-primary btn-pam btn-sm" onclick="addPamAdminWithRole(this)" data-email="' + emailAttr + '"><i class="fas fa-plus"></i> Add as PAM admin</button></td></tr>';
             }).join('') +
             '</tbody></table>';
     } catch (e) {
@@ -367,20 +385,31 @@ async function searchIdCUsersForPamAdmin() {
     }
 }
 
-async function addPamAdmin(email) {
+function addPamAdminWithRole(btn) {
+    var row = btn.closest('tr');
+    if (!row) return;
+    var email = (btn.getAttribute('data-email') || '').replace(/&quot;/g, '"').replace(/&lt;/g, '<').trim();
+    var select = row.querySelector('.pam-admin-role-select');
+    var role = (select && select.value) ? select.value : 'Admin';
+    addPamAdmin(email, role);
+}
+
+async function addPamAdmin(email, role) {
     if (!email || email === '—') return;
+    role = role || 'Admin';
     try {
         var apiBase = getAdminApiBase();
         var res = await fetch(apiBase + '/admin/pam-admins', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: email })
+            body: JSON.stringify({ email: email, role: role })
         });
         var data = await res.json();
         if (data.error) { alert('Error: ' + data.error); return; }
         if (data.status === 'already_added') { alert('User is already a PAM admin.'); }
         loadPamAdmins();
-        document.getElementById('pamAdminSearchResults').innerHTML = '<p class="text-muted" style="padding: 10px;">Added. Search again to add more.</p>';
+        var resultsEl = document.getElementById('pamAdminSearchResults');
+        if (resultsEl) resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Added as ' + role + '. Search again to add more.</p>';
     } catch (e) {
         alert('Failed to add: ' + (e.message || ''));
     }

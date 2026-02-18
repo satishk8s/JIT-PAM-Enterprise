@@ -19,6 +19,7 @@ function setPamAdminFromApi(email) {
             localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
             if (typeof currentUser !== 'undefined' && currentUser) currentUser.isAdmin = isAdmin;
             if (typeof checkAdminAccess === 'function') checkAdminAccess();
+            if (typeof updateUIForRole === 'function') updateUIForRole();
         })
         .catch(function() {});
 }
@@ -55,6 +56,7 @@ function verifyOTPAndLogin() {
     localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
     localStorage.setItem('isAdmin', 'false');
     localStorage.setItem('userRole', 'user');
+    localStorage.setItem('loginMethod', 'direct');
     showMainApp();
     setPamAdminFromApi(email);
 }
@@ -145,6 +147,7 @@ function setupEventListeners() {
                 localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
                 localStorage.setItem('isAdmin', 'false');
                 localStorage.setItem('userRole', 'user');
+                localStorage.setItem('loginMethod', 'direct');
                 showMainApp();
                 setPamAdminFromApi(email);
             } else {
@@ -217,6 +220,7 @@ function quickLoginAsUser(email) {
     localStorage.setItem('userName', normalizedEmail.split('@')[0].replace(/\./g, ' '));
     localStorage.setItem('isAdmin', 'false');
     localStorage.setItem('userRole', 'user');
+    localStorage.setItem('loginMethod', 'direct');
     showMainApp();
     setPamAdminFromApi(normalizedEmail);
 }
@@ -284,6 +288,7 @@ function handleLogin(e) {
         localStorage.setItem('userName', email.split('@')[0].replace(/\./g, ' '));
         localStorage.setItem('isAdmin', 'false');
         localStorage.setItem('userRole', 'user');
+        localStorage.setItem('loginMethod', 'direct');
         showMainApp();
         setPamAdminFromApi(email);
     }
@@ -294,12 +299,18 @@ function logout() {
     localStorage.removeItem('userEmail');
     localStorage.removeItem('userName');
     localStorage.removeItem('isAdmin');
+    localStorage.removeItem('userRole');
+    localStorage.removeItem('loginMethod');
     currentUser = null;
     isAdmin = false;
     document.body.classList.add('login-page');
     document.body.classList.remove('user-is-admin');
-    document.getElementById('loginPage').style.display = 'block';
-    document.getElementById('mainApp').style.display = 'none';
+    var loginPage = document.getElementById('loginPage');
+    var mainApp = document.getElementById('mainApp');
+    if (loginPage) loginPage.style.display = 'block';
+    if (mainApp) mainApp.style.display = 'none';
+    var menu = document.getElementById('profileMenu');
+    if (menu) menu.classList.remove('show');
 }
 
 function showMainApp() {
@@ -351,12 +362,17 @@ function showMainApp() {
 }
 
 function updateUIForRole() {
-    const userName = document.getElementById('userName');
-    if (userName && currentUser) {
-        userName.innerHTML = isAdmin
-            ? '<i class="fas fa-crown" style="color: #F59E0B; margin-right: 4px;"></i>' + currentUser.name + ' <span class="admin-badge">(Admin)</span>'
-            : currentUser.name;
+    const displayName = localStorage.getItem('userName') || (currentUser && currentUser.name) || (localStorage.getItem('userEmail') || '').split('@')[0].replace(/\./g, ' ') || 'User';
+    const userNameEl = document.getElementById('userNameDisplay');
+    if (userNameEl) {
+        var safe = String(displayName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        userNameEl.innerHTML = isAdmin
+            ? '<i class="fas fa-crown profile-crown-icon" title="PAM Admin"></i> ' + safe
+            : safe;
     }
+    var directOnlyWrap = document.getElementById('profileDirectOnlyWrap');
+    var loginMethod = localStorage.getItem('loginMethod') || '';
+    if (directOnlyWrap) directOnlyWrap.style.display = (loginMethod === 'direct') ? 'block' : 'none';
     
     // Directly show/hide admin-only elements via inline styles (reliable, bypasses CSS cache)
     document.querySelectorAll('.admin-only-nav').forEach(function(el) {
@@ -729,8 +745,9 @@ function toggleProfileMenu() {
 // Close profile menu when clicking outside
 document.addEventListener('click', function(e) {
     const profileDropdown = document.querySelector('.profile-dropdown');
-    if (!profileDropdown.contains(e.target)) {
-        document.getElementById('profileMenu').classList.remove('show');
+    const menu = document.getElementById('profileMenu');
+    if (profileDropdown && menu && !profileDropdown.contains(e.target)) {
+        menu.classList.remove('show');
     }
 });
 
@@ -2114,7 +2131,11 @@ function loadAdminPage() {
 
 
 function loadUsersManagement() {
-    loadUsersTable();
+    if (typeof loadPamAdmins === 'function') {
+        loadPamAdmins();
+    } else {
+        loadUsersTable();
+    }
 }
 
 function loadAuditLogs() {

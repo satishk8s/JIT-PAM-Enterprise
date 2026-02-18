@@ -87,25 +87,44 @@ identity_center_synced_groups = []
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
 
 def _load_pam_admins():
-    """Load list of PAM admin emails (lowercase). Optionally seed from PAM_ADMIN_SEED_EMAIL if file missing."""
+    """Load list of PAM admins: [{'email': str, 'role': str}, ...]. Email is lowercase. Backward-compat: old {'emails': [...]} migrated to role Admin."""
     try:
         if os.path.exists(PAM_ADMINS_PATH):
             with open(PAM_ADMINS_PATH, 'r') as f:
                 data = json.load(f)
-                return [str(e).strip().lower() for e in (data if isinstance(data, list) else data.get('emails', [])) if str(e).strip()]
+            if isinstance(data, list):
+                return [{'email': str(x.get('email') or x).strip().lower(), 'role': str(x.get('role') or 'Admin').strip() or 'Admin'} for x in data if str(x.get('email') or x).strip()]
+            admins = data.get('pam_admins')
+            if isinstance(admins, list):
+                return [{'email': str(a.get('email') or '').strip().lower(), 'role': str(a.get('role') or 'Admin').strip() or 'Admin'} for a in admins if str(a.get('email') or '').strip()]
+            emails = data.get('emails') or []
+            if emails:
+                return [{'email': str(e).strip().lower(), 'role': 'Admin'} for e in emails if str(e).strip()]
         seed = os.getenv('PAM_ADMIN_SEED_EMAIL', '').strip()
         if seed and '@' in seed:
-            _save_pam_admins([seed.lower()])
-            return [seed.lower()]
+            _save_pam_admins([{'email': seed.lower(), 'role': 'Admin'}])
+            return [{'email': seed.lower(), 'role': 'Admin'}]
     except Exception:
         pass
     return []
 
-def _save_pam_admins(emails):
-    """Save PAM admin list (emails, lowercase)."""
+def _save_pam_admins(admins):
+    """Save PAM admin list. admins = list of {'email': str, 'role': str} or list of email strings (role=Admin)."""
+    seen = set()
+    out = []
+    for a in (admins or []):
+        if isinstance(a, dict):
+            e = str(a.get('email') or '').strip().lower()
+            r = str(a.get('role') or 'Admin').strip() or 'Admin'
+        else:
+            e = str(a).strip().lower()
+            r = 'Admin'
+        if e and '@' in e and e not in seen:
+            seen.add(e)
+            out.append({'email': e, 'role': r})
     os.makedirs(os.path.dirname(PAM_ADMINS_PATH) or '.', exist_ok=True)
     with open(PAM_ADMINS_PATH, 'w') as f:
-        json.dump({'emails': list(set(e.strip().lower() for e in emails if str(e).strip()))}, f, indent=2)
+        json.dump({'pam_admins': out}, f, indent=2)
 
 def initialize_aws_config():
     """Fetch real AWS SSO configuration"""
@@ -891,7 +910,7 @@ def saml_complete():
         return redirect('/')
     email = _email_from_saml_session()
     pam_admins = _load_pam_admins()
-    is_admin = email.lower() in pam_admins if email else False
+    is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
@@ -903,6 +922,7 @@ def saml_complete():
     localStorage.setItem('userName', email.split('@')[0].replace(/\\./g, ' '));
     localStorage.setItem('isAdmin', %s);
     localStorage.setItem('userRole', %s);
+    localStorage.setItem('loginMethod', 'sso');
   }
   window.location.replace('/');
 })();
@@ -3229,29 +3249,31 @@ def list_identity_center_permission_sets():
 
 @app.route('/api/admin/pam-admins', methods=['GET'])
 def get_pam_admins():
-    """List emails of users who can manage the PAM solution (Admin panel)."""
+    """List PAM admins (email + role). Returns only users added as admins, not all IdC users."""
     try:
-        emails = _load_pam_admins()
-        return jsonify({'emails': emails, 'pam_admins': [{'email': e} for e in emails]})
+        admins = _load_pam_admins()
+        emails = [a['email'] for a in admins]
+        return jsonify({'emails': emails, 'pam_admins': admins})
     except Exception as e:
-        return jsonify({'error': str(e), 'emails': []}), 500
+        return jsonify({'error': str(e), 'emails': [], 'pam_admins': []}), 500
 
 
 @app.route('/api/admin/pam-admins', methods=['POST'])
 def add_pam_admin():
-    """Add a user (by email) as PAM solution admin. Only Identity Center users should be added (validate client-side from IdC search)."""
+    """Add a user (by email) as PAM solution admin with optional role (Admin/Manager)."""
     try:
         data = request.get_json() or {}
         email = str(data.get('email') or '').strip()
+        role = str(data.get('role') or 'Admin').strip() or 'Admin'
         if not email or '@' not in email:
             return jsonify({'error': 'Valid email is required'}), 400
-        emails = _load_pam_admins()
+        admins = _load_pam_admins()
         email_lower = email.lower()
-        if email_lower in emails:
-            return jsonify({'status': 'already_added', 'message': 'User is already a PAM admin', 'emails': emails})
-        emails.append(email_lower)
-        _save_pam_admins(emails)
-        return jsonify({'status': 'ok', 'message': f'{email} added as PAM admin', 'emails': _load_pam_admins()})
+        if any(a['email'] == email_lower for a in admins):
+            return jsonify({'status': 'already_added', 'message': 'User is already a PAM admin', 'pam_admins': admins})
+        admins.append({'email': email_lower, 'role': role})
+        _save_pam_admins(admins)
+        return jsonify({'status': 'ok', 'message': f'{email} added as PAM admin ({role})', 'pam_admins': _load_pam_admins()})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3263,26 +3285,29 @@ def remove_pam_admin(email):
         email = str(email or '').strip()
         if not email:
             return jsonify({'error': 'Email required'}), 400
-        emails = _load_pam_admins()
+        admins = _load_pam_admins()
         email_lower = email.lower()
-        if email_lower not in emails:
-            return jsonify({'status': 'not_found', 'message': 'User was not a PAM admin', 'emails': emails})
-        emails = [e for e in emails if e != email_lower]
-        _save_pam_admins(emails)
-        return jsonify({'status': 'ok', 'message': f'{email} removed from PAM admins', 'emails': _load_pam_admins()})
+        new_list = [a for a in admins if a['email'] != email_lower]
+        if len(new_list) == len(admins):
+            return jsonify({'status': 'not_found', 'message': 'User was not a PAM admin', 'pam_admins': admins})
+        _save_pam_admins(new_list)
+        return jsonify({'status': 'ok', 'message': f'{email} removed from PAM admins', 'pam_admins': _load_pam_admins()})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/admin/check-pam-admin', methods=['GET'])
 def check_pam_admin():
-    """Check if the given email is a PAM solution admin (for login / UI)."""
+    """Check if the given email is a PAM solution admin (for login / UI). Returns isAdmin and role."""
     try:
         email = str(request.args.get('email') or '').strip().lower()
         if not email:
             return jsonify({'isAdmin': False})
         admins = _load_pam_admins()
-        return jsonify({'isAdmin': email in admins})
+        for a in admins:
+            if a['email'] == email:
+                return jsonify({'isAdmin': True, 'role': a.get('role', 'Admin')})
+        return jsonify({'isAdmin': False})
     except Exception as e:
         return jsonify({'isAdmin': False})
 
@@ -4347,14 +4372,18 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         return ("Database access service is misconfigured. Please contact an administrator.", "VAULT_TOKEN_POLICY")
     if 'vault http 403' in low or 'forbidden' in low or 'permission denied' in low:
         return ("Database access service is unavailable. Please contact an administrator.", "VAULT_FORBIDDEN")
-    if 'vault connection failed' in low or 'timed out' in low:
+    if 'vault connection failed' in low or 'timed out' in low or 'connection refused' in low:
         return ("Database access service is temporarily unreachable. Please retry in a few minutes.", "VAULT_UNREACHABLE")
 
     # Proxy misconfiguration
     if 'db_connect_proxy_host' in low or 'db_connect_proxy_port' in low or 'proxy-not-configured' in low:
         return ("Database access service is not configured. Please contact an administrator.", "DB_PROXY_NOT_CONFIGURED")
 
-    return ("Database access activation failed. Please retry or contact an administrator.", "DB_ACTIVATION_FAILED")
+    # Vault/credential errors
+    if 'runtimeerror' in low or 'required' in low:
+        return ("Database access service is not fully configured. Ask an administrator to check backend logs (VAULT_ADDR, DB proxy).", "DB_ACTIVATION_FAILED")
+
+    return ("Database access activation failed. Please retry or contact an administrator. (Details are in server logs.)", "DB_ACTIVATION_FAILED")
 
 def _sanitize_database_request_for_client(req: dict) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
@@ -4850,16 +4879,16 @@ def _activate_database_access_request(request_id: str) -> dict:
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
     except Exception as e:
-        # Log full error server-side for operators; user-facing APIs will sanitize this.
+        # Log full error and traceback for operators (check journalctl / backend logs).
         try:
+            import traceback
             print(f"❌ DB activation failed for request {rid}: {e}")
+            traceback.print_exc()
         except Exception:
             pass
         # Approval may have succeeded but activation failed (Vault unreachable, misconfigured, etc).
-        # Keep the request approved so it can be retried without re-requesting approvals.
         req['status'] = 'approved'
         req['activation_error'] = str(e)
-        # Clear sensitive/partial fields (defense-in-depth).
         for k in ('vault_token', 'password', 'db_password'):
             req[k] = ''
         _save_requests()
