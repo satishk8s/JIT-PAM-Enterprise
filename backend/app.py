@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session, redirect
 from flask_cors import CORS
 import boto3
 from botocore.config import Config
@@ -20,6 +20,43 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-in-production')
+
+# ----- SAML (AWS IAM Identity Center) -----
+try:
+    from onelogin.saml2.auth import OneLogin_Saml2_Auth
+    from onelogin.saml2.idp_metadata_parser import OneLogin_Saml2_IdPMetadataParser
+    _SAML_AVAILABLE = True
+except ImportError:
+    _SAML_AVAILABLE = False
+
+
+def prepare_flask_request(request):
+    return {
+        'https': 'on' if request.is_secure else 'off',
+        'http_host': request.host,
+        'server_port': request.environ.get('SERVER_PORT'),
+        'script_name': request.path,
+        'get_data': request.args.copy(),
+        'post_data': request.form.copy(),
+    }
+
+
+def init_saml_auth(req):
+    base_path = os.path.join(os.path.dirname(__file__), 'saml')
+    metadata_path = os.path.join(base_path, 'idp_metadata.xml')
+    with open(metadata_path, 'r') as f:
+        idp_data = OneLogin_Saml2_IdPMetadataParser.parse(f.read())
+    settings = idp_data.copy()
+    settings['strict'] = False
+    settings['debug'] = True
+    settings.setdefault('sp', {})
+    settings['sp']['entityId'] = 'pam-flask-app'
+    settings['sp']['assertionConsumerService'] = {
+        'url': 'http://52.66.172.182/saml/acs',
+        'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
+    }
+    return OneLogin_Saml2_Auth(req, settings)
 
 def load_org_policies():
     """Load organizational policies from config file"""
@@ -767,6 +804,35 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
 @app.route('/api/health')
 def health():
     return jsonify({'status': 'ok', 'service': 'npam-backend'})
+
+
+@app.route('/login')
+def saml_login():
+    if not _SAML_AVAILABLE:
+        return jsonify({'error': 'SAML not available; install python3-saml'}), 503
+    req = prepare_flask_request(request)
+    auth = init_saml_auth(req)
+    return redirect(auth.login())
+
+
+@app.route('/saml/acs', methods=['POST'])
+def saml_acs():
+    if not _SAML_AVAILABLE:
+        return jsonify({'error': 'SAML not available; install python3-saml'}), 503
+    req = prepare_flask_request(request)
+    auth = init_saml_auth(req)
+    auth.process_response()
+    errors = auth.get_errors()
+    if not errors:
+        session['user'] = auth.get_nameid()
+        session['attributes'] = auth.get_attributes() or {}
+        return jsonify({
+            'message': 'Login successful',
+            'user': session['user'],
+            'attributes': session['attributes'],
+        })
+    return jsonify({'error': errors}), 400
+
 
 @app.route('/api/accounts', methods=['GET'])
 def get_accounts():

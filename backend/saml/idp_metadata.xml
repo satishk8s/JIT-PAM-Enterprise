@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Replace this file with AWS IAM Identity Center IdP metadata.
+     In AWS: Applications -> Your app -> Application metadata -> 
+     Copy the IdP metadata XML or download from the metadata URL. -->
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata"
+                  xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                  entityID="https://placeholder-replace-with-aws-idp">
+  <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
+                        Location="https://placeholder-replace-with-aws-sso-url/saml/sso"/>
+    <NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</NameIDFormat>
+  </IDPSSODescriptor>
+</EntityDescriptor>

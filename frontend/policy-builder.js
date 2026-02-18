@@ -118,13 +118,19 @@ function showSyncFromAD() {
 
 function showSyncFromIdentityCenter() {
     if (!confirm('🔄 Sync from AWS Identity Center?\n\nThis will:\n✓ Import all users from Identity Center\n✓ Import all groups\n✓ Only Identity Center users can access cloud\n\nContinue?')) return;
-    var apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+    var apiBase = getApiBase();
     var url = apiBase + '/admin/sync-from-identity-center';
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
         .then(function(res) {
             var ct = (res.headers.get('Content-Type') || '').toLowerCase();
+            if (!res.ok) {
+                return res.text().then(function(body) {
+                    var preview = (body && body.substring(0, 80)) || '';
+                    throw new Error('HTTP ' + res.status + '. Backend returned non-JSON (got HTML?). API URL: ' + url + ' If Flask runs on port 5000, set window.API_BASE = "' + (window.location.origin + ':5000/api') + '";');
+                });
+            }
             if (!ct.includes('application/json')) {
-                throw new Error('Backend returned non-JSON. Is the API URL correct? Use backend that serves this app (e.g. same host or set API_BASE).');
+                throw new Error('Backend returned non-JSON at ' + url + '. Ensure /api is proxied to Flask or set API_BASE to your backend (e.g. http://52.66.172.182:5000/api).');
             }
             return res.json();
         })
@@ -142,7 +148,7 @@ function showSyncFromIdentityCenter() {
             }
         })
         .catch(function(err) {
-            alert('❌ Error: ' + (err.message || 'Failed to fetch. Check backend is running and API URL (API_BASE) points to it.'));
+            alert('❌ Error: ' + (err.message || 'Failed to fetch. Check backend is running and API_BASE points to it.'));
         });
 }
 
@@ -193,10 +199,13 @@ function showManagementICTab(tab) {
 
 function loadManagementIdentityCenterLists() {
     var apiBase = getApiBase();
-    var errMsg = 'Check backend is running and API_BASE points to it.';
+    var errMsg = 'Check backend is running and API_BASE points to it. If Flask is on port 5000, set window.API_BASE = "' + (window.location.origin.replace(/:\d+$/, '') + ':5000/api') + '";';
     function safeJson(res) {
         var ct = (res.headers.get('Content-Type') || '').toLowerCase();
-        if (!ct.includes('application/json')) throw new Error('Backend returned non-JSON. ' + errMsg);
+        if (!res.ok)
+            return res.text().then(function(t) { throw new Error('HTTP ' + res.status + '. ' + errMsg); });
+        if (!ct.includes('application/json'))
+            throw new Error('Backend returned non-JSON (often HTML). ' + errMsg);
         return res.json();
     }
     function showListError(panelId, bodyId, msg) {

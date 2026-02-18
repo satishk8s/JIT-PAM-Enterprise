@@ -11,7 +11,9 @@
             document.documentElement.setAttribute('data-theme', t);
         })();
         // API URL - MUST be set before databases.js loads (it loads before app.js)
+        // If your Flask backend runs on port 5000 (e.g. EC2 at 52.66.172.182), set: window.API_BASE = 'http://52.66.172.182:5000/api';
         (function() {
+            if (window.API_BASE) return;
             var port = window.location.port || '';
             if (port === '80' || port === '443' || port === '') {
                 window.API_BASE = window.location.origin + '/api';

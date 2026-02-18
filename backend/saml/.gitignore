@@ -1,0 +1,6 @@
+# Only idp_metadata.xml is committed. Do not commit private keys or certs.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
