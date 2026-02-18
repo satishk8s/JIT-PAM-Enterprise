@@ -111,7 +111,22 @@ server {
         add_header Cache-Control "no-cache";
     }
 
-    # === API ONLY: proxy to Flask ===
+    # === SAML: AWS IdP POSTs to /saml/acs - must proxy to Flask ===
+    location /saml/ {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection "";
+        proxy_pass_request_body on;
+        proxy_pass_request_headers on;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 60s;
+    }
+
+    # === API: proxy to Flask ===
     location /api/ {
         proxy_pass http://127.0.0.1:5000;
         proxy_http_version 1.1;
@@ -122,6 +137,16 @@ server {
         proxy_set_header Connection "";
         proxy_connect_timeout 10s;
         proxy_read_timeout 60s;
+    }
+
+    # === Login: SAML redirect - proxy to Flask ===
+    location = /login {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 }
 NGINX
