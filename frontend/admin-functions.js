@@ -312,10 +312,13 @@ function deleteGroup(groupName) {
 // Load users management - also populates USER_MGMT_USERS for modals
 async function loadUsersManagement() {
     try {
-        var response = await fetch('http://127.0.0.1:5000/api/admin/users');
+        var apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+        var response = await fetch(apiBase + '/admin/users');
         var data = await response.json();
         if (Array.isArray(data)) {
             window.USER_MGMT_USERS = data;
+        } else if (data && data.error) {
+            console.error('Error loading users:', data.error);
         }
     } catch (e) {
         console.error('Error loading users:', e);

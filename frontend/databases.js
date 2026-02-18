@@ -488,22 +488,43 @@ async function fetchAccounts() {
 
 async function fetchDatabasesForAccount(accountId, engine) {
     if (!accountId) return { databases: [], error: null, instructions: [] };
+    const apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+    const url = `${apiBase}/databases?account_id=${encodeURIComponent(accountId)}${engine ? '&engine=' + encodeURIComponent(engine) : ''}`;
     try {
-        let url = `${DB_API_BASE}/api/databases?account_id=${encodeURIComponent(accountId)}`;
-        if (engine) url += `&engine=${encodeURIComponent(engine)}`;
         const r = await fetch(url);
+        const contentType = (r.headers.get('Content-Type') || '').toLowerCase();
+        if (!contentType.includes('application/json')) {
+            return {
+                databases: [],
+                error: r.ok ? 'Server returned non-JSON. Check API URL.' : `Server returned ${r.status} (not JSON). Backend may be down or URL wrong.`,
+                instructions: [
+                    'Check that the backend server is running and reachable.',
+                    'If frontend and backend are on different origins, ensure CORS is configured and the API base URL points to the backend (e.g. http://backend-host:5000/api).'
+                ]
+            };
+        }
         const data = await r.json();
+        if (!r.ok) {
+            return {
+                databases: [],
+                error: data.error || `Request failed (${r.status})`,
+                instructions: data.instructions || ['Check that the backend server is running and reachable.']
+            };
+        }
         return {
             databases: data.databases || [],
             error: data.error || null,
             instructions: data.instructions || []
         };
     } catch (e) {
+        const msg = (e && e.message) || 'Failed to fetch RDS instances';
+        const isJsonError = /invalid json|unexpected token|is not valid JSON/i.test(msg);
         return {
             databases: [],
-            error: e.message || 'Failed to fetch RDS instances',
+            error: isJsonError ? 'Backend returned HTML instead of JSON. Is the API URL correct and backend running?' : msg,
             instructions: [
                 'Check that the backend server is running and reachable.',
+                'Ensure the API base URL points to your backend (e.g. http://your-backend:5000/api), not the frontend.',
                 'Ensure CORS is configured if frontend and backend are on different origins.'
             ]
         };

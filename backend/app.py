@@ -42,6 +42,10 @@ CONFIG = {
 # Short timeout so expired AWS creds don't hang the app
 AWS_CONFIG = Config(connect_timeout=3, read_timeout=5)
 
+# Synced Identity Center users/groups (persisted in memory; after sync-from-identity-center, Admin Users tab shows these)
+identity_center_synced_users = []
+identity_center_synced_groups = []
+
 def initialize_aws_config():
     """Fetch real AWS SSO configuration"""
     print("Initializing AWS config...")
@@ -2089,9 +2093,23 @@ def grant_access(access_request):
 
 @app.route('/api/admin/users', methods=['GET'])
 def get_users():
-    """Get all users for admin management"""
+    """Get all users for admin management. Returns Identity Center synced users if any, else fallback."""
     try:
-        # Return mock users for now - integrate with your user database
+        if identity_center_synced_users:
+            # Format for Admin Users table: first_name, last_name, email, phone, department, group, role
+            out = []
+            for u in identity_center_synced_users:
+                out.append({
+                    'first_name': u.get('first_name') or (u.get('display_name') or '').split()[0] or u.get('username', ''),
+                    'last_name': u.get('last_name') or (u.get('display_name') or '').split()[-1] if (u.get('display_name') or '').split() else '',
+                    'email': u.get('email') or u.get('username', ''),
+                    'phone': '',
+                    'department': '',
+                    'group': u.get('group', '—'),
+                    'role': 'ReadOnly'
+                })
+            return jsonify(out)
+        # Fallback when no sync has been run
         users = [
             {
                 'first_name': 'Satish',
@@ -2104,7 +2122,6 @@ def get_users():
             }
         ]
         return jsonify(users)
-        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2994,23 +3011,83 @@ def background_cleanup():
         except Exception as e:
             print(f"❌ Background cleanup error: {e}")
 
+@app.route('/api/admin/identity-center/users', methods=['GET'])
+def list_identity_center_users():
+    """List users from AWS Identity Center (live pull). Requires identity_store_id and AWS creds with identitystore:ListUsers."""
+    try:
+        identity_store_id = CONFIG.get('identity_store_id')
+        if not identity_store_id:
+            return jsonify({'error': 'Identity Store ID not configured', 'users': []}), 400
+        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        users = []
+        for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
+            for u in page.get('Users', []):
+                users.append({
+                    'user_id': u.get('UserId'),
+                    'username': u.get('UserName'),
+                    'email': (u.get('Emails') or [{}])[0].get('Value', ''),
+                    'display_name': u.get('DisplayName', ''),
+                    'first_name': (u.get('Name') or {}).get('GivenName', ''),
+                    'last_name': (u.get('Name') or {}).get('FamilyName', ''),
+                })
+        return jsonify({'users': users})
+    except Exception as e:
+        return jsonify({'error': str(e), 'users': []}), 500
+
+
+@app.route('/api/admin/identity-center/groups', methods=['GET'])
+def list_identity_center_groups():
+    """List groups from AWS Identity Center (live pull). Requires identitystore:ListGroups."""
+    try:
+        identity_store_id = CONFIG.get('identity_store_id')
+        if not identity_store_id:
+            return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
+        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        groups = []
+        for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
+            for g in page.get('Groups', []):
+                groups.append({
+                    'group_id': g.get('GroupId'),
+                    'display_name': g.get('DisplayName', ''),
+                    'description': g.get('Description', ''),
+                })
+        return jsonify({'groups': groups})
+    except Exception as e:
+        return jsonify({'error': str(e), 'groups': []}), 500
+
+
+@app.route('/api/admin/identity-center/permission-sets', methods=['GET'])
+def list_identity_center_permission_sets():
+    """List permission sets from IAM Identity Center (uses CONFIG populated by initialize_aws_config or sso-admin:ListPermissionSets)."""
+    try:
+        if not CONFIG.get('permission_sets'):
+            initialize_aws_config()
+        sets = [{'name': ps.get('name'), 'arn': ps.get('arn')} for ps in CONFIG.get('permission_sets', [])]
+        return jsonify({'permission_sets': sets})
+    except Exception as e:
+        return jsonify({'error': str(e), 'permission_sets': []}), 500
+
+
 @app.route('/api/admin/sync-from-identity-center', methods=['POST'])
 def sync_from_identity_center():
-    """Sync users and groups from AWS Identity Center"""
+    """Sync users and groups from AWS Identity Center and store for Admin Users/Groups tab."""
+    global identity_center_synced_users, identity_center_synced_groups
     try:
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
             return jsonify({'error': 'Identity Store ID not configured'}), 400
-        
+
         users, groups, status = UserSyncEngine.sync_from_identity_center(identity_store_id)
-        
+        if status.get('status') == 'success':
+            identity_center_synced_users = users
+            identity_center_synced_groups = groups
+
         return jsonify({
             'status': status['status'],
             'users': users,
             'groups': groups,
             'summary': status
         })
-        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

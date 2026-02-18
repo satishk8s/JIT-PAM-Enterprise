@@ -118,15 +118,21 @@ function showSyncFromAD() {
 
 function showSyncFromIdentityCenter() {
     if (confirm('🔄 Sync from AWS Identity Center?\n\nThis will:\n✓ Import all users from Identity Center\n✓ Import all groups\n✓ Only Identity Center users can access cloud\n\nContinue?')) {
-        fetch('http://127.0.0.1:5000/api/admin/sync-from-identity-center', {
+        var apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+        fetch(apiBase + '/admin/sync-from-identity-center', {
             method: 'POST'
         })
         .then(res => res.json())
         .then(data => {
+            if (data.error) {
+                alert('❌ Sync failed: ' + data.error);
+                return;
+            }
             if (data.status === 'success') {
-                alert(`✅ Identity Center Sync Complete!\n\nUsers synced: ${data.summary.users_synced}\nGroups synced: ${data.summary.groups_synced}`);
+                alert('✅ Identity Center Sync Complete!\n\nUsers synced: ' + (data.summary && data.summary.users_synced) + '\nGroups synced: ' + (data.summary && data.summary.groups_synced));
+                if (typeof loadUsersManagement === 'function') loadUsersManagement();
             } else {
-                alert(`❌ Sync failed: ${data.summary.error}`);
+                alert('❌ Sync failed: ' + (data.summary && data.summary.error || data.error || 'Unknown error'));
             }
         })
         .catch(err => alert('❌ Error: ' + err.message));
