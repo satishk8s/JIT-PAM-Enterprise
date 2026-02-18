@@ -324,22 +324,23 @@ async function loadPamAdmins() {
     if (!tbody) return;
     try {
         var apiBase = getAdminApiBase();
-        var res = await fetch(apiBase + '/admin/pam-admins');
+        var url = apiBase + '/admin/pam-admins';
+        var res = await fetch(url);
         var text = await res.text();
         var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
-        if (text.trim().substring(0, 50).indexOf('<') !== -1) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Backend returned HTML (status ' + res.status + '). Set <code>window.API_BASE</code> to your backend URL (e.g. https://your-host/api) and ensure the backend is running.</td></tr>';
-            return;
-        }
-        if (!contentType.includes('application/json')) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Backend returned non-JSON (status ' + res.status + '). Check API_BASE and that the backend is running.</td></tr>';
+        var looksLikeHtml = text.trim().substring(0, 50).indexOf('<') !== -1;
+        if (looksLikeHtml || !contentType.includes('application/json')) {
+            var backendExample = (window.location.port === '80' || window.location.port === '443' || !window.location.port)
+                ? (window.location.protocol + '//' + window.location.hostname + ':5000/api')
+                : (window.location.origin + '/api');
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger); padding: 12px;">Backend returned HTML or non-JSON. Requests must hit your Flask backend. In browser console run: <code style="display:block;margin:8px 0;">window.API_BASE = \'' + backendExample + '\'; location.reload();</code> Replace host/port with your backend. Then refresh this page.</td></tr>';
             return;
         }
         var data;
         try {
             data = JSON.parse(text);
         } catch (parseErr) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON from server. If you see HTML, set <code>window.API_BASE</code> to your backend base URL.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON. Set window.API_BASE to your Flask backend URL (e.g. http://YOUR_SERVER:5000/api) and refresh.</td></tr>';
             return;
         }
         var list = (data && data.pam_admins) ? data.pam_admins : [];
@@ -370,7 +371,8 @@ async function searchIdCUsersForPamAdmin() {
     resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Searching…</p>';
     try {
         var apiBase = getAdminApiBase();
-        var url = apiBase + '/admin/identity-center/users/search?q=' + encodeURIComponent(q);
+        // Use list endpoint with ?q= so filtering works even if /search path is stripped by proxy
+        var url = apiBase + '/admin/identity-center/users?q=' + encodeURIComponent(q);
         var res = await fetch(url);
         var raw = await res.text();
         var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
@@ -390,18 +392,15 @@ async function searchIdCUsersForPamAdmin() {
             return;
         }
         var users = (data && data.users) ? data.users : [];
-        // Client-side filter so we only show users matching q (handles wrong endpoint or old backend)
-        if (q) {
-            var ql = q.toLowerCase();
-            users = users.filter(function(u) {
-                var email = (u.email || '').toLowerCase();
-                var display = (u.display_name || '').toLowerCase();
-                var first = (u.first_name || '').toLowerCase();
-                var last = (u.last_name || '').toLowerCase();
-                var uname = (u.username || '').toLowerCase();
-                return email.indexOf(ql) !== -1 || display.indexOf(ql) !== -1 || first.indexOf(ql) !== -1 || last.indexOf(ql) !== -1 || uname.indexOf(ql) !== -1;
-            });
-        }
+        var ql = q.toLowerCase();
+        users = users.filter(function(u) {
+            var email = (u.email || '').toLowerCase();
+            var display = (u.display_name || '').toLowerCase();
+            var first = (u.first_name || '').toLowerCase();
+            var last = (u.last_name || '').toLowerCase();
+            var uname = (u.username || '').toLowerCase();
+            return email.indexOf(ql) !== -1 || display.indexOf(ql) !== -1 || first.indexOf(ql) !== -1 || last.indexOf(ql) !== -1 || uname.indexOf(ql) !== -1;
+        });
         if (users.length === 0) {
             resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">No Identity Center users match &quot;' + String(q).replace(/</g, '&lt;') + '&quot;.</p>';
             return;

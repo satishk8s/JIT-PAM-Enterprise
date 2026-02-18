@@ -4849,6 +4849,22 @@ def _activate_database_access_request(request_id: str) -> dict:
         return {'status': 'ACTIVE'}
 
     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+    # If instance supports IAM but request was stored as password, use IAM so permission set is created
+    if effective_auth == 'password' and req.get('iam_auth_enabled'):
+        effective_auth = 'iam'
+        req['effective_auth'] = 'iam'
+    elif effective_auth == 'password' and (req.get('db_instance_id') and req.get('db_region')):
+        try:
+            rds_profile = _resolve_rds_auth_profile(
+                instance_id=req.get('db_instance_id'),
+                region=str(req.get('db_region') or ''),
+            )
+            if rds_profile.get('iam_auth_enabled'):
+                effective_auth = 'iam'
+                req['effective_auth'] = 'iam'
+                req['iam_auth_enabled'] = True
+        except Exception:
+            pass
     duration_hours = req.get('duration_hours', 2)
     try:
         duration_hours = int(duration_hours)
