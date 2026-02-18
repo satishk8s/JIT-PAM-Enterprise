@@ -79,6 +79,110 @@ CONFIG = {
 # Short timeout so expired AWS creds don't hang the app
 AWS_CONFIG = Config(connect_timeout=3, read_timeout=5)
 
+# Optional: assume a management-account role for IAM Identity Center APIs.
+# Configure in env (preferred):
+#   IDC_ASSUME_ROLE_ARN=arn:aws:iam::<mgmt-account-id>:role/<role-name>
+#   IDC_ASSUME_ROLE_SESSION_NAME=npam-idc
+#   IDC_ASSUME_ROLE_EXTERNAL_ID=<optional>
+_IDC_ASSUME_ROLE_ARN = ''
+_IDC_ASSUMED_CREDS = {
+    'access_key': '',
+    'secret_key': '',
+    'session_token': '',
+    'exp_epoch': 0.0,
+}
+_IDC_ASSUMED_LOCK = threading.Lock()
+
+
+def _idc_assume_role_arn() -> str:
+    # Read dynamically so env changes after startup can still be picked up.
+    return str(
+        os.getenv('IDC_ASSUME_ROLE_ARN')
+        or os.getenv('PAM_IDC_ROLE_ARN')
+        or _IDC_ASSUME_ROLE_ARN
+        or ''
+    ).strip()
+
+
+def _get_idc_assumed_creds():
+    """Return cached assumed-role creds for Identity Center APIs, or None when not configured."""
+    role_arn = _idc_assume_role_arn()
+    if not role_arn:
+        return None
+
+    now = time.time()
+    with _IDC_ASSUMED_LOCK:
+        # Reuse cached credentials until 2 minutes before expiry.
+        if (
+            _IDC_ASSUMED_CREDS.get('access_key')
+            and _IDC_ASSUMED_CREDS.get('secret_key')
+            and _IDC_ASSUMED_CREDS.get('session_token')
+            and float(_IDC_ASSUMED_CREDS.get('exp_epoch') or 0) > (now + 120)
+        ):
+            return {
+                'aws_access_key_id': _IDC_ASSUMED_CREDS['access_key'],
+                'aws_secret_access_key': _IDC_ASSUMED_CREDS['secret_key'],
+                'aws_session_token': _IDC_ASSUMED_CREDS['session_token'],
+            }
+
+        params = {
+            'RoleArn': role_arn,
+            'RoleSessionName': str(os.getenv('IDC_ASSUME_ROLE_SESSION_NAME') or 'npam-idc').strip() or 'npam-idc',
+        }
+        ext_id = str(os.getenv('IDC_ASSUME_ROLE_EXTERNAL_ID') or '').strip()
+        if ext_id:
+            params['ExternalId'] = ext_id
+
+        sts = boto3.client('sts', config=AWS_CONFIG)
+        resp = sts.assume_role(**params)
+        creds = (resp or {}).get('Credentials') or {}
+
+        access_key = str(creds.get('AccessKeyId') or '').strip()
+        secret_key = str(creds.get('SecretAccessKey') or '').strip()
+        session_token = str(creds.get('SessionToken') or '').strip()
+        exp = creds.get('Expiration')
+        exp_epoch = now + 900
+        try:
+            exp_epoch = float(exp.timestamp())  # datetime from botocore
+        except Exception:
+            pass
+        if not (access_key and secret_key and session_token):
+            raise RuntimeError('AssumeRole returned empty credentials')
+
+        _IDC_ASSUMED_CREDS['access_key'] = access_key
+        _IDC_ASSUMED_CREDS['secret_key'] = secret_key
+        _IDC_ASSUMED_CREDS['session_token'] = session_token
+        _IDC_ASSUMED_CREDS['exp_epoch'] = exp_epoch
+
+        return {
+            'aws_access_key_id': access_key,
+            'aws_secret_access_key': secret_key,
+            'aws_session_token': session_token,
+        }
+
+
+def _aws_client(service_name, *, region_name=None, assume_idc_role=False):
+    kwargs = {'config': AWS_CONFIG}
+    if region_name:
+        kwargs['region_name'] = region_name
+    if assume_idc_role:
+        assumed = _get_idc_assumed_creds()
+        if assumed:
+            kwargs.update(assumed)
+    return boto3.client(service_name, **kwargs)
+
+
+def _sso_admin_client():
+    return _aws_client('sso-admin', region_name='ap-south-1', assume_idc_role=True)
+
+
+def _identitystore_client():
+    return _aws_client('identitystore', region_name='ap-south-1', assume_idc_role=True)
+
+
+def _organizations_client():
+    return _aws_client('organizations', assume_idc_role=True)
+
 # Synced Identity Center users/groups (persisted in memory; used by Management tab and for PAM admin search)
 identity_center_synced_users = []
 identity_center_synced_groups = []
@@ -263,7 +367,7 @@ def initialize_aws_config():
         
         # Get permission sets
         try:
-            sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
+            sso_admin = _sso_admin_client()
             
             permission_sets = []
             next_token = None
@@ -314,7 +418,7 @@ def initialize_aws_config():
         
         # Get accounts
         try:
-            org_client = boto3.client('organizations', config=AWS_CONFIG)
+            org_client = _organizations_client()
             accounts = []
             paginator = org_client.get_paginator('list_accounts')
             for page in paginator.paginate():
@@ -832,7 +936,7 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
 def create_custom_permission_set(name, permissions_data):
     """Create a new permission set with AI-generated permissions"""
     try:
-        sso_admin = boto3.client('sso-admin', region_name='ap-south-1')
+        sso_admin = _sso_admin_client()
         
         # Create permission set
         response = sso_admin.create_permission_set(
@@ -950,7 +1054,7 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
                 return {'error': f"Permission set creation failed: {err_msg}"}
             # Reuse existing permission set and refresh inline policy.
             try:
-                sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
+                sso_admin = _sso_admin_client()
                 existing_arn = ''
                 next_token = None
                 while True:
@@ -994,7 +1098,7 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
                 return {'error': f'Permission set update failed: {upsert_err}'}
         # Best-effort duration alignment for IAM session
         try:
-            sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
+            sso_admin = _sso_admin_client()
             sso_admin.update_permission_set(
                 InstanceArn=CONFIG['sso_instance_arn'],
                 PermissionSetArn=ps_result['arn'],
@@ -1131,7 +1235,7 @@ def _resolve_identity_center_identity(nameid='', email_hint='', hints=None):
         return {'email': out_email, 'display_name': display}
 
     try:
-        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        identitystore = _identitystore_client()
         candidates = []
         if email_hint:
             candidates.append(('Emails.Value', email_hint))
@@ -1307,7 +1411,7 @@ def _display_name_from_identity_center(email=''):
         return ''
 
     try:
-        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        identitystore = _identitystore_client()
         searches = [
             ('Emails.Value', em),
             ('UserName', em),
@@ -1490,7 +1594,7 @@ def get_permission_sets():
 @app.route('/api/debug/find-user/<email>', methods=['GET'])
 def debug_find_user(email):
     try:
-        identitystore = boto3.client('identitystore', region_name='ap-south-1')
+        identitystore = _identitystore_client()
         results = {}
         
         # Try email search
@@ -2455,8 +2559,8 @@ def revoke_access(request_id):
     # AWS / other: revoke SSO assignment
     try:
         # Revoke AWS SSO assignment
-        sso_admin = boto3.client('sso-admin', region_name='ap-south-1')
-        identitystore = boto3.client('identitystore', region_name='ap-south-1')
+        sso_admin = _sso_admin_client()
+        identitystore = _identitystore_client()
         
         # Find user
         user_response = {'Users': []}
@@ -2743,8 +2847,8 @@ def approve_request(request_id):
 def grant_access(access_request):
     """Grant AWS SSO access"""
     try:
-        sso_admin = boto3.client('sso-admin', region_name='ap-south-1')
-        identitystore = boto3.client('identitystore', region_name='ap-south-1')
+        sso_admin = _sso_admin_client()
+        identitystore = _identitystore_client()
         
         print(f"Granting access for user: {access_request['user_email']}")
         
@@ -3843,7 +3947,7 @@ def _list_idc_users_raw():
     identity_store_id = CONFIG.get('identity_store_id')
     if not identity_store_id:
         raise ValueError('Identity Store ID not configured')
-    identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+    identitystore = _identitystore_client()
     users = []
     for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
         for u in page.get('Users', []):
@@ -3912,7 +4016,7 @@ def search_identity_center_groups():
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
             return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
-        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        identitystore = _identitystore_client()
         groups = []
         for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
             for g in page.get('Groups', []):
@@ -3937,7 +4041,7 @@ def list_identity_center_groups():
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
             return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
-        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        identitystore = _identitystore_client()
         groups = []
         for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
             for g in page.get('Groups', []):
