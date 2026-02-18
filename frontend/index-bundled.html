@@ -3308,7 +3308,7 @@
             }).join(' ').trim();
         }
         function renderProfileNameFallback() {
-            var el = document.getElementById('userNameDisplay');
+            var el = document.getElementById('userNameDisplay') || document.getElementById('userName');
             if (!el) return;
             var rawName = String(localStorage.getItem('userName') || '').trim();
             var email = String(localStorage.getItem('userEmail') || '').trim();

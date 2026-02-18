@@ -2194,7 +2194,8 @@ async function approveDbRequest(requestId) {
             body: JSON.stringify({ approver_role: role })
         });
         const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const status = String(data.status || '').toLowerCase();
+        if (data.error && status !== 'approved') throw new Error(data.error);
         alert(data.message || '✅ Approved');
         focusDbRequestsStatus(data.status || 'approved');
         loadDbRequests();

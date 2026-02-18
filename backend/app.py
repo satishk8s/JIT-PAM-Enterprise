@@ -2816,28 +2816,101 @@ def grant_access(access_request):
         print(f"Found user: {user_name} (ID: {user_id})")
         
         # Create account assignment
-        account_id = CONFIG['accounts'][access_request['account_id']]['id']
+        account_key = _ensure_account_config_key(access_request.get('account_id'))
+        account_id = CONFIG['accounts'][account_key]['id']
         permission_set_arn = access_request['permission_set']
         
         print(f"Creating assignment: Account={account_id}, PermissionSet={permission_set_arn}")
-        
-        response = sso_admin.create_account_assignment(
-            InstanceArn=CONFIG['sso_instance_arn'],
-            TargetId=account_id,
-            TargetType='AWS_ACCOUNT',
-            PermissionSetArn=permission_set_arn,
-            PrincipalType='USER',
-            PrincipalId=user_id
-        )
-        
-        assignment_status = response['AccountAssignmentCreationStatus']
-        print(f"Assignment created: {assignment_status['RequestId']} - Status: {assignment_status['Status']}")
-        
-        return {
-            'success': True, 
-            'assignment_id': assignment_status['RequestId'],
-            'status': assignment_status['Status']
-        }
+
+        def _assignment_exists():
+            """Best-effort check: does this principal already have this permission set on this account?"""
+            try:
+                next_token = None
+                while True:
+                    kwargs = {
+                        'InstanceArn': CONFIG['sso_instance_arn'],
+                        'AccountId': account_id,
+                        'PermissionSetArn': permission_set_arn
+                    }
+                    if next_token:
+                        kwargs['NextToken'] = next_token
+                    page = sso_admin.list_account_assignments(**kwargs)
+                    for assignment in page.get('AccountAssignments', []) or []:
+                        if (
+                            str(assignment.get('PrincipalType') or '').upper() == 'USER'
+                            and str(assignment.get('PrincipalId') or '') == str(user_id)
+                        ):
+                            return True
+                    next_token = page.get('NextToken')
+                    if not next_token:
+                        break
+            except Exception as check_err:
+                print(f"Assignment existence check failed: {check_err}")
+            return False
+
+        def _wait_for_assignment_status(request_id, timeout_seconds=45, poll_seconds=3):
+            """Poll assignment creation status; return SUCCEEDED/FAILED/IN_PROGRESS."""
+            if not request_id:
+                return {'status': 'IN_PROGRESS'}
+            deadline = time.time() + max(5, int(timeout_seconds))
+            latest = 'IN_PROGRESS'
+            while time.time() < deadline:
+                try:
+                    desc = sso_admin.describe_account_assignment_creation_status(
+                        InstanceArn=CONFIG['sso_instance_arn'],
+                        AccountAssignmentCreationRequestId=request_id
+                    )
+                    details = desc.get('AccountAssignmentCreationStatus') or {}
+                    latest = str(details.get('Status') or latest or 'IN_PROGRESS').upper()
+                    if latest in ('SUCCEEDED', 'FAILED'):
+                        return {
+                            'status': latest,
+                            'failure_reason': str(details.get('FailureReason') or '').strip()
+                        }
+                except Exception as poll_err:
+                    print(f"Assignment status poll failed ({request_id}): {poll_err}")
+                time.sleep(max(1, int(poll_seconds)))
+            return {'status': latest}
+
+        try:
+            response = sso_admin.create_account_assignment(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                TargetId=account_id,
+                TargetType='AWS_ACCOUNT',
+                PermissionSetArn=permission_set_arn,
+                PrincipalType='USER',
+                PrincipalId=user_id
+            )
+            assignment_status = response.get('AccountAssignmentCreationStatus') or {}
+            assignment_id = str(assignment_status.get('RequestId') or '').strip()
+            status = str(assignment_status.get('Status') or 'IN_PROGRESS').upper()
+            print(f"Assignment created: {assignment_id} - Status: {status}")
+
+            # Wait briefly for a definitive result to avoid noisy transient failures in UI.
+            if assignment_id and status == 'IN_PROGRESS':
+                waited = _wait_for_assignment_status(assignment_id)
+                status = str(waited.get('status') or status).upper()
+                if status == 'FAILED':
+                    reason = str(waited.get('failure_reason') or '').strip()
+                    return {'error': f"Account assignment failed: {reason or 'unknown reason'}"}
+
+            return {
+                'success': True,
+                'assignment_id': assignment_id,
+                'status': status
+            }
+        except Exception as create_err:
+            err_txt = str(create_err)
+            err_low = err_txt.lower()
+            # Duplicate/in-progress assignment is a normal eventual-consistency case.
+            if 'conflictexception' in err_low or 'already' in err_low or 'in progress' in err_low:
+                if _assignment_exists():
+                    print("Assignment already exists; treating as success.")
+                    return {'success': True, 'assignment_id': 'existing', 'status': 'SUCCEEDED'}
+                if 'in progress' in err_low:
+                    print("Assignment already in progress; treating as pending success.")
+                    return {'success': True, 'assignment_id': 'in-progress', 'status': 'IN_PROGRESS'}
+            raise
         
     except Exception as e:
         print(f"Error granting access: {str(e)}")

@@ -493,11 +493,14 @@ function updateUIForRole() {
     }
     const displayName = rawName || 'User';
     const userNameEl = document.getElementById('userNameDisplay');
-    if (userNameEl) {
+    const legacyUserNameEl = document.getElementById('userName');
+    if (userNameEl || legacyUserNameEl) {
         var safe = String(displayName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-        userNameEl.innerHTML = isAdmin
+        const html = isAdmin
             ? '<i class="fas fa-crown profile-crown-icon" title="PAM Admin"></i> ' + safe
             : safe;
+        if (userNameEl) userNameEl.innerHTML = html;
+        if (legacyUserNameEl) legacyUserNameEl.innerHTML = html;
     }
     var directOnlyWrap = document.getElementById('profileDirectOnlyWrap');
     var loginMethod = localStorage.getItem('loginMethod') || '';
