@@ -227,7 +227,8 @@ function showDefaultLogin() {
 }
 
 function showSSOLogin() {
-    alert('Google SSO integration coming soon.\n\nYou will be redirected to Google login.');
+    var apiBase = typeof getApiBase === 'function' ? getApiBase() : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')));
+    window.location.href = apiBase + '/login';
 }
 
 function showUsernamePasswordLogin() {
