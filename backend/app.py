@@ -799,23 +799,25 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
 
 def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_name, duration_hours, auth_profile, request_id):
     """Create DB Connect permission set and assign it to user for IAM DB auth flow.
-    Permission set name: JIT-DB-<username>-<accountname> (IAM-safe).
+    Permission set name: JIT-<username>-<accountID> (IAM Identity Center safe, <=32 chars).
     Inline policy: rds-db:connect only, resource = arn:aws:rds-db:region:account:dbuser:DbiResourceId/db_username.
     """
     try:
         account_key = _ensure_account_config_key(account_id)
         account_number = CONFIG['accounts'][account_key]['id']
-        account_name = str(CONFIG['accounts'][account_key].get('name') or account_key).strip()
-        account_name_safe = re.sub(r'[^a-zA-Z0-9-]', '-', account_name)[:32].strip('-') or 'account'
+        account_id_safe = re.sub(r'[^0-9a-zA-Z-]', '', str(account_number or '').strip()) or 'account'
         region = str((auth_profile or {}).get('region') or os.getenv('AWS_REGION') or 'ap-south-1')
         db_resource_id = str((auth_profile or {}).get('db_resource_id') or '').strip()
         if not db_resource_id:
             return {'error': 'DB resource ID not available for IAM DB connect policy generation.'}
         safe_user = str(user_email or '').split('@')[0].replace('.', '-').replace('_', '-')
-        safe_user = re.sub(r'[^a-zA-Z0-9-]', '', safe_user)[:24] or 'user'
-        ps_name = f"JIT-DB-{safe_user}-{account_name_safe}"
-        if len(ps_name) > 64:
-            ps_name = f"JIT-DB-{safe_user[:16]}-{account_name_safe[:32]}"
+        safe_user = re.sub(r'[^a-zA-Z0-9-]', '', safe_user).strip('-').lower() or 'user'
+        # IAM Identity Center permission set name max is 32 chars.
+        user_max = max(4, 32 - len("JIT--") - len(account_id_safe))
+        safe_user = safe_user[:user_max]
+        ps_name = f"JIT-{safe_user}-{account_id_safe}"
+        if len(ps_name) > 32:
+            ps_name = ps_name[:32].rstrip('-')
         session_hours = max(1, min(int(duration_hours or 2), 72))
         db_connect_arn = f"arn:aws:rds-db:{region}:{account_number}:dbuser:{db_resource_id}/{db_username}"
         permissions_data = {
@@ -825,7 +827,53 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
         }
         ps_result = create_custom_permission_set(ps_name, permissions_data)
         if 'error' in ps_result:
-            return {'error': f"Permission set creation failed: {ps_result['error']}"}
+            err_msg = str(ps_result.get('error') or '')
+            if 'already exists' not in err_msg.lower():
+                return {'error': f"Permission set creation failed: {err_msg}"}
+            # Reuse existing permission set and refresh inline policy.
+            try:
+                sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
+                existing_arn = ''
+                next_token = None
+                while True:
+                    kwargs = {'InstanceArn': CONFIG['sso_instance_arn']}
+                    if next_token:
+                        kwargs['NextToken'] = next_token
+                    page = sso_admin.list_permission_sets(**kwargs)
+                    for ps_arn in page.get('PermissionSets', []) or []:
+                        try:
+                            det = sso_admin.describe_permission_set(
+                                InstanceArn=CONFIG['sso_instance_arn'],
+                                PermissionSetArn=ps_arn
+                            )
+                            if str((det.get('PermissionSet') or {}).get('Name') or '') == ps_name:
+                                existing_arn = ps_arn
+                                break
+                        except Exception:
+                            continue
+                    if existing_arn:
+                        break
+                    next_token = page.get('NextToken')
+                    if not next_token:
+                        break
+                if not existing_arn:
+                    return {'error': 'Permission set exists but could not be resolved by name.'}
+                policy_doc = {
+                    'Version': '2012-10-17',
+                    'Statement': [{
+                        'Effect': 'Allow',
+                        'Action': ['rds-db:connect'],
+                        'Resource': [db_connect_arn]
+                    }]
+                }
+                sso_admin.put_inline_policy_to_permission_set(
+                    InstanceArn=CONFIG['sso_instance_arn'],
+                    PermissionSetArn=existing_arn,
+                    InlinePolicy=json.dumps(policy_doc)
+                )
+                ps_result = {'arn': existing_arn, 'name': ps_name}
+            except Exception as upsert_err:
+                return {'error': f'Permission set update failed: {upsert_err}'}
         # Best-effort duration alignment for IAM session
         try:
             sso_admin = boto3.client('sso-admin', region_name='ap-south-1', config=AWS_CONFIG)
@@ -895,17 +943,96 @@ def _email_from_saml_session():
     user = session.get('user')
     attrs = session.get('attributes') or {}
     email = user if isinstance(user, str) else (user.get('email') or user.get('nameid') or str(user) if user else '')
-    if not email or str(email).strip().lower() == 'email' or '@' not in str(email):
-        for key in ('email', 'mail', 'Email', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'):
-            if attrs.get(key):
-                val = attrs[key]
-                email = val[0] if isinstance(val, list) and val else val
-                if email and '@' in str(email):
-                    return str(email).strip()
+    email = str(email or '').strip()
+    if not email or email.lower() == 'email' or '@' not in email:
+        keys = (
+            'email',
+            'mail',
+            'emailaddress',
+            'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress',
+            'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn',
+            'urn:oid:0.9.2342.19200300.100.1.3'
+        )
+        attrs_ci = {str(k).lower(): k for k in attrs.keys()} if isinstance(attrs, dict) else {}
+        for key in keys:
+            actual = attrs_ci.get(str(key).lower())
+            if not actual:
+                continue
+            val = attrs.get(actual)
+            val = val[0] if isinstance(val, list) and val else val
+            candidate = str(val or '').strip()
+            if candidate and '@' in candidate and candidate.lower() != 'email':
+                return candidate
     email = str(email).strip() if email else ''
     if not email or email.lower() == 'email' or '@' not in email:
         return ''
     return email
+
+
+def _display_name_from_saml_session(email=''):
+    """Return best-effort human display name from SAML attributes."""
+    attrs = session.get('attributes') or {}
+    attrs_ci = {str(k).lower(): k for k in attrs.keys()} if isinstance(attrs, dict) else {}
+
+    def _get_attr(keys):
+        for key in keys:
+            actual = attrs_ci.get(str(key).lower())
+            if not actual:
+                continue
+            val = attrs.get(actual)
+            val = val[0] if isinstance(val, list) and val else val
+            out = str(val or '').strip()
+            if out:
+                return out
+        return ''
+
+    def _clean_name(s):
+        s = re.sub(r'\s+', ' ', str(s or '').strip())
+        if not s or s.lower() in ('email', 'name', 'username', 'userid'):
+            return ''
+        return s
+
+    display = _clean_name(_get_attr((
+        'displayname',
+        'display_name',
+        'name',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name',
+        'urn:oid:2.16.840.1.113730.3.1.241',
+    )))
+    if display:
+        return display
+
+    first = _clean_name(_get_attr((
+        'givenname',
+        'given_name',
+        'firstname',
+        'first_name',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname',
+        'urn:oid:2.5.4.42',
+    )))
+    last = _clean_name(_get_attr((
+        'surname',
+        'lastname',
+        'last_name',
+        'familyname',
+        'family_name',
+        'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname',
+        'urn:oid:2.5.4.4',
+    )))
+    full = (first + ' ' + last).strip()
+    if full:
+        return full
+
+    em = str(email or '').strip()
+    if em and '@' in em:
+        local = em.split('@', 1)[0]
+        local = re.sub(r'[._-]+', ' ', local)
+        local = re.sub(r'\s+', ' ', local).strip()
+        local = _clean_name(local)
+        if local:
+            return " ".join([part.capitalize() for part in local.split(' ') if part])
+
+    return 'User'
 
 
 @app.route('/saml/complete', methods=['GET'])
@@ -920,7 +1047,7 @@ def saml_complete():
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
         email = ''
-    display_name = (email.split('@')[0].replace('.', ' ').strip() or 'User') if email else 'User'
+    display_name = _display_name_from_saml_session(email=email)
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
@@ -939,7 +1066,7 @@ def saml_complete():
 </body></html>'''
     return html % (
         json.dumps(email),
-        json.dumps(display_name if email else 'User'),
+        json.dumps(display_name or 'User'),
         json.dumps(str(is_admin).lower()),
         json.dumps('admin' if is_admin else 'user'),
     )
@@ -2087,7 +2214,9 @@ def approve_request(request_id):
             'approved_at': datetime.now().isoformat()
         })
 
-        required = set([str(r).strip().lower() for r in (access_request.get('approval_required') or []) if str(r).strip()]) or {'self'}
+        configured_required = set([str(r).strip().lower() for r in (access_request.get('approval_required') or []) if str(r).strip()]) or {'self'}
+        # Current requirement: allow self-approval path for DB requests.
+        required = {'self'} if role_norm == 'self' else configured_required
         received = set([str(a.get('approver_role') or '').strip().lower() for a in approvals_db.get(request_id, [])])
 
         if required.issubset(received):
@@ -2109,7 +2238,7 @@ def approve_request(request_id):
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
             approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
             if effective_auth == 'iam':
-                approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Credentials (expires in ~15 minutes).'
+                approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Login details (expires in ~15 minutes).'
             return jsonify({
                 'status': access_request.get('status', 'active'),
                 'message': approved_msg,
@@ -2207,29 +2336,65 @@ def grant_access(access_request):
         
         print(f"Granting access for user: {access_request['user_email']}")
         
-        # Find user by username variations
+        # Find user by email/username variations
         user_response = {'Users': []}
-        base_email = access_request['user_email']
+        base_email = str(access_request.get('user_email') or '').strip()
         username_part = base_email.split('@')[0] if '@' in base_email else base_email
         
-        username_variations = [
-            base_email,
-            f"{username_part}@Nykaa.local",
-            f"{username_part.lower()}@Nykaa.local",
-            f"{username_part.title()}@Nykaa.local"
+        search_inputs = [
+            ('Emails.Value', base_email),
+            ('UserName', base_email),
+            ('UserName', username_part),
+            ('UserName', f"{username_part}@Nykaa.local"),
+            ('UserName', f"{username_part.lower()}@Nykaa.local"),
+            ('UserName', f"{username_part.title()}@Nykaa.local")
         ]
-        
-        for username in username_variations:
+        seen = set()
+        for attr_path, attr_value in search_inputs:
+            if not attr_value:
+                continue
+            sig = f"{attr_path}:{str(attr_value).strip().lower()}"
+            if sig in seen:
+                continue
+            seen.add(sig)
             try:
                 user_response = identitystore.list_users(
                     IdentityStoreId=CONFIG['identity_store_id'],
-                    Filters=[{'AttributePath': 'UserName', 'AttributeValue': username}]
+                    Filters=[{'AttributePath': attr_path, 'AttributeValue': attr_value}]
                 )
-                print(f"Username '{username}': {len(user_response['Users'])} users found")
+                print(f"{attr_path} '{attr_value}': {len(user_response['Users'])} users found")
                 if user_response['Users']:
                     break
             except Exception as e:
-                print(f"Username '{username}' search failed: {e}")
+                print(f"{attr_path} '{attr_value}' search failed: {e}")
+
+        if (not user_response['Users']) and base_email:
+            # Final fallback: scan users and match by username/email case-insensitively.
+            try:
+                target = base_email.lower()
+                next_token = None
+                while True:
+                    kwargs = {'IdentityStoreId': CONFIG['identity_store_id']}
+                    if next_token:
+                        kwargs['NextToken'] = next_token
+                    page = identitystore.list_users(**kwargs)
+                    users = page.get('Users') or []
+                    match = None
+                    for u in users:
+                        uname = str(u.get('UserName') or '').strip().lower()
+                        emails = u.get('Emails') or []
+                        email_values = [str(x.get('Value') or '').strip().lower() for x in emails if isinstance(x, dict)]
+                        if target == uname or target in email_values:
+                            match = u
+                            break
+                    if match:
+                        user_response = {'Users': [match]}
+                        break
+                    next_token = page.get('NextToken')
+                    if not next_token:
+                        break
+            except Exception as e:
+                print(f"User scan fallback failed: {e}")
         
         if not user_response['Users']:
             return {'error': 'User not found in Identity Store'}
@@ -6332,14 +6497,17 @@ def request_database_access():
 @app.route('/api/databases/approved', methods=['GET'])
 def get_approved_databases():
     try:
-        user_email = request.args.get('user_email')
+        user_email = str(request.args.get('user_email') or '').strip().lower()
         approved_databases = []
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+        if not user_email:
+            return jsonify({'databases': approved_databases})
         
         for req_id, req in requests_db.items():
-            if (req.get('type') == 'database_access' and 
-                req.get('user_email') == user_email and 
-                str(req.get('status') or '').lower() in ('active',)):
+            status = str(req.get('status') or '').lower()
+            if (req.get('type') == 'database_access' and
+                str(req.get('user_email') or '').strip().lower() == user_email and
+                status in ('active', 'approved')):
                 
                 # Skip expired - only show databases you can actually use
                 if _is_db_request_expired(req):
@@ -6350,8 +6518,8 @@ def get_approved_databases():
                     masked_username = _mask_secret(req.get('db_username', ''), visible=2)
                     approved_databases.append({
                         'request_id': req_id,
-                        'db_name': db['name'],
-                        'engine': db['engine'],
+                        'db_name': db.get('name', ''),
+                        'engine': db.get('engine', ''),
                         # Never expose the real DB endpoint to users. Always show the proxy endpoint.
                         'host': proxy_host,
                         'port': proxy_port,
@@ -6361,7 +6529,7 @@ def get_approved_databases():
                         'auth_mode': req.get('auth_mode', 'password_only'),
                         'iam_permission_set_name': req.get('iam_permission_set_name', ''),
                         'credentials_note': (
-                            'Generate an IAM token under Credentials when you need to connect (valid ~15 minutes).'
+                            'Generate an IAM token under Login details when you need to connect (valid ~15 minutes).'
                             if effective_auth == 'iam'
                             else 'Temporary username/password available in this request.'
                         ),

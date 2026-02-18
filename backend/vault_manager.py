@@ -188,7 +188,7 @@ class VaultManager:
         """
         Generate a Vault `username_template` that embeds the requester identity.
 
-        Target format (example): D-jit_<user>-<rid>-<rand>
+        Target format (example): d-<user>-<rid>-<rand>
         Must respect engine identifier limits (MySQL users: 32 chars; Postgres: 63).
         """
         user_frag = VaultManager._normalize_user_fragment(requester)[:12].replace("_", "-")
@@ -202,7 +202,7 @@ class VaultManager:
         rand_len = 4
         suffix = f"-{{{{random {rand_len}}}}}"
 
-        base = f"D-jit_{user_frag}-{rid_short}"
+        base = f"d-{user_frag}-{rid_short}"
         # Account for the rendered random suffix length (e.g. "-abcd" is 1+4 chars),
         # not the literal template text length (e.g. "-{{random 4}}").
         base_max = max_len - (1 + rand_len)

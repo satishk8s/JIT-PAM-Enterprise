@@ -1432,6 +1432,7 @@ async function submitStructuredDbRequest() {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+        focusDbRequestsStatus(data.status);
         loadDbRequests();
         refreshApprovedDatabases();
         alert(`Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nTrack it under My Requests > Databases.`);
@@ -1950,6 +1951,7 @@ async function submitDbRequestViaAi(opts = {}) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         closeDbAiPanel();
+        focusDbRequestsStatus(data.status);
         loadDbRequests();
         refreshApprovedDatabases();
         var msg = `Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nPlease check the approval status under My Requests tab in Databases.`;
@@ -1964,6 +1966,26 @@ function filterDbRequests(status) {
     dbStatusFilter = (status || 'active');
     dbRequestsPage = 1;
     loadDbRequests();
+}
+
+function mapDbLifecycleToUiStatus(status) {
+    const s = String(status || '').trim().toLowerCase();
+    if (!s) return 'pending';
+    if (s === 'active') return 'active';
+    if (s === 'approved') return 'approved';
+    if (s === 'pending') return 'pending';
+    if (s === 'rejected' || s === 'denied' || s === 'failed') return 'rejected';
+    if (s === 'expired' || s === 'revoked') return 'expired';
+    return s;
+}
+
+function focusDbRequestsStatus(status) {
+    dbStatusFilter = mapDbLifecycleToUiStatus(status);
+    dbRequestsPage = 1;
+    document.querySelectorAll('.requests-status-btn[data-category="databases"]').forEach(btn => {
+        btn.classList.remove('requests-status-glow');
+        if (btn.dataset.status === dbStatusFilter) btn.classList.add('requests-status-glow');
+    });
 }
 
 function onDbRequestsSearchChange() {
@@ -2079,8 +2101,8 @@ async function loadDbRequests() {
                         <button class="btn-secondary btn-sm" onclick="viewDbRequestDetails('${requestIdEsc}')"><i class="fas fa-circle-info"></i> View</button>
                         ${isActive ? `
                             <button class="btn-primary btn-sm" onclick="connectToDatabase('${String(db?.host || '').replace(/'/g, "\\'")}', '${String(db?.port || '').replace(/'/g, "\\'")}', '${eng.replace(/'/g, "\\'")}', '${requestIdEsc}', '${firstDbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
-                            <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Credentials</button>
-                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-key"></i> Get credentials</button>
+                            <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Login details</button>
+                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-key"></i> Get login details</button>
                         ` : ''}
                         ${req.status === 'approved' ? `
                             <button class="btn-secondary btn-sm" onclick="retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>
@@ -2122,18 +2144,17 @@ async function denyDbRequest(requestId) {
 }
 
 async function approveDbRequest(requestId) {
-    if (!confirm('Approve this database access request?')) return;
-    const role = (prompt('Approve as which role? (manager, db_owner, ciso)', 'manager') || '').trim().toLowerCase();
-    if (!role) return;
+    if (!confirm('Approve this database access request as self-approval?')) return;
     try {
         const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ approver_role: role })
+            body: JSON.stringify({ approver_role: 'self' })
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
         alert(data.message || '✅ Approved');
+        focusDbRequestsStatus(data.status || 'approved');
         loadDbRequests();
         refreshApprovedDatabases();
         if (typeof loadRequests === 'function') loadRequests();
@@ -2157,6 +2178,7 @@ async function retryDbActivation(requestId) {
             throw new Error(data.error);
         }
         alert(data.message || 'Activation requested.');
+        focusDbRequestsStatus(data.status || 'active');
         loadDbRequests();
         refreshApprovedDatabases();
     } catch (e) {
@@ -2346,7 +2368,7 @@ async function openDbExternalToolModal(requestId) {
           <div class="db-modal">
             <div class="db-modal-header">
               <div class="db-modal-title">
-                <span class="db-modal-title-main">Get credentials</span>
+                <span class="db-modal-title-main">Get login details</span>
                 <span class="db-modal-sub">Request: <code>${escapeHtml(requestId)}</code></span>
               </div>
               <button class="btn-icon" onclick="closeDbExternalToolModal()" title="Close"><i class="fas fa-times"></i></button>
@@ -2486,7 +2508,7 @@ async function refreshApprovedDatabases() {
                 ? `<span class="badge">IAM</span> <code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`
                 : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`;
             const actionBtn = `
-                <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> Get credentials</button>
+                <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> Get login details</button>
                 <button class="btn-secondary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
             `;
             return `<tr>

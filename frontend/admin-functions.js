@@ -1,7 +1,11 @@
 // Admin Functions - User, Group & Role Management (PAM RBAC)
 
 // API base (works behind nginx reverse-proxy and localhost dev)
-window.API_BASE = window.API_BASE || 'http://127.0.0.1:5000/api';
+window.API_BASE = window.API_BASE || (
+    (!window.location.port || window.location.port === '80' || window.location.port === '443')
+        ? (window.location.origin + '/api')
+        : (window.location.protocol + '//' + window.location.hostname + ':5000/api')
+);
 
 // Default groups and roles: readaccess, manager, admin (attach role when creating user/group)
 window.USER_MGMT_GROUPS = window.USER_MGMT_GROUPS || [
@@ -178,7 +182,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 role: role,
                 group: group
             };
-            fetch((window.API_BASE || 'http://127.0.0.1:5000/api') + '/admin/create-user', {
+            fetch(getAdminApiBase() + '/admin/create-user', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(userData)
@@ -320,30 +324,58 @@ function getAdminApiBase() {
     return window.location.protocol + '//' + window.location.hostname + ':5000/api';
 }
 
+function getAdminApiCandidates() {
+    var out = [];
+    var preferred = getAdminApiBase();
+    if (preferred) out.push(preferred);
+
+    var originApi = (window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api';
+    out.push(originApi);
+
+    var backendApi = window.location.protocol + '//' + window.location.hostname + ':5000/api';
+    out.push(backendApi);
+
+    var dedup = [];
+    out.forEach(function(v) {
+        var s = String(v || '').replace(/\/+$/, '');
+        if (s && dedup.indexOf(s) === -1) dedup.push(s);
+    });
+    return dedup;
+}
+
+async function fetchAdminJson(path, options) {
+    var candidates = getAdminApiCandidates();
+    var lastError = null;
+
+    for (var i = 0; i < candidates.length; i++) {
+        var base = candidates[i];
+        try {
+            var res = await fetch(base + path, options || {});
+            var text = await res.text();
+            var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+            var trimmed = (text || '').trim().toLowerCase();
+            var looksLikeHtml = trimmed.startsWith('<!doctype') || trimmed.startsWith('<html') || trimmed.startsWith('<');
+            if (!contentType.includes('application/json') || looksLikeHtml) {
+                lastError = new Error('Server returned non-JSON.');
+                continue;
+            }
+            var data = text ? JSON.parse(text) : {};
+            if (window.API_BASE !== base) window.API_BASE = base;
+            return { data: data, response: res, apiBase: base };
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    throw (lastError || new Error('Backend unavailable'));
+}
+
 async function loadPamAdmins() {
     var tbody = document.getElementById('usersTableBody');
     if (!tbody) return;
     try {
-        var apiBase = getAdminApiBase();
-        var url = apiBase + '/admin/pam-admins';
-        var res = await fetch(url);
-        var text = await res.text();
-        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
-        var looksLikeHtml = text.trim().substring(0, 50).indexOf('<') !== -1;
-        if (looksLikeHtml || !contentType.includes('application/json')) {
-            var backendExample = (window.location.port === '80' || window.location.port === '443' || !window.location.port)
-                ? (window.location.protocol + '//' + window.location.hostname + ':5000/api')
-                : (window.location.origin + '/api');
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger); padding: 12px;">Backend returned HTML or non-JSON. Requests must hit your Flask backend. In browser console run: <code style="display:block;margin:8px 0;">window.API_BASE = \'' + backendExample + '\'; location.reload();</code> Replace host/port with your backend. Then refresh this page.</td></tr>';
-            return;
-        }
-        var data;
-        try {
-            data = JSON.parse(text);
-        } catch (parseErr) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON. Set window.API_BASE to your Flask backend URL (e.g. http://YOUR_SERVER:5000/api) and refresh.</td></tr>';
-            return;
-        }
+        var result = await fetchAdminJson('/admin/pam-admins');
+        var data = result.data || {};
         var list = (data && data.pam_admins) ? data.pam_admins : [];
         if (list.length === 0) {
             tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">No PAM admins yet. Search Identity Center users above and add them with a role.</td></tr>';
@@ -371,23 +403,9 @@ async function searchIdCUsersForPamAdmin() {
     }
     resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Searching…</p>';
     try {
-        var apiBase = getAdminApiBase();
         // Use list endpoint with ?q= so filtering works even if /search path is stripped by proxy
-        var url = apiBase + '/admin/identity-center/users?q=' + encodeURIComponent(q);
-        var res = await fetch(url);
-        var raw = await res.text();
-        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
-        if (!contentType.includes('application/json')) {
-            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Server returned non-JSON. Check backend is running and API_BASE is correct. Status: ' + res.status + '</p>';
-            return;
-        }
-        var data;
-        try {
-            data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        } catch (parseErr) {
-            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Server returned invalid JSON. Check backend.</p>';
-            return;
-        }
+        var result = await fetchAdminJson('/admin/identity-center/users?q=' + encodeURIComponent(q));
+        var data = result.data || {};
         if (data && data.error) {
             resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">' + (data.error || 'Backend error') + '</p>';
             return;
@@ -432,13 +450,12 @@ async function addPamAdmin(email, role) {
     if (!email || email === '—') return;
     role = role || 'Admin';
     try {
-        var apiBase = getAdminApiBase();
-        var res = await fetch(apiBase + '/admin/pam-admins', {
+        var result = await fetchAdminJson('/admin/pam-admins', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: email, role: role })
         });
-        var data = await res.json();
+        var data = result.data || {};
         if (data.error) { alert('Error: ' + data.error); return; }
         if (data.status === 'already_added') { alert('User is already a PAM admin.'); }
         loadPamAdmins();
@@ -452,9 +469,8 @@ async function addPamAdmin(email, role) {
 async function removePamAdmin(email) {
     if (!email || !confirm('Remove this user from PAM admins?')) return;
     try {
-        var apiBase = getAdminApiBase();
-        var res = await fetch(apiBase + '/admin/pam-admins/' + encodeURIComponent(email), { method: 'DELETE' });
-        var data = await res.json();
+        var result = await fetchAdminJson('/admin/pam-admins/' + encodeURIComponent(email), { method: 'DELETE' });
+        var data = result.data || {};
         if (data.error) { alert('Error: ' + data.error); return; }
         loadPamAdmins();
     } catch (e) {
@@ -466,9 +482,8 @@ async function removePamAdmin(email) {
 async function loadUsersManagement() {
     loadPamAdmins();
     try {
-        var apiBase = getAdminApiBase();
-        var response = await fetch(apiBase + '/admin/users');
-        var data = await response.json();
+        var result = await fetchAdminJson('/admin/users');
+        var data = result.data || {};
         if (Array.isArray(data)) {
             window.USER_MGMT_USERS = data;
         } else if (data && data.error) {
