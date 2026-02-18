@@ -965,8 +965,89 @@ def _email_from_saml_session():
                 return candidate
     email = str(email).strip() if email else ''
     if not email or email.lower() == 'email' or '@' not in email:
+        # Last-resort scan: some IdPs send email in non-standard claim keys.
+        try:
+            for v in attrs.values() if isinstance(attrs, dict) else []:
+                vals = v if isinstance(v, list) else [v]
+                for x in vals:
+                    cand = str(x or '').strip()
+                    if cand and '@' in cand and cand.lower() != 'email':
+                        return cand
+        except Exception:
+            pass
         return ''
     return email
+
+
+def _resolve_identity_center_identity(nameid='', email_hint=''):
+    """
+    Best-effort resolution from AWS Identity Center user record.
+    Returns: {'email': str, 'display_name': str}
+    """
+    identity_store_id = str(CONFIG.get('identity_store_id') or '').strip()
+    if not identity_store_id:
+        return {'email': '', 'display_name': ''}
+
+    def _from_user(u):
+        if not isinstance(u, dict):
+            return {'email': '', 'display_name': ''}
+        out_email = ''
+        emails = u.get('Emails') or []
+        for e in emails:
+            if isinstance(e, dict):
+                ev = str(e.get('Value') or '').strip()
+                if ev and '@' in ev:
+                    out_email = ev
+                    break
+        display = str(u.get('DisplayName') or '').strip()
+        if not display:
+            n = u.get('Name') or {}
+            display = (str(n.get('GivenName') or '').strip() + ' ' + str(n.get('FamilyName') or '').strip()).strip()
+        return {'email': out_email, 'display_name': display}
+
+    try:
+        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        candidates = []
+        if email_hint:
+            candidates.append(('Emails.Value', email_hint))
+            candidates.append(('UserName', email_hint))
+            if '@' in email_hint:
+                candidates.append(('UserName', email_hint.split('@', 1)[0]))
+        if nameid:
+            candidates.append(('UserName', nameid))
+            # Some NameID values are UserId-like; describe_user may work.
+            try:
+                u = identitystore.describe_user(
+                    IdentityStoreId=identity_store_id,
+                    UserId=str(nameid)
+                )
+                if isinstance(u, dict) and u.get('UserId'):
+                    return _from_user(u)
+            except Exception:
+                pass
+
+        seen = set()
+        for attr_path, attr_value in candidates:
+            v = str(attr_value or '').strip()
+            if not v:
+                continue
+            sig = f"{attr_path}:{v.lower()}"
+            if sig in seen:
+                continue
+            seen.add(sig)
+            try:
+                resp = identitystore.list_users(
+                    IdentityStoreId=identity_store_id,
+                    Filters=[{'AttributePath': attr_path, 'AttributeValue': v}]
+                )
+                users = resp.get('Users') or []
+                if users:
+                    return _from_user(users[0])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {'email': '', 'display_name': ''}
 
 
 def _display_name_from_saml_session(email=''):
@@ -1115,13 +1196,21 @@ def saml_complete():
     isAdmin is determined only by PAM admins list (who can manage this PAM), not by SAML attributes."""
     if not session.get('user'):
         return redirect('/')
+    nameid = str(session.get('user') or '').strip()
     email = _email_from_saml_session()
+    idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
+    if not email:
+        email = str(idc_identity.get('email') or '').strip()
     pam_admins = _load_pam_admins()
     is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
         email = ''
-    display_name = _display_name_from_identity_center(email=email) or _display_name_from_saml_session(email=email)
+    display_name = (
+        str(idc_identity.get('display_name') or '').strip()
+        or _display_name_from_identity_center(email=email)
+        or _display_name_from_saml_session(email=email)
+    )
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
@@ -1144,6 +1233,50 @@ def saml_complete():
         json.dumps(str(is_admin).lower()),
         json.dumps('admin' if is_admin else 'user'),
     )
+
+
+@app.route('/api/saml/profile', methods=['GET'])
+def saml_profile():
+    """
+    Return current SAML session identity for frontend hydration/recovery.
+    Helps when localStorage has fallback values like "User" or blank email.
+    """
+    try:
+        if not session.get('user'):
+            return jsonify({
+                'logged_in': False,
+                'email': '',
+                'display_name': '',
+                'is_admin': False
+            })
+
+        nameid = str(session.get('user') or '').strip()
+        email = _email_from_saml_session()
+        idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
+        if not email:
+            email = str(idc_identity.get('email') or '').strip()
+        if not email or str(email).lower() == 'email':
+            email = ''
+
+        display_name = (
+            str(idc_identity.get('display_name') or '').strip()
+            or _display_name_from_identity_center(email=email)
+            or _display_name_from_saml_session(email=email)
+            or 'User'
+        )
+
+        pam_admins = _load_pam_admins()
+        is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
+
+        return jsonify({
+            'logged_in': True,
+            'email': email,
+            'display_name': display_name,
+            'is_admin': bool(is_admin),
+            'role': 'admin' if is_admin else 'user'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'logged_in': False}), 500
 
 
 @app.route('/api/accounts', methods=['GET'])
@@ -6642,6 +6775,29 @@ def get_database_request_credentials(request_id):
             return jsonify({'error': 'Request expired'}), 400
 
         effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+        # If approved but credentials are not materialized yet, try one activation pass on-demand.
+        if status == 'approved':
+            needs_activation = False
+            if effective_auth == 'iam':
+                needs_activation = not str(req.get('db_username') or '').strip()
+            else:
+                pwd_probe = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
+                needs_activation = (not str(req.get('db_username') or '').strip()) or (not pwd_probe)
+
+            if needs_activation:
+                result = _activate_database_access_request(request_id)
+                if result.get('error'):
+                    safe_msg, _safe_code = _public_db_activation_error(result['error'])
+                    return jsonify({
+                        'status': 'approved',
+                        'message': '✅ Approved. Activation is pending. Please retry in a few minutes.',
+                        'error': safe_msg
+                    }), 400
+                req = requests_db.get(request_id, req)
+                status = str(req.get('status') or '').lower()
+                if status not in ('active', 'approved'):
+                    return jsonify({'error': 'Request is not active yet'}), 400
+
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         if not proxy_host or proxy_host == 'proxy-not-configured':
             return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500

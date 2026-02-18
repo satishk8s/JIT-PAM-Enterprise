@@ -24,6 +24,43 @@ function setPamAdminFromApi(email) {
         .catch(function() {});
 }
 
+let ssoProfileSyncInFlight = false;
+async function syncSsoProfileFromSession() {
+    if (ssoProfileSyncInFlight || typeof fetch === 'undefined') return;
+    ssoProfileSyncInFlight = true;
+    try {
+        const res = await fetch(API_BASE_FOR_ADMIN + '/saml/profile');
+        const data = await res.json();
+        if (!data || data.logged_in !== true) return;
+
+        const email = String(data.email || '').trim();
+        const displayName = String(data.display_name || '').trim();
+        const isAdminFromSession = data.is_admin === true;
+
+        if (email) localStorage.setItem('userEmail', email);
+        if (displayName) localStorage.setItem('userName', displayName);
+        localStorage.setItem('loginMethod', 'sso');
+        localStorage.setItem('isLoggedIn', 'true');
+        localStorage.setItem('isAdmin', String(isAdminFromSession));
+        localStorage.setItem('userRole', isAdminFromSession ? 'admin' : 'user');
+
+        isAdmin = isAdminFromSession;
+        currentUser = {
+            email: email || (localStorage.getItem('userEmail') || ''),
+            name: displayName || (localStorage.getItem('userName') || 'User'),
+            isAdmin: isAdminFromSession
+        };
+
+        if (email) setPamAdminFromApi(email);
+        if (typeof updateUIForRole === 'function') updateUIForRole();
+        if (typeof checkAdminAccess === 'function') checkAdminAccess();
+    } catch (_) {
+        // Keep existing localStorage identity if session hydration fails.
+    } finally {
+        ssoProfileSyncInFlight = false;
+    }
+}
+
 // API Base URL - use /api when on port 80 (nginx proxy), else hostname:5000
 // Override: set window.API_BASE before app.js loads
 const API_BASE = (typeof window !== 'undefined' && window.API_BASE)
@@ -85,6 +122,12 @@ document.addEventListener('DOMContentLoaded', function() {
         showMainApp();
         var storedEmail = localStorage.getItem('userEmail');
         if (storedEmail) setPamAdminFromApi(storedEmail);
+        if ((localStorage.getItem('loginMethod') || '') === 'sso') {
+            var storedName = (localStorage.getItem('userName') || '').trim();
+            if (!storedEmail || !storedName || storedName.toLowerCase() === 'user') {
+                syncSsoProfileFromSession();
+            }
+        }
         if (window.location.hash === '#admin' && localStorage.getItem('isAdmin') === 'true') {
             setTimeout(function() { showPage('admin'); }, 100);
         }
@@ -334,6 +377,14 @@ function showMainApp() {
             name: userEmail.split('@')[0],
             isAdmin: isAdmin
         };
+    }
+
+    // SSO fallback: recover email/display name/admin from active SAML session when storage is incomplete.
+    if ((localStorage.getItem('loginMethod') || '') === 'sso') {
+        const storedName = (localStorage.getItem('userName') || '').trim();
+        if (!userEmail || !storedName || storedName.toLowerCase() === 'user') {
+            syncSsoProfileFromSession();
+        }
     }
     
     // User portal: skip admin-specific setup

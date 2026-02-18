@@ -2215,10 +2215,11 @@ async function copyToClipboard(text) {
     }
 }
 
-async function fetchDbCredentials(requestId) {
+async function fetchDbCredentials(requestId, opts = {}) {
     const rid = String(requestId || '').trim();
     if (!rid) throw new Error('Missing request id');
-    if (dbCredCache[rid]?.data) {
+    const forceRefresh = !!opts.forceRefresh;
+    if (!forceRefresh && dbCredCache[rid]?.data) {
         const cached = dbCredCache[rid].data;
         const isIam = String(cached?.effective_auth || '').toLowerCase() === 'iam';
         // IAM tokens are short-lived; refresh frequently to avoid stale tokens.
@@ -2229,9 +2230,73 @@ async function fetchDbCredentials(requestId) {
     const userEmail = localStorage.getItem('userEmail') || '';
     const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(rid)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
     const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    if (data.error) {
+        const msg = [data.error, data.message].filter(Boolean).join(' ').trim() || data.error;
+        throw new Error(msg);
+    }
     dbCredCache[rid] = { data, fetchedAt: Date.now() };
     return data;
+}
+
+function isDbCredentialPreparingMessage(message) {
+    const msg = String(message || '').toLowerCase();
+    return (
+        msg.includes('credentials are not available') ||
+        msg.includes('request is not active yet') ||
+        msg.includes('activation is pending') ||
+        msg.includes('retry in a few minutes') ||
+        msg.includes('approved. activation is pending')
+    );
+}
+
+function renderDbPreparingHtml(secondsElapsed, details) {
+    const sec = Math.max(0, parseInt(secondsElapsed || 0, 10) || 0);
+    const msg = details
+        ? escapeHtml(String(details))
+        : 'This can take up to 2-3 minutes while access is being prepared.';
+    return `
+        <div class="db-cred-loading">
+            <i class="fas fa-spinner fa-spin"></i>
+            Preparing access...
+            <div class="db-step-hint" style="margin-top:6px;">${msg}</div>
+            <div class="db-step-hint" style="margin-top:2px; opacity:0.85;">Elapsed: ${sec}s</div>
+        </div>
+    `;
+}
+
+async function fetchDbCredentialsWithPreparation(requestId, opts = {}) {
+    const rid = String(requestId || '').trim();
+    if (!rid) throw new Error('Missing request id');
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? Number(opts.timeoutMs) : 180000; // 3 minutes
+    const intervalMs = Number.isFinite(opts.intervalMs) ? Number(opts.intervalMs) : 4000;
+    const onPreparing = typeof opts.onPreparing === 'function' ? opts.onPreparing : null;
+    const startedAt = Date.now();
+    let attempt = 0;
+    let forceRefresh = false;
+
+    while (true) {
+        attempt += 1;
+        try {
+            return await fetchDbCredentials(rid, { forceRefresh });
+        } catch (e) {
+            const raw = String((e && e.message) || e || '');
+            if (!isDbCredentialPreparingMessage(raw)) throw e;
+            const elapsedMs = Date.now() - startedAt;
+            if (onPreparing) {
+                onPreparing({
+                    attempt,
+                    elapsedMs,
+                    elapsedSec: Math.floor(elapsedMs / 1000),
+                    message: raw
+                });
+            }
+            if (elapsedMs >= timeoutMs) {
+                throw new Error('Access is still being prepared. Please retry in a minute.');
+            }
+            forceRefresh = true;
+            await new Promise(resolve => setTimeout(resolve, intervalMs));
+        }
+    }
 }
 
 function renderDbCredentialsInline(containerEl, creds) {
@@ -2296,11 +2361,17 @@ async function toggleDbCredInline(requestId) {
     }
 
     el.style.display = 'block';
-    el.innerHTML = `<div class="db-cred-loading"><i class="fas fa-spinner fa-spin"></i> Loading credentials…</div>`;
+    el.innerHTML = renderDbPreparingHtml(0);
     el.dataset.reqid = domId;
 
     try {
-        const creds = await fetchDbCredentials(rid);
+        const creds = await fetchDbCredentialsWithPreparation(rid, {
+            onPreparing: (info) => {
+                if (el.style.display === 'block') {
+                    el.innerHTML = renderDbPreparingHtml(info.elapsedSec, 'Waiting for DB user and permissions to finish provisioning.');
+                }
+            }
+        });
         renderDbCredentialsInline(el, creds);
     } catch (e) {
         el.innerHTML = `<div class="db-cred-error">Failed to load credentials: ${escapeHtml(safeUserFacingErrorMessage(e))}</div>`;
@@ -2309,16 +2380,39 @@ async function toggleDbCredInline(requestId) {
 
 async function openDbExternalToolModal(requestId) {
     if (!requestId) return;
-    const userEmail = localStorage.getItem('userEmail') || '';
-    try {
-        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+    closeDbExternalToolModal();
+    const modal = document.createElement('div');
+    modal.id = 'dbExternalToolModal';
+    modal.className = 'db-modal-wrap';
+    const requestIdEsc = String(requestId).replace(/'/g, "\\'");
+    modal.innerHTML = `
+      <div class="db-modal-backdrop" onclick="closeDbExternalToolModal()"></div>
+      <div class="db-modal">
+        <div class="db-modal-header">
+          <div class="db-modal-title">
+            <span class="db-modal-title-main">Get login details</span>
+            <span class="db-modal-sub">Request: <code>${escapeHtml(String(requestId))}</code></span>
+          </div>
+          <button class="btn-icon" onclick="closeDbExternalToolModal()" title="Close"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="db-modal-body" id="dbExternalToolModalBody">
+          ${renderDbPreparingHtml(0, 'Preparing DB access and credentials. This may take a few minutes.')}
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
 
-        closeDbExternalToolModal();
-        const modal = document.createElement('div');
-        modal.id = 'dbExternalToolModal';
-        modal.className = 'db-modal-wrap';
+    try {
+        const data = await fetchDbCredentialsWithPreparation(requestId, {
+            onPreparing: (info) => {
+                const body = document.getElementById('dbExternalToolModalBody');
+                if (!body) return;
+                body.innerHTML = renderDbPreparingHtml(
+                    info.elapsedSec,
+                    'Waiting for DB user, policy assignment, and credential activation.'
+                );
+            }
+        });
 
         const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
         const proxyHost = data.proxy_host || '—';
@@ -2388,9 +2482,21 @@ async function openDbExternalToolModal(requestId) {
             </div>
           </div>
         `;
-        document.body.appendChild(modal);
     } catch (e) {
-        alert('Failed to load credentials: ' + safeUserFacingErrorMessage(e));
+        const body = document.getElementById('dbExternalToolModalBody');
+        const msg = safeUserFacingErrorMessage(e);
+        if (body) {
+            body.innerHTML = `
+                <div class="db-cred-error">Failed to load credentials: ${escapeHtml(msg)}</div>
+                <div style="margin-top:10px;">
+                    <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')">
+                        <i class="fas fa-rotate-right"></i> Retry
+                    </button>
+                </div>
+            `;
+        } else {
+            alert('Failed to load credentials: ' + msg);
+        }
     }
 }
 
