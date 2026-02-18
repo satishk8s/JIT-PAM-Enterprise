@@ -325,7 +325,19 @@ async function loadPamAdmins() {
     try {
         var apiBase = getAdminApiBase();
         var res = await fetch(apiBase + '/admin/pam-admins');
-        var data = await res.json();
+        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+        var text = await res.text();
+        if (!contentType.includes('application/json')) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Backend returned non-JSON (status ' + res.status + '). Check API_BASE and that the backend is running.</td></tr>';
+            return;
+        }
+        var data;
+        try {
+            data = JSON.parse(text);
+        } catch (parseErr) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON from server.</td></tr>';
+            return;
+        }
         var list = (data && data.pam_admins) ? data.pam_admins : [];
         if (list.length === 0) {
             tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">No PAM admins yet. Search Identity Center users above and add them with a role.</td></tr>';
@@ -354,7 +366,7 @@ async function searchIdCUsersForPamAdmin() {
     resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Searching…</p>';
     try {
         var apiBase = getAdminApiBase();
-        var url = apiBase + '/admin/identity-center/users?search=' + encodeURIComponent(q);
+        var url = apiBase + '/admin/identity-center/users/search?q=' + encodeURIComponent(q);
         var res = await fetch(url);
         var contentType = res.headers.get('Content-Type') || '';
         if (!contentType.toLowerCase().includes('application/json')) {

@@ -3178,36 +3178,66 @@ def background_cleanup():
         except Exception as e:
             print(f"❌ Background cleanup error: {e}")
 
+def _list_idc_users_raw():
+    """Fetch all users from Identity Center. Returns list of dicts or raises."""
+    identity_store_id = CONFIG.get('identity_store_id')
+    if not identity_store_id:
+        raise ValueError('Identity Store ID not configured')
+    identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+    users = []
+    for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
+        for u in page.get('Users', []):
+            email = (u.get('Emails') or [{}])[0].get('Value', '')
+            display_name = u.get('DisplayName', '')
+            first_name = (u.get('Name') or {}).get('GivenName', '')
+            last_name = (u.get('Name') or {}).get('FamilyName', '')
+            users.append({
+                'user_id': u.get('UserId'),
+                'username': u.get('UserName'),
+                'email': email,
+                'display_name': display_name,
+                'first_name': first_name,
+                'last_name': last_name,
+            })
+    return users
+
+
+@app.route('/api/admin/identity-center/users/search', methods=['GET'])
+def search_identity_center_users():
+    """Search Identity Center users by name or email. Requires ?q= (min 1 char). Used by Admin PAM search."""
+    try:
+        q = (request.args.get('q') or request.args.get('search') or '').strip()
+        if not q:
+            return jsonify({'error': 'Query parameter q or search is required (e.g. ?q=satish)', 'users': []}), 400
+        users = _list_idc_users_raw()
+        q_lower = q.lower()
+        users = [u for u in users
+                 if q_lower in (u.get('email') or '').lower()
+                 or q_lower in (u.get('display_name') or '').lower()
+                 or q_lower in (u.get('first_name') or '').lower()
+                 or q_lower in (u.get('last_name') or '').lower()
+                 or q_lower in (u.get('username') or '').lower()]
+        return jsonify({'users': users})
+    except ValueError as e:
+        return jsonify({'error': str(e), 'users': []}), 400
+    except Exception as e:
+        return jsonify({'error': str(e), 'users': []}), 500
+
+
 @app.route('/api/admin/identity-center/users', methods=['GET'])
 def list_identity_center_users():
     """List users from AWS Identity Center (live pull). Optional ?search= filters by name/email (case-insensitive)."""
     try:
-        identity_store_id = CONFIG.get('identity_store_id')
-        if not identity_store_id:
-            return jsonify({'error': 'Identity Store ID not configured', 'users': []}), 400
-        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
-        users = []
-        for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
-            for u in page.get('Users', []):
-                email = (u.get('Emails') or [{}])[0].get('Value', '')
-                display_name = u.get('DisplayName', '')
-                first_name = (u.get('Name') or {}).get('GivenName', '')
-                last_name = (u.get('Name') or {}).get('FamilyName', '')
-                users.append({
-                    'user_id': u.get('UserId'),
-                    'username': u.get('UserName'),
-                    'email': email,
-                    'display_name': display_name,
-                    'first_name': first_name,
-                    'last_name': last_name,
-                })
-        search = (request.args.get('search') or '').strip()
+        users = _list_idc_users_raw()
+        search = (request.args.get('search') or request.args.get('q') or '').strip()
         if search:
             q = search.lower()
             users = [u for u in users if q in (u.get('email') or '').lower() or q in (u.get('display_name') or '').lower()
                      or q in (u.get('first_name') or '').lower() or q in (u.get('last_name') or '').lower()
                      or q in (u.get('username') or '').lower()]
         return jsonify({'users': users})
+    except ValueError as e:
+        return jsonify({'error': str(e), 'users': []}), 400
     except Exception as e:
         return jsonify({'error': str(e), 'users': []}), 500
 
@@ -4734,6 +4764,15 @@ def _resolve_account_environment(account_id):
     return 'nonprod'
 
 
+def _resolve_requester_for_vault(req):
+    """Return a safe requester string for Vault username template. Avoid literal 'Email' or invalid emails."""
+    email = str(req.get('user_email') or '').strip()
+    if email and '@' in email and email.lower() != 'email':
+        return email
+    rid = str(req.get('id') or '')[:12]
+    return 'req-' + (rid or 'unknown') if rid else 'req-unknown'
+
+
 def _is_db_request_expired(req, now=None):
     """DB access TTL starts at activation; pending requests should not be treated as expired."""
     if not isinstance(req, dict):
@@ -4807,17 +4846,16 @@ def _activate_database_access_request(request_id: str) -> dict:
 
     try:
         if effective_auth == 'iam':
-            # IAM DB auth:
-            # 1) Vault creates the DB user + grants (no password shown/used).
-            # 2) IAM permission set: create PS with RDS db identifier + db name, assign to user (so user can generate token via SSO).
-            # 3) IAM auth token is generated on demand (credentials endpoint / PAM terminal) using app credentials.
+            # IAM DB auth: Vault creates DB user (no password). User generates token via AWS SSO (rds generate-db-auth-token).
+            # We must create and assign a permission set so the user can use SSO credentials to get the token.
+            requester = _resolve_requester_for_vault(req)
             vault_creds = VaultManager.create_database_session(
                 request_id=rid,
                 engine=engine,
                 db_names=db_names,
                 allowed_ops=allowed_ops,
                 duration_hours=duration_hours,
-                requester=req.get('user_email') or '',
+                requester=requester,
                 auth_type='iam',
             )
             role_name = vault_creds.get('vault_role_name', '')
@@ -4833,12 +4871,25 @@ def _activate_database_access_request(request_id: str) -> dict:
             req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
             req['status'] = 'ACTIVE'
-            # Additionally: create AWS permission set with RDS identifier + db name, assign to user (IAM-based auth path).
+            db_resource_id = str(req.get('db_resource_id') or '').strip()
+            if not db_resource_id and req.get('db_instance_id') and req.get('db_region'):
+                try:
+                    resolved = _resolve_rds_auth_profile(
+                        instance_id=req.get('db_instance_id'),
+                        region=str(req.get('db_region') or ''),
+                    )
+                    db_resource_id = str(resolved.get('db_resource_id') or '').strip()
+                    if db_resource_id:
+                        req['db_resource_id'] = db_resource_id
+                except Exception:
+                    pass
             auth_profile = {
                 'region': str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
-                'db_resource_id': str(req.get('db_resource_id') or '').strip(),
+                'db_resource_id': db_resource_id,
             }
-            if auth_profile.get('db_resource_id'):
+            if not auth_profile.get('db_resource_id'):
+                print(f"DB IAM: skipping permission set for {rid} (db_resource_id missing; ensure RDS instance has DbiResourceId)", flush=True)
+            else:
                 ps_result = _create_and_assign_dbconnect_access(
                     user_email=req.get('user_email') or '',
                     account_id=req.get('account_id') or '',
@@ -4851,17 +4902,19 @@ def _activate_database_access_request(request_id: str) -> dict:
                 if ps_result and 'error' not in ps_result:
                     req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
                     req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
+                    print(f"DB IAM: permission set created and assigned for {rid}", flush=True)
                 else:
-                    print(f"DB IAM permission set (best-effort) for {rid}: {ps_result.get('error', 'unknown')}", flush=True)
+                    print(f"DB IAM permission set failed for {rid}: {ps_result.get('error', 'unknown')}", flush=True)
         else:
             # Password flow: mint dynamic user/password via Vault DB secrets engine.
+            requester = _resolve_requester_for_vault(req)
             vault_creds = VaultManager.create_database_session(
                 request_id=rid,
                 engine=engine,
                 db_names=db_names,
                 allowed_ops=allowed_ops,
                 duration_hours=duration_hours,
-                requester=req.get('user_email') or '',
+                requester=requester,
                 auth_type='password',
             )
             role_name = vault_creds.get('vault_role_name', '')
