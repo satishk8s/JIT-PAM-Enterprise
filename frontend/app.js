@@ -10,8 +10,9 @@ let isAdmin = false;
 const API_BASE_FOR_ADMIN = (typeof window !== 'undefined' && window.API_BASE) ? window.API_BASE : ((!window.location.port || window.location.port === '80' || window.location.port === '443') ? '/api' : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
 
 function setPamAdminFromApi(email) {
-    if (!email || typeof fetch === 'undefined') return;
-    fetch(API_BASE_FOR_ADMIN + '/admin/check-pam-admin?email=' + encodeURIComponent(email))
+    if (typeof fetch === 'undefined') return;
+    const em = String(email || '').trim();
+    fetch(API_BASE_FOR_ADMIN + '/admin/check-pam-admin?email=' + encodeURIComponent(em))
         .then(function(r) { return r.json(); })
         .then(function(d) {
             isAdmin = d.isAdmin === true;
@@ -53,7 +54,7 @@ async function syncSsoProfileFromSession() {
             isAdmin: isAdminFromSession
         };
 
-        if (resolvedEmail) setPamAdminFromApi(resolvedEmail);
+        setPamAdminFromApi(resolvedEmail || '');
         if (typeof updateUIForRole === 'function') updateUIForRole();
         if (typeof checkAdminAccess === 'function') checkAdminAccess();
     } catch (_) {
@@ -123,7 +124,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (isLoggedIn === 'true') {
         showMainApp();
         var storedEmail = localStorage.getItem('userEmail');
-        if (storedEmail) setPamAdminFromApi(storedEmail);
+        if (storedEmail || (localStorage.getItem('loginMethod') || '') === 'sso') setPamAdminFromApi(storedEmail || '');
         if ((localStorage.getItem('loginMethod') || '') === 'sso') {
             var storedName = (localStorage.getItem('userName') || '').trim();
             if (!storedEmail || !storedName || storedName.toLowerCase() === 'user') {

@@ -119,6 +119,40 @@ def _pam_admin_record_for_email(email):
             return admin
     return None
 
+
+def _identity_local_part(value):
+    """Return normalized local-part from email/username-like identity."""
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return ''
+    if '@' in raw:
+        raw = raw.split('@', 1)[0]
+    raw = re.sub(r'[^a-z0-9._-]+', '', raw)
+    return raw
+
+
+def _pam_admin_record_for_identity(email='', nameid=''):
+    """
+    Resolve PAM admin by exact email first, then by unique local-part match.
+    This helps when SAML NameID is username-like and email claim is missing.
+    """
+    direct = _pam_admin_record_for_email(email)
+    if direct:
+        return direct
+
+    ident_local = _identity_local_part(email) or _identity_local_part(nameid)
+    if not ident_local:
+        return None
+
+    candidates = []
+    for admin in _load_pam_admins():
+        a_email = str(admin.get('email') or '').strip().lower()
+        if _identity_local_part(a_email) == ident_local:
+            candidates.append(admin)
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
 def _save_pam_admins(admins):
     """Save PAM admin list. admins = list of {'email': str, 'role': str} or list of email strings (role=Admin)."""
     seen = set()
@@ -1068,7 +1102,7 @@ def _resolve_identity_center_identity(nameid='', email_hint=''):
     return {'email': '', 'display_name': ''}
 
 
-def _display_name_from_saml_session(email=''):
+def _display_name_from_saml_session(email='', nameid=''):
     """Return best-effort human display name from SAML attributes."""
     attrs = session.get('attributes') or {}
     attrs_ci = {str(k).lower(): k for k in attrs.keys()} if isinstance(attrs, dict) else {}
@@ -1150,9 +1184,12 @@ def _display_name_from_saml_session(email=''):
     if full:
         return full
 
-    em = str(email or '').strip()
-    if em and '@' in em:
-        local = em.split('@', 1)[0]
+    # Fallback: humanize email/username-like identifier.
+    candidate_identity = str(email or '').strip()
+    if not candidate_identity:
+        candidate_identity = str(nameid or '').strip()
+    if candidate_identity:
+        local = candidate_identity.split('@', 1)[0]
         local = re.sub(r'[._-]+', ' ', local)
         local = re.sub(r'\s+', ' ', local).strip()
         local = _clean_name(local)
@@ -1247,7 +1284,7 @@ def saml_complete():
     idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
     if not email:
         email = str(idc_identity.get('email') or '').strip()
-    admin_record = _pam_admin_record_for_email(email)
+    admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
     is_admin = bool(admin_record)
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
@@ -1255,7 +1292,7 @@ def saml_complete():
     display_name = (
         str(idc_identity.get('display_name') or '').strip()
         or _display_name_from_identity_center(email=email)
-        or _display_name_from_saml_session(email=email)
+        or _display_name_from_saml_session(email=email, nameid=nameid)
     )
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
@@ -1311,7 +1348,7 @@ def saml_profile():
             or 'User'
         )
 
-        admin_record = _pam_admin_record_for_email(email)
+        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
         is_admin = bool(admin_record)
         role = str(admin_record.get('role') or 'Admin') if is_admin else 'user'
 
@@ -3814,7 +3851,8 @@ def check_pam_admin():
                 idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='')
                 email = str(idc_identity.get('email') or '').strip()
 
-        admin_record = _pam_admin_record_for_email(email)
+        nameid = str(session.get('user') or '').strip()
+        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid)
         if admin_record:
             return jsonify({'isAdmin': True, 'role': admin_record.get('role', 'Admin')})
         return jsonify({'isAdmin': False})
