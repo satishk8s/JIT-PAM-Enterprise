@@ -788,9 +788,11 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
         return 'iam'
     if mode == 'password_only':
         return 'password'
-    if mode == 'iam_and_password' and not preferred:
-        # Default to Vault password-based dynamic credentials unless user explicitly requests IAM.
-        return 'password'
+    if mode == 'iam_and_password':
+        # Prefer IAM when instance supports it so user gets permission set and generates token via SSO.
+        if preferred in ('iam', 'password'):
+            return preferred
+        return 'iam'
     if preferred in ('iam', 'password'):
         return preferred
     return 'password'

@@ -325,8 +325,12 @@ async function loadPamAdmins() {
     try {
         var apiBase = getAdminApiBase();
         var res = await fetch(apiBase + '/admin/pam-admins');
-        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
         var text = await res.text();
+        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+        if (text.trim().substring(0, 50).indexOf('<') !== -1) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Backend returned HTML (status ' + res.status + '). Set <code>window.API_BASE</code> to your backend URL (e.g. https://your-host/api) and ensure the backend is running.</td></tr>';
+            return;
+        }
         if (!contentType.includes('application/json')) {
             tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Backend returned non-JSON (status ' + res.status + '). Check API_BASE and that the backend is running.</td></tr>';
             return;
@@ -335,7 +339,7 @@ async function loadPamAdmins() {
         try {
             data = JSON.parse(text);
         } catch (parseErr) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON from server.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Invalid JSON from server. If you see HTML, set <code>window.API_BASE</code> to your backend base URL.</td></tr>';
             return;
         }
         var list = (data && data.pam_admins) ? data.pam_admins : [];
@@ -368,18 +372,36 @@ async function searchIdCUsersForPamAdmin() {
         var apiBase = getAdminApiBase();
         var url = apiBase + '/admin/identity-center/users/search?q=' + encodeURIComponent(q);
         var res = await fetch(url);
-        var contentType = res.headers.get('Content-Type') || '';
-        if (!contentType.toLowerCase().includes('application/json')) {
-            var text = await res.text();
+        var raw = await res.text();
+        var contentType = (res.headers.get('Content-Type') || '').toLowerCase();
+        if (!contentType.includes('application/json')) {
             resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Server returned non-JSON. Check backend is running and API_BASE is correct. Status: ' + res.status + '</p>';
             return;
         }
-        var data = await res.json();
+        var data;
+        try {
+            data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (parseErr) {
+            resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Server returned invalid JSON. Check backend.</p>';
+            return;
+        }
         if (data && data.error) {
             resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">' + (data.error || 'Backend error') + '</p>';
             return;
         }
         var users = (data && data.users) ? data.users : [];
+        // Client-side filter so we only show users matching q (handles wrong endpoint or old backend)
+        if (q) {
+            var ql = q.toLowerCase();
+            users = users.filter(function(u) {
+                var email = (u.email || '').toLowerCase();
+                var display = (u.display_name || '').toLowerCase();
+                var first = (u.first_name || '').toLowerCase();
+                var last = (u.last_name || '').toLowerCase();
+                var uname = (u.username || '').toLowerCase();
+                return email.indexOf(ql) !== -1 || display.indexOf(ql) !== -1 || first.indexOf(ql) !== -1 || last.indexOf(ql) !== -1 || uname.indexOf(ql) !== -1;
+            });
+        }
         if (users.length === 0) {
             resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">No Identity Center users match &quot;' + String(q).replace(/</g, '&lt;') + '&quot;.</p>';
             return;
