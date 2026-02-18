@@ -60,6 +60,7 @@ body {
     left: 0;
     right: 0;
     bottom: 0;
+    pointer-events: none; /* so background never blocks clicking the form */
     background-image: 
         url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="30" r="8" fill="%23ffffff08"/><rect x="35" y="45" width="30" height="15" rx="3" fill="%23ffffff08"/><text x="50" y="75" text-anchor="middle" font-size="8" fill="%23ffffff15">AWS</text></svg>'),
         url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="30" r="8" fill="%23ffffff06"/><polygon points="35,45 65,45 60,60 40,60" fill="%23ffffff06"/><text x="50" y="75" text-anchor="middle" font-size="8" fill="%23ffffff12">GCP</text></svg>'),
@@ -142,6 +143,12 @@ body {
 .login-form input:focus {
     outline: none;
     border-color: var(--primary-color);
+}
+
+/* Email field has no icon - use even padding so it's clearly tappable/clickable */
+#emailOTP {
+    padding-left: 12px;
+    box-sizing: border-box;
 }
 
 .btn-primary {

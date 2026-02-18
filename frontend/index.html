@@ -2627,27 +2627,26 @@
         </div>
         <!-- end app-layout -->
 
-    <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="calendar.js"></script>
-    <script src="wizard.js"></script>
-    <script src="policy-config.js"></script>
-    <script src="policy-toggles.js"></script>
-    <script src="policy-builder.js"></script>
-    <script src="feature-management.js"></script>
-
-    <script src="admin-functions.js"></script>
-    <script src="security-management.js"></script>
-    <script src="guardrails.js"></script>
-    <script src="request-drafts.js"></script>
-    <script src="account-tagging.js"></script>
-    <script src="instances.js?v=2"></script>
-    <script src="databases.js?v=23"></script>
-    <script src="terminal-page.js?v=7"></script>
-    <script src="s3-explorer.js"></script>
-    <script src="security-ui-helpers.js?v=2"></script>
-    <script src="unified-assistant.js"></script>
-    <script src="workflow-designer.js"></script>
-    <script src="app.js?v=13"></script>
+    <!-- defer = parse without blocking; scripts run after DOMContentLoaded so login form is visible and interactive sooner -->
+    <script src="calendar.js" defer></script>
+    <script src="wizard.js" defer></script>
+    <script src="policy-config.js" defer></script>
+    <script src="policy-toggles.js" defer></script>
+    <script src="policy-builder.js" defer></script>
+    <script src="feature-management.js" defer></script>
+    <script src="admin-functions.js" defer></script>
+    <script src="security-management.js" defer></script>
+    <script src="guardrails.js" defer></script>
+    <script src="request-drafts.js" defer></script>
+    <script src="account-tagging.js" defer></script>
+    <script src="instances.js?v=2" defer></script>
+    <script src="databases.js?v=23" defer></script>
+    <script src="terminal-page.js?v=7" defer></script>
+    <script src="s3-explorer.js" defer></script>
+    <script src="security-ui-helpers.js?v=2" defer></script>
+    <script src="unified-assistant.js" defer></script>
+    <script src="workflow-designer.js" defer></script>
+    <script src="app.js?v=14"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
