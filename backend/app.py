@@ -2640,10 +2640,10 @@ def approve_request(request_id):
                 except Exception:
                     pass
                 # Do not leak internal Vault/config details to the UI.
-                safe_msg, _safe_code = _public_db_activation_error(activate_result['error'])
+                safe_msg, safe_code = _public_db_activation_error(activate_result['error'])
                 return jsonify({
                     'status': 'approved',
-                    'message': "✅ Approved. Activation is pending. Please retry in a few minutes.",
+                    'message': _activation_message_for_code(safe_code),
                     'error': safe_msg
                 }), 200
 
@@ -5142,6 +5142,11 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         return ("Database access service is not configured. Please contact an administrator.", "DB_PROXY_NOT_CONFIGURED")
 
     # Identity Center / assignment failures
+    if ('accessdeniedexception' in low or 'not authorized to perform' in low) and ('sso:' in low or 'identitystore:' in low):
+        return (
+            "Backend IAM role does not have IAM Identity Center permissions required to create/assign permission sets. Please contact an administrator.",
+            "IDC_ACCESS_DENIED",
+        )
     if 'user not found in identity store' in low or 'identity store' in low and 'not found' in low:
         return (
             "Requester is not available in IAM Identity Center. Please sign in using an Identity Center user and retry.",
@@ -5163,6 +5168,18 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         return ("Database access service is not fully configured. Ask an administrator to check backend logs (VAULT_ADDR, DB proxy).", "DB_ACTIVATION_FAILED")
 
     return ("Database access activation failed. Please retry or contact an administrator. (Details are in server logs.)", "DB_ACTIVATION_FAILED")
+
+
+def _is_retryable_activation_code(code: str) -> bool:
+    """Whether UI should keep showing 'activation pending, retry shortly'."""
+    c = str(code or '').strip().upper()
+    return c in {'VAULT_UNREACHABLE', 'IDC_ASSIGNMENT_FAILED'}
+
+
+def _activation_message_for_code(code: str) -> str:
+    if _is_retryable_activation_code(code):
+        return "✅ Approved. Activation is pending. Please retry in a few minutes."
+    return "❌ Activation is blocked due to configuration/permissions. Please contact an administrator."
 
 def _sanitize_database_request_for_client(req: dict) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
@@ -5639,34 +5656,52 @@ def _activate_database_access_request(request_id: str) -> dict:
 
     try:
         if effective_auth == 'iam':
-            # IAM DB auth: Vault creates DB user (no password). User generates token via AWS SSO (rds generate-db-auth-token).
-            # We must create and assign a permission set so the user can use SSO credentials to get the token.
-            requester = _resolve_requester_for_vault(req)
-            vault_creds = VaultManager.create_database_session(
-                request_id=rid,
-                engine=engine,
-                db_names=db_names,
-                allowed_ops=allowed_ops,
-                duration_hours=duration_hours,
-                requester=requester,
-                auth_type='iam',
-            )
-            role_name = vault_creds.get('vault_role_name', '')
-            lease_id = vault_creds.get('lease_id', '')
-            req['vault_role_name'] = role_name
-            req['role_name'] = role_name
-            req['vault_lease_id'] = lease_id
-            req['lease_id'] = lease_id
-            req['vault_token'] = ''
-            req['password'] = ''
-            req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
-            req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
-            req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
-            req['expiry_time'] = req['expires_at']
-            # Keep approved until permission set is successfully created/assigned to requester.
-            req['status'] = 'approved'
-            req['iam_permission_set_arn'] = ''
-            req['iam_permission_set_name'] = ''
+            # IAM DB auth: create DB user in Vault once, then retry only the SSO permission-set path.
+            # This prevents duplicate DB users when activation is retried after IAM permission errors.
+            existing_db_user = str(req.get('db_username') or '').strip()
+            existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            vault_session_expired = _is_db_request_expired(req, now=now)
+            has_materialized_vault_user = bool(existing_db_user) and not vault_session_expired
+
+            if has_materialized_vault_user:
+                print(f"DB IAM: reusing existing Vault DB user for {rid}: {existing_db_user}", flush=True)
+                req['vault_token'] = ''
+                req['password'] = ''
+                if existing_lease:
+                    req['vault_lease_id'] = existing_lease
+                    req['lease_id'] = existing_lease
+                req['db_username'] = existing_db_user
+                # Keep approved until permission set is successfully created/assigned to requester.
+                req['status'] = 'approved'
+                req['iam_permission_set_arn'] = ''
+                req['iam_permission_set_name'] = ''
+            else:
+                requester = _resolve_requester_for_vault(req)
+                vault_creds = VaultManager.create_database_session(
+                    request_id=rid,
+                    engine=engine,
+                    db_names=db_names,
+                    allowed_ops=allowed_ops,
+                    duration_hours=duration_hours,
+                    requester=requester,
+                    auth_type='iam',
+                )
+                role_name = vault_creds.get('vault_role_name', '')
+                lease_id = vault_creds.get('lease_id', '')
+                req['vault_role_name'] = role_name
+                req['role_name'] = role_name
+                req['vault_lease_id'] = lease_id
+                req['lease_id'] = lease_id
+                req['vault_token'] = ''
+                req['password'] = ''
+                req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
+                req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
+                req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
+                req['expiry_time'] = req['expires_at']
+                # Keep approved until permission set is successfully created/assigned to requester.
+                req['status'] = 'approved'
+                req['iam_permission_set_arn'] = ''
+                req['iam_permission_set_name'] = ''
             db_resource_id = str(req.get('db_resource_id') or '').strip()
             if not db_resource_id and req.get('db_instance_id') and req.get('db_region'):
                 try:
@@ -7154,10 +7189,10 @@ def get_database_request_credentials(request_id):
             if needs_activation:
                 result = _activate_database_access_request(request_id)
                 if result.get('error'):
-                    safe_msg, _safe_code = _public_db_activation_error(result['error'])
+                    safe_msg, safe_code = _public_db_activation_error(result['error'])
                     return jsonify({
                         'status': 'approved',
-                        'message': '✅ Approved. Activation is pending. Please retry in a few minutes.',
+                        'message': _activation_message_for_code(safe_code),
                         'error': safe_msg
                     }), 400
                 req = requests_db.get(request_id, req)
@@ -7252,8 +7287,8 @@ def activate_database_request(request_id):
 
         result = _activate_database_access_request(request_id)
         if result.get('error'):
-            safe_msg, _safe_code = _public_db_activation_error(result['error'])
-            return jsonify({'status': 'approved', 'error': safe_msg, 'message': '✅ Approved. Activation is pending. Please retry in a few minutes.'}), 200
+            safe_msg, safe_code = _public_db_activation_error(result['error'])
+            return jsonify({'status': 'approved', 'error': safe_msg, 'message': _activation_message_for_code(safe_code)}), 200
 
         return jsonify({'status': str(req.get('status') or 'active').lower(), 'message': '✅ Access is active.', 'expires_at': req.get('expires_at', '')})
     except Exception:
