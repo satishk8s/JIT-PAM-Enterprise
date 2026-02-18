@@ -362,7 +362,9 @@ function showMainApp() {
 }
 
 function updateUIForRole() {
-    const displayName = localStorage.getItem('userName') || (currentUser && currentUser.name) || (localStorage.getItem('userEmail') || '').split('@')[0].replace(/\./g, ' ') || 'User';
+    var rawName = localStorage.getItem('userName') || (currentUser && currentUser.name) || (localStorage.getItem('userEmail') || '').split('@')[0].replace(/\./g, ' ') || 'User';
+    if (rawName === 'Email' || (localStorage.getItem('userEmail') || '').trim() === 'Email') rawName = 'User';
+    const displayName = rawName || 'User';
     const userNameEl = document.getElementById('userNameDisplay');
     if (userNameEl) {
         var safe = String(displayName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

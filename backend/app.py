@@ -891,17 +891,21 @@ def saml_acs():
 
 
 def _email_from_saml_session():
+    """Return the user's email from SAML session. Never return the literal 'Email' (claim name)."""
     user = session.get('user')
     attrs = session.get('attributes') or {}
     email = user if isinstance(user, str) else (user.get('email') or user.get('nameid') or str(user) if user else '')
-    if not email or email == 'Email' or '@' not in str(email):
+    if not email or str(email).strip().lower() == 'email' or '@' not in str(email):
         for key in ('email', 'mail', 'Email', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'):
             if attrs.get(key):
                 val = attrs[key]
                 email = val[0] if isinstance(val, list) and val else val
                 if email and '@' in str(email):
-                    return str(email)
-    return str(email) if email else ''
+                    return str(email).strip()
+    email = str(email).strip() if email else ''
+    if not email or email.lower() == 'email' or '@' not in email:
+        return ''
+    return email
 
 
 @app.route('/saml/complete', methods=['GET'])
@@ -913,25 +917,29 @@ def saml_complete():
     email = _email_from_saml_session()
     pam_admins = _load_pam_admins()
     is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
+    # Never set userEmail/userName to literal "Email"; use empty or display name
+    if not email or email.lower() == 'email':
+        email = ''
+    display_name = (email.split('@')[0].replace('.', ' ').strip() or 'User') if email else 'User'
     html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
 <p>Signing you in...</p>
 <script>
 (function() {
   var email = %s;
-  if (email) {
-    localStorage.setItem('isLoggedIn', 'true');
-    localStorage.setItem('userEmail', email);
-    localStorage.setItem('userName', email.split('@')[0].replace(/\\./g, ' '));
-    localStorage.setItem('isAdmin', %s);
-    localStorage.setItem('userRole', %s);
-    localStorage.setItem('loginMethod', 'sso');
-  }
+  var displayName = %s;
+  localStorage.setItem('isLoggedIn', 'true');
+  localStorage.setItem('userEmail', email || '');
+  localStorage.setItem('userName', displayName || 'User');
+  localStorage.setItem('isAdmin', %s);
+  localStorage.setItem('userRole', %s);
+  localStorage.setItem('loginMethod', 'sso');
   window.location.replace('/');
 })();
 </script>
 </body></html>'''
     return html % (
         json.dumps(email),
+        json.dumps(display_name if email else 'User'),
         json.dumps(str(is_admin).lower()),
         json.dumps('admin' if is_admin else 'user'),
     )
