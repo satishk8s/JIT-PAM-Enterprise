@@ -67,20 +67,24 @@ sleep 2
 echo "Starting Flask on 5000..."
 python app.py &
 FLASK_PID=$!
-sleep 3
 
-# 8. Verify
-if curl -s http://127.0.0.1:5000/api/health >/dev/null 2>&1; then
-  echo ""
-  echo "✅ Backend running!"
-  echo "   Flask:  http://127.0.0.1:5000"
-  echo "   Proxy:  http://127.0.0.1:5002"
-  echo ""
-  echo "Keep this terminal open, or run in screen:"
-  echo "   cd /root/JIT-PAM-Enterprise/backend && screen -S npam ./run-backend-on-ec2.sh"
-  wait
-else
-  echo "❌ Flask did not start. Check logs above."
-  kill $PROXY_PID $FLASK_PID 2>/dev/null || true
-  exit 1
-fi
+# 8. Wait for Flask (first run: venv/pip can take 1-2 min, so poll up to 90s)
+echo "Waiting for Flask to be ready..."
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+  sleep 5
+  if curl -s http://127.0.0.1:5000/api/health >/dev/null 2>&1; then
+    echo ""
+    echo "✅ Backend running!"
+    echo "   Flask:  http://127.0.0.1:5000"
+    echo "   Proxy:  http://127.0.0.1:5002"
+    echo ""
+    echo "Keep this terminal open, or run in screen:"
+    echo "   cd /root/JIT-PAM-Enterprise/backend && screen -S npam ./run-backend-on-ec2.sh"
+    wait
+    exit 0
+  fi
+  echo "  ... waiting ($((i*5))s)"
+done
+echo "❌ Flask did not start within 90s. Check logs above."
+kill $PROXY_PID $FLASK_PID 2>/dev/null || true
+exit 1

@@ -27,3 +27,22 @@ cp ~/Downloads/idp_metadata.xml backend/saml/
 
 - **Application ACS URL:** `http://52.66.172.182/saml/acs` (or your server URL + `/saml/acs`)
 - **Audience (SP entity ID):** `pam-flask-app`
+
+---
+
+## Fix: "No access" when signing in from Identity Center
+
+If users see:
+
+**"An error occurred while signing in to Custom SAML 2.0 application – No access – Confirm with your administrator that you have access to Custom SAML 2.0 application and that your primary email address is assigned in IAM Identity Center."**
+
+then the user is **not assigned** to the SAML application in IAM Identity Center. Assign them (or a group they belong to):
+
+1. In **AWS Console** → **IAM Identity Center** (or **AWS SSO**).
+2. Go to **Applications** → select your **Custom SAML 2.0** application (the one used for PAM).
+3. Open the **Assign users or groups** (or **Assign users**) tab.
+4. Click **Assign users** (or **Add user/group**).
+5. Select the **users** and/or **groups** who should be able to sign in to PAM (e.g. your user, or a group like "PAM-Users").
+6. Save.
+
+Also ensure the user has a **primary email** set in the Identity Center identity store (Users → user → primary email). Without it, IdC can show "No access".

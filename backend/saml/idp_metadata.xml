@@ -1,13 +1,16 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Replace this file with AWS IAM Identity Center IdP metadata.
-     In AWS: Applications -> Your app -> Application metadata -> 
-     Copy the IdP metadata XML or download from the metadata URL. -->
-<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata"
-                  xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
-                  entityID="https://placeholder-replace-with-aws-idp">
-  <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
-    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
-                        Location="https://placeholder-replace-with-aws-sso-url/saml/sso"/>
-    <NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</NameIDFormat>
-  </IDPSSODescriptor>
-</EntityDescriptor>
+<?xml version="1.0" encoding="UTF-8"?><md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://portal.sso.ap-south-1.amazonaws.com/saml/assertion/NzY3Mzk4MDM5MDQ1X2lucy02NTk1YmE2MzVjYjhlNmMx">
+  <md:IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>MIIDBjCCAe6gAwIBAgIEV4eO5TANBgkqhkiG9w0BAQsFADBFMRYwFAYDVQQDDA1hbWF6b25hd3MuY29tMQ0wCwYDVQQLDARJREFTMQ8wDQYDVQQKDAZBbWF6b24xCzAJBgNVBAYTAlVTMB4XDTI2MDIxODA4MjIyN1oXDTMxMDIxODA4MjIyN1owRTEWMBQGA1UEAwwNYW1hem9uYXdzLmNvbTENMAsGA1UECwwESURBUzEPMA0GA1UECgwGQW1hem9uMQswCQYDVQQGEwJVUzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKvJHk7wczxDedLKeQcJoBr9p9Moj9L0MzNvnwM4vMM0lB+cZ1ik7/24VR/fLRwJaBenGe8EZPbzF9yGUZg2M31Hlhr8CuBkLx2n1U9TJhFfDNKQFv0GdG7eUJLnOn9Ss9fdskJ/EfhrzlftLkdjR9xa/Jq4xhIV+FlUp1TsPJGgX/oF/Dn82/gclB/C2Hsnl9Om0urtIjutd2a7iARP/Js1E2Rq8FGqmMoEMN2qJxr7S3kp+s+fnm9DBlOtDXjAPMyzQFFCT2e4RphiwBkJiTCqj3SXyzKME5+LCPxLHCNiEEWqIKi6zQ9nIlCrpRbq9zr6xU2UtqYtFghL7l7vMXECAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAGrTnFlhQOeN9jGKFmbd0sMbvreyVPCCR6V1kRivuaD5EP3n85gfT/4nFiEugtRFqDoUckgWT8RlPnuoinkHXBWkJPGl1O2EwDRz1it9JVgLb+lfOSnqQgFd7D/NLNl/fYTgNE1t+yYrOygrHzrd+McHfadNPsQJ5+YFOUZ7nyjbRzP78GOqd2elw/Yngc6tNymEfFNQv5Gha7nMO69Ia1yZaskR4jo0kgH5yRqw9nG0shDrrBDicnfGJ1wc9o/jorIrwSDda/xiGRutiwX0yQiQcW0jOw5sthIsnQ9EZKn387xweafyTGPzZyauHmEyA3svwn5jppidB6FoQmnmjfw==</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://portal.sso.ap-south-1.amazonaws.com/saml/logout/NzY3Mzk4MDM5MDQ1X2lucy02NTk1YmE2MzVjYjhlNmMx"/>
+    <md:SingleLogoutService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://portal.sso.ap-south-1.amazonaws.com/saml/logout/NzY3Mzk4MDM5MDQ1X2lucy02NTk1YmE2MzVjYjhlNmMx"/>
+    <md:NameIDFormat/>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://portal.sso.ap-south-1.amazonaws.com/saml/assertion/NzY3Mzk4MDM5MDQ1X2lucy02NTk1YmE2MzVjYjhlNmMx"/>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://portal.sso.ap-south-1.amazonaws.com/saml/assertion/NzY3Mzk4MDM5MDQ1X2lucy02NTk1YmE2MzVjYjhlNmMx"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>
