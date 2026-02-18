@@ -810,11 +810,15 @@ def health():
 @app.route('/api/login')
 def saml_login():
     """SAML login: redirect to AWS IAM Identity Center. Use /api/login when frontend is served at / (so API_BASE + '/login' hits this)."""
-    if not _SAML_AVAILABLE:
-        return jsonify({'error': 'SAML not available; install python3-saml'}), 503
-    req = prepare_flask_request(request)
-    auth = init_saml_auth(req)
-    return redirect(auth.login())
+    try:
+        if not _SAML_AVAILABLE:
+            return jsonify({'error': 'SAML not available; install python3-saml'}), 503
+        req = prepare_flask_request(request)
+        auth = init_saml_auth(req)
+        return redirect(auth.login())
+    except Exception as e:
+        print('SAML /api/login error:', e)
+        return jsonify({'error': 'SAML login failed', 'detail': str(e)}), 500
 
 
 @app.route('/saml/acs', methods=['POST'])
