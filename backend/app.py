@@ -3952,22 +3952,53 @@ def check_pam_admin():
     """Check if the given email is a PAM solution admin (for login / UI). Returns isAdmin and role."""
     try:
         email = str(request.args.get('email') or '').strip()
+        nameid = str(session.get('user') or '').strip()
         identity_hints = _saml_identity_hints()
+        idc_identity = {'email': '', 'display_name': ''}
         if not email or '@' not in email:
             # Fallback for SSO browser sessions where frontend storage may be stale.
             email = _email_from_saml_session()
             if not email:
-                nameid = str(session.get('user') or '').strip()
                 idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='', hints=identity_hints)
                 email = str(idc_identity.get('email') or '').strip()
+        else:
+            idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email, hints=identity_hints)
 
-        nameid = str(session.get('user') or '').strip()
         admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid, hints=identity_hints)
+        resolved_email = str(email or '').strip()
+        if (not resolved_email or '@' not in resolved_email) and admin_record:
+            resolved_email = str(admin_record.get('email') or '').strip()
+        if not resolved_email:
+            resolved_email = str(idc_identity.get('email') or '').strip()
+        if str(resolved_email).lower() == 'email':
+            resolved_email = ''
+
+        resolved_display = (
+            str(idc_identity.get('display_name') or '').strip()
+            or _display_name_from_identity_center(email=resolved_email)
+            or (
+                _display_name_from_identity_center(email=str(admin_record.get('email') or '').strip())
+                if admin_record else ''
+            )
+            or _display_name_from_saml_session(email=resolved_email, nameid=nameid)
+        )
+        if str(resolved_display).strip().lower() in ('user', 'email'):
+            resolved_display = ''
+
         if admin_record:
-            return jsonify({'isAdmin': True, 'role': admin_record.get('role', 'Admin')})
-        return jsonify({'isAdmin': False})
+            return jsonify({
+                'isAdmin': True,
+                'role': admin_record.get('role', 'Admin'),
+                'email': resolved_email,
+                'display_name': resolved_display
+            })
+        return jsonify({
+            'isAdmin': False,
+            'email': resolved_email,
+            'display_name': resolved_display
+        })
     except Exception:
-        return jsonify({'isAdmin': False})
+        return jsonify({'isAdmin': False, 'email': '', 'display_name': ''})
 
 
 @app.route('/api/admin/sync-from-identity-center', methods=['POST'])

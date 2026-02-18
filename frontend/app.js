@@ -23,10 +23,33 @@ function setPamAdminFromApi(email) {
     fetch(API_BASE_FOR_ADMIN + '/admin/check-pam-admin?email=' + encodeURIComponent(em))
         .then(function(r) { return r.json(); })
         .then(function(d) {
+            const responseEmail = String((d && d.email) || '').trim();
+            const storedEmail = String(localStorage.getItem('userEmail') || '').trim();
+            const finalEmail = responseEmail || em || storedEmail;
+            if (finalEmail) localStorage.setItem('userEmail', finalEmail);
+
+            const responseNameRaw = String((d && (d.display_name || d.displayName)) || '').trim();
+            let finalName = '';
+            if (responseNameRaw && responseNameRaw.toLowerCase() !== 'user' && responseNameRaw.toLowerCase() !== 'email') {
+                finalName = responseNameRaw;
+            } else {
+                const storedName = String(localStorage.getItem('userName') || '').trim();
+                if (storedName && storedName.toLowerCase() !== 'user' && storedName.toLowerCase() !== 'email') {
+                    finalName = storedName;
+                } else {
+                    finalName = deriveNameFromEmail(finalEmail);
+                }
+            }
+            if (finalName) localStorage.setItem('userName', finalName);
+
             isAdmin = d.isAdmin === true;
             localStorage.setItem('isAdmin', String(isAdmin));
             localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
-            if (typeof currentUser !== 'undefined' && currentUser) currentUser.isAdmin = isAdmin;
+            if (typeof currentUser !== 'undefined' && currentUser) {
+                currentUser.isAdmin = isAdmin;
+                if (finalEmail) currentUser.email = finalEmail;
+                if (finalName) currentUser.name = finalName;
+            }
             if (typeof checkAdminAccess === 'function') checkAdminAccess();
             if (typeof updateUIForRole === 'function') updateUIForRole();
         })
