@@ -2897,5 +2897,38 @@
             </div>
         </div>
     </div>
+    <script>
+    (function() {
+        function deriveNameFromEmail(email) {
+            var em = String(email || '').trim();
+            if (!em || em.toLowerCase() === 'email' || em.indexOf('@') < 0) return '';
+            var local = em.split('@')[0].replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+            if (!local) return '';
+            return local.split(' ').map(function(p) {
+                return p ? (p.charAt(0).toUpperCase() + p.slice(1)) : '';
+            }).join(' ').trim();
+        }
+        function renderProfileNameFallback() {
+            var el = document.getElementById('userNameDisplay');
+            if (!el) return;
+            var rawName = String(localStorage.getItem('userName') || '').trim();
+            var email = String(localStorage.getItem('userEmail') || '').trim();
+            if (!rawName || rawName.toLowerCase() === 'user' || rawName.toLowerCase() === 'email') {
+                rawName = deriveNameFromEmail(email) || 'User';
+            }
+            var safe = String(rawName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            var admin = localStorage.getItem('isAdmin') === 'true';
+            el.innerHTML = admin
+                ? '<i class="fas fa-crown profile-crown-icon" title="PAM Admin"></i> ' + safe
+                : safe;
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(renderProfileNameFallback, 50);
+            setTimeout(renderProfileNameFallback, 900);
+        });
+        window.addEventListener('storage', renderProfileNameFallback);
+        window.renderProfileNameFallback = renderProfileNameFallback;
+    })();
+    </script>
 </body>
 </html>

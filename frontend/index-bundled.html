@@ -24,9 +24,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-    <link rel="preload" href="bundle.css?v=33" as="style">
+    <link rel="preload" href="bundle.css?v=34" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
-    <link href="bundle.css?v=33" rel="stylesheet">
+    <link href="bundle.css?v=34" rel="stylesheet">
 </head>
 <body class="performance-mode">
     <script>
@@ -3295,7 +3295,40 @@
             </div>
 
     <!-- Chart.js, xterm: loaded on-demand (dashboard / SSH terminal) -->
-    <script src="bundle.js?v=33"></script>
+    <script src="bundle.js?v=34"></script>
+    <script>
+    (function() {
+        function deriveNameFromEmail(email) {
+            var em = String(email || '').trim();
+            if (!em || em.toLowerCase() === 'email' || em.indexOf('@') < 0) return '';
+            var local = em.split('@')[0].replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+            if (!local) return '';
+            return local.split(' ').map(function(p) {
+                return p ? (p.charAt(0).toUpperCase() + p.slice(1)) : '';
+            }).join(' ').trim();
+        }
+        function renderProfileNameFallback() {
+            var el = document.getElementById('userNameDisplay');
+            if (!el) return;
+            var rawName = String(localStorage.getItem('userName') || '').trim();
+            var email = String(localStorage.getItem('userEmail') || '').trim();
+            if (!rawName || rawName.toLowerCase() === 'user' || rawName.toLowerCase() === 'email') {
+                rawName = deriveNameFromEmail(email) || 'User';
+            }
+            var safe = String(rawName).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            var admin = localStorage.getItem('isAdmin') === 'true';
+            el.innerHTML = admin
+                ? '<i class="fas fa-crown profile-crown-icon" title="PAM Admin"></i> ' + safe
+                : safe;
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(renderProfileNameFallback, 50);
+            setTimeout(renderProfileNameFallback, 900);
+        });
+        window.addEventListener('storage', renderProfileNameFallback);
+        window.renderProfileNameFallback = renderProfileNameFallback;
+    })();
+    </script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
