@@ -832,12 +832,59 @@ def saml_acs():
     if not errors:
         session['user'] = auth.get_nameid()
         session['attributes'] = auth.get_attributes() or {}
-        return jsonify({
-            'message': 'Login successful',
-            'user': session['user'],
-            'attributes': session['attributes'],
-        })
+        return redirect('/saml/complete')
     return jsonify({'error': errors}), 400
+
+
+def _email_from_saml_session():
+    user = session.get('user')
+    attrs = session.get('attributes') or {}
+    email = user if isinstance(user, str) else (user.get('email') or user.get('nameid') or str(user) if user else '')
+    if not email or email == 'Email' or '@' not in str(email):
+        for key in ('email', 'mail', 'Email', 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'):
+            if attrs.get(key):
+                val = attrs[key]
+                email = val[0] if isinstance(val, list) and val else val
+                if email and '@' in str(email):
+                    return str(email)
+    return str(email) if email else ''
+
+
+@app.route('/saml/complete', methods=['GET'])
+def saml_complete():
+    """After SAML login: render a page that sets localStorage and redirects to the app."""
+    if not session.get('user'):
+        return redirect('/')
+    email = _email_from_saml_session()
+    attrs = session.get('attributes') or {}
+    is_admin = True
+    if attrs.get('isAdmin'):
+        val = attrs['isAdmin']
+        if isinstance(val, list) and val:
+            is_admin = str(val[0]).lower() == 'true'
+        else:
+            is_admin = str(val).lower() == 'true'
+    html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
+<p>Signing you in...</p>
+<script>
+(function() {
+  var email = %s;
+  if (email) {
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('userEmail', email);
+    localStorage.setItem('userName', email.split('@')[0].replace(/\\./g, ' '));
+    localStorage.setItem('isAdmin', %s);
+    localStorage.setItem('userRole', %s);
+  }
+  window.location.replace('/');
+})();
+</script>
+</body></html>'''
+    return html % (
+        json.dumps(email),
+        json.dumps(str(is_admin).lower()),
+        json.dumps('admin' if is_admin else 'user'),
+    )
 
 
 @app.route('/api/accounts', methods=['GET'])
