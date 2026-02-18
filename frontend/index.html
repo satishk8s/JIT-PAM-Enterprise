@@ -10,13 +10,13 @@
             var t = localStorage.getItem('theme') || 'light';
             document.documentElement.setAttribute('data-theme', t);
         })();
-        // API URL - MUST point to your Flask backend so /api/admin/pam-admins and search work.
-        // When app is on port 80/443 we default to backend on :5000; override with window.API_BASE if needed.
+        // API URL - must hit your Flask backend. On 80/443 we use same-origin /api (proxy); else :5000/api.
+        // If PAM admins or Identity Center users fail, set: window.API_BASE = 'http://YOUR_BACKEND:5000/api'; and reload.
         (function() {
             if (window.API_BASE) return;
             var port = (window.location.port || '').toString();
             if (port === '80' || port === '443' || port === '') {
-                window.API_BASE = window.location.protocol + '//' + window.location.hostname + ':5000/api';
+                window.API_BASE = window.location.origin + '/api';
             } else {
                 window.API_BASE = window.location.protocol + '//' + window.location.hostname + ':5000/api';
             }

@@ -313,8 +313,11 @@ function deleteGroup(groupName) {
 function getAdminApiBase() {
     if (typeof window !== 'undefined' && window.API_BASE) return window.API_BASE;
     if (typeof API_BASE !== 'undefined') return API_BASE;
-    var base = window.location.protocol + '//' + window.location.hostname + ':5000/api';
-    return base;
+    var port = (window.location.port || '').toString();
+    if (port === '80' || port === '443' || port === '') {
+        return (window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api';
+    }
+    return window.location.protocol + '//' + window.location.hostname + ':5000/api';
 }
 
 async function loadPamAdmins() {
