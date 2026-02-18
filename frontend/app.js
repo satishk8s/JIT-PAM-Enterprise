@@ -34,10 +34,12 @@ async function syncSsoProfileFromSession() {
         if (!data || data.logged_in !== true) return;
 
         const email = String(data.email || '').trim();
+        const fallbackEmail = String(localStorage.getItem('userEmail') || '').trim();
+        const resolvedEmail = email || fallbackEmail;
         const displayName = String(data.display_name || '').trim();
         const isAdminFromSession = data.is_admin === true;
 
-        if (email) localStorage.setItem('userEmail', email);
+        if (resolvedEmail) localStorage.setItem('userEmail', resolvedEmail);
         if (displayName) localStorage.setItem('userName', displayName);
         localStorage.setItem('loginMethod', 'sso');
         localStorage.setItem('isLoggedIn', 'true');
@@ -46,12 +48,12 @@ async function syncSsoProfileFromSession() {
 
         isAdmin = isAdminFromSession;
         currentUser = {
-            email: email || (localStorage.getItem('userEmail') || ''),
+            email: resolvedEmail,
             name: displayName || (localStorage.getItem('userName') || 'User'),
             isAdmin: isAdminFromSession
         };
 
-        if (email) setPamAdminFromApi(email);
+        if (resolvedEmail) setPamAdminFromApi(resolvedEmail);
         if (typeof updateUIForRole === 'function') updateUIForRole();
         if (typeof checkAdminAccess === 'function') checkAdminAccess();
     } catch (_) {
@@ -371,18 +373,18 @@ function showMainApp() {
     
     // Set current user from storage
     const userEmail = localStorage.getItem('userEmail');
+    const storedUserName = (localStorage.getItem('userName') || '').trim();
     if (userEmail) {
         currentUser = {
             email: userEmail,
-            name: userEmail.split('@')[0],
+            name: storedUserName || userEmail.split('@')[0],
             isAdmin: isAdmin
         };
     }
 
     // SSO fallback: recover email/display name/admin from active SAML session when storage is incomplete.
     if ((localStorage.getItem('loginMethod') || '') === 'sso') {
-        const storedName = (localStorage.getItem('userName') || '').trim();
-        if (!userEmail || !storedName || storedName.toLowerCase() === 'user') {
+        if (!userEmail || !storedUserName || storedUserName.toLowerCase() === 'user') {
             syncSsoProfileFromSession();
         }
     }

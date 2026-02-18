@@ -108,6 +108,17 @@ def _load_pam_admins():
         pass
     return []
 
+
+def _pam_admin_record_for_email(email):
+    """Return PAM admin record for email, or None."""
+    em = str(email or '').strip().lower()
+    if not em:
+        return None
+    for admin in _load_pam_admins():
+        if str(admin.get('email') or '').strip().lower() == em:
+            return admin
+    return None
+
 def _save_pam_admins(admins):
     """Save PAM admin list. admins = list of {'email': str, 'role': str} or list of email strings (role=Admin)."""
     seen = set()
@@ -949,6 +960,9 @@ def _email_from_saml_session():
             'email',
             'mail',
             'emailaddress',
+            'emails',
+            'username',
+            'userprincipalname',
             'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress',
             'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn',
             'urn:oid:0.9.2342.19200300.100.1.3'
@@ -999,6 +1013,10 @@ def _resolve_identity_center_identity(nameid='', email_hint=''):
                 if ev and '@' in ev:
                     out_email = ev
                     break
+        if not out_email:
+            username = str(u.get('UserName') or '').strip()
+            if username and '@' in username:
+                out_email = username
         display = str(u.get('DisplayName') or '').strip()
         if not display:
             n = u.get('Name') or {}
@@ -1054,10 +1072,23 @@ def _display_name_from_saml_session(email=''):
     """Return best-effort human display name from SAML attributes."""
     attrs = session.get('attributes') or {}
     attrs_ci = {str(k).lower(): k for k in attrs.keys()} if isinstance(attrs, dict) else {}
+    attrs_norm = {}
+    if isinstance(attrs, dict):
+        for key in attrs.keys():
+            norm = re.sub(r'[^a-z0-9]', '', str(key).lower())
+            if norm and norm not in attrs_norm:
+                attrs_norm[norm] = key
+
+    def _resolve_attr_key(key):
+        actual = attrs_ci.get(str(key).lower())
+        if actual:
+            return actual
+        norm = re.sub(r'[^a-z0-9]', '', str(key).lower())
+        return attrs_norm.get(norm)
 
     def _get_attr(keys):
         for key in keys:
-            actual = attrs_ci.get(str(key).lower())
+            actual = _resolve_attr_key(key)
             if not actual:
                 continue
             val = attrs.get(actual)
@@ -1071,17 +1102,32 @@ def _display_name_from_saml_session(email=''):
         s = re.sub(r'\s+', ' ', str(s or '').strip())
         if not s or s.lower() in ('email', 'name', 'username', 'userid'):
             return ''
+        if '@' in s:
+            return ''
         return s
 
     display = _clean_name(_get_attr((
         'displayname',
         'display_name',
+        'display name',
         'name',
         'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name',
         'urn:oid:2.16.840.1.113730.3.1.241',
     )))
     if display:
         return display
+
+    # Heuristic: some IdPs send display name with custom keys like "Display name".
+    if isinstance(attrs, dict):
+        for key, raw_val in attrs.items():
+            key_norm = re.sub(r'[^a-z0-9]', '', str(key).lower())
+            if 'displayname' not in key_norm and key_norm not in ('fullname',):
+                continue
+            vals = raw_val if isinstance(raw_val, list) else [raw_val]
+            for val in vals:
+                candidate = _clean_name(val)
+                if candidate:
+                    return candidate
 
     first = _clean_name(_get_attr((
         'givenname',
@@ -1201,8 +1247,8 @@ def saml_complete():
     idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email)
     if not email:
         email = str(idc_identity.get('email') or '').strip()
-    pam_admins = _load_pam_admins()
-    is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
+    admin_record = _pam_admin_record_for_email(email)
+    is_admin = bool(admin_record)
     # Never set userEmail/userName to literal "Email"; use empty or display name
     if not email or email.lower() == 'email':
         email = ''
@@ -1265,15 +1311,16 @@ def saml_profile():
             or 'User'
         )
 
-        pam_admins = _load_pam_admins()
-        is_admin = any(a.get('email') == email.lower() for a in pam_admins) if email else False
+        admin_record = _pam_admin_record_for_email(email)
+        is_admin = bool(admin_record)
+        role = str(admin_record.get('role') or 'Admin') if is_admin else 'user'
 
         return jsonify({
             'logged_in': True,
             'email': email,
             'display_name': display_name,
             'is_admin': bool(is_admin),
-            'role': 'admin' if is_admin else 'user'
+            'role': role
         })
     except Exception as e:
         return jsonify({'error': str(e), 'logged_in': False}), 500
@@ -2032,6 +2079,7 @@ def get_database_requests():
         search_hay = " ".join(
             [
                 str(req_id).lower(),
+                str(req.get('account_id') or '').lower(),
                 str(req.get('db_instance_id') or '').lower(),
                 str(req.get('db_resource_id') or '').lower(),
                 " ".join(db_names_for_search),
@@ -2042,6 +2090,12 @@ def get_database_requests():
         )
         if q and q not in search_hay:
             continue
+
+        account_id = str(req.get('account_id') or '').strip()
+        account_name = ''
+        if account_id:
+            acct_cfg = (CONFIG.get('accounts') or {}).get(account_id) or {}
+            account_name = str(acct_cfg.get('name') or '').strip()
 
         items.append({
             'request_id': req_id,
@@ -2059,8 +2113,13 @@ def get_database_requests():
             'duration_hours': req.get('duration_hours', 2),
             'justification': req.get('justification', ''),
             'created_at': req.get('created_at', ''),
+            'requested_at': req.get('created_at', ''),
             'expires_at': expires_at,
             'expiry_time': str(req.get('expiry_time') or expires_at or ''),
+            'account_id': account_id,
+            'account_name': account_name,
+            'db_instance_id': str(req.get('db_instance_id') or ''),
+            'db_region': str(req.get('db_region') or ''),
             'db_username': str(req.get('db_username') or ''),
             'user_email': str(req.get('user_email') or ''),
         })
@@ -3746,15 +3805,20 @@ def remove_pam_admin(email):
 def check_pam_admin():
     """Check if the given email is a PAM solution admin (for login / UI). Returns isAdmin and role."""
     try:
-        email = str(request.args.get('email') or '').strip().lower()
-        if not email:
-            return jsonify({'isAdmin': False})
-        admins = _load_pam_admins()
-        for a in admins:
-            if a['email'] == email:
-                return jsonify({'isAdmin': True, 'role': a.get('role', 'Admin')})
+        email = str(request.args.get('email') or '').strip()
+        if not email or '@' not in email:
+            # Fallback for SSO browser sessions where frontend storage may be stale.
+            email = _email_from_saml_session()
+            if not email:
+                nameid = str(session.get('user') or '').strip()
+                idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='')
+                email = str(idc_identity.get('email') or '').strip()
+
+        admin_record = _pam_admin_record_for_email(email)
+        if admin_record:
+            return jsonify({'isAdmin': True, 'role': admin_record.get('role', 'Admin')})
         return jsonify({'isAdmin': False})
-    except Exception as e:
+    except Exception:
         return jsonify({'isAdmin': False})
 
 
@@ -4825,6 +4889,23 @@ def _public_db_activation_error(err) -> tuple[str, str]:
     if 'db_connect_proxy_host' in low or 'db_connect_proxy_port' in low or 'proxy-not-configured' in low:
         return ("Database access service is not configured. Please contact an administrator.", "DB_PROXY_NOT_CONFIGURED")
 
+    # Identity Center / assignment failures
+    if 'user not found in identity store' in low or 'identity store' in low and 'not found' in low:
+        return (
+            "Requester is not available in IAM Identity Center. Please sign in using an Identity Center user and retry.",
+            "IDC_USER_NOT_FOUND",
+        )
+    if 'permission set assignment failed' in low or 'account assignment' in low:
+        return (
+            "Permission set assignment is still pending or failed. Please retry in a few minutes or contact an administrator.",
+            "IDC_ASSIGNMENT_FAILED",
+        )
+    if 'db resource id not available' in low:
+        return (
+            "Selected RDS instance is missing DB resource metadata required for IAM DB connect policy. Contact an administrator.",
+            "DB_RESOURCE_ID_MISSING",
+        )
+
     # Vault/credential errors
     if 'runtimeerror' in low or 'required' in low:
         return ("Database access service is not fully configured. Ask an administrator to check backend logs (VAULT_ADDR, DB proxy).", "DB_ACTIVATION_FAILED")
@@ -5115,18 +5196,44 @@ def _local_iam_token_instructions(instance_id: str, region: str, db_username: st
             f"aws rds generate-db-auth-token "
             f"--hostname {hostname} --port {port} --username {user} --region {reg}"
         )
+        token_export_cmd = (
+            f"TOKEN=\"$({cli_cmd})\""
+        )
+        mysql_cmd = (
+            f"LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1 MYSQL_PWD=\"$TOKEN\" "
+            f"mysql --host {hostname} --port {port} --user {user} "
+            f"--ssl-mode=REQUIRED --enable-cleartext-plugin"
+        )
         return {
             "available": True,
             "heading": "Get credentials: run these commands on your machine",
             "steps": [
-                "1. Log in with AWS SSO (get temporary access key, secret key, session token):",
-                "   aws sso login --profile YourProfile",
-                "   # Or: configure AWS CLI with a profile that uses SSO",
-                "2. Generate the IAM DB auth token (valid ~15 minutes):",
-                f"   {cli_cmd}",
-                "3. Use the username above and the token output as the password when connecting to the database (host/port as shown).",
+                "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+                "2. Log in: aws sso login --profile <your-profile>",
+                "3. Generate token (valid ~15 minutes), then connect.",
+                "4. For DBeaver/Workbench, paste token as password and reconnect when token expires.",
             ],
             "cli_command": cli_cmd,
+            "token_command": token_export_cmd,
+            "mysql_connect_command": mysql_cmd,
+            "dbeaver_steps": [
+                "Driver: MySQL / MariaDB",
+                f"Host: {hostname}",
+                f"Port: {port}",
+                f"Username: {user}",
+                "Password: paste output from token command",
+                "SSL: enable TLS/SSL (recommended/required)",
+                "When token expires (~15 min), generate a new token and reconnect",
+            ],
+            "workbench_steps": [
+                "Connection Method: Standard TCP/IP",
+                f"Hostname: {hostname}",
+                f"Port: {port}",
+                f"Username: {user}",
+                "Password: paste output from token command",
+                "SSL: enable SSL (REQUIRED when IAM auth is enforced)",
+                "Regenerate token after ~15 min and update password",
+            ],
             "hostname": hostname,
             "port": port,
             "username": user,
@@ -5304,7 +5411,10 @@ def _activate_database_access_request(request_id: str) -> dict:
             req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
             req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
-            req['status'] = 'ACTIVE'
+            # Keep approved until permission set is successfully created/assigned to requester.
+            req['status'] = 'approved'
+            req['iam_permission_set_arn'] = ''
+            req['iam_permission_set_name'] = ''
             db_resource_id = str(req.get('db_resource_id') or '').strip()
             if not db_resource_id and req.get('db_instance_id') and req.get('db_region'):
                 try:
@@ -5322,23 +5432,25 @@ def _activate_database_access_request(request_id: str) -> dict:
                 'db_resource_id': db_resource_id,
             }
             if not auth_profile.get('db_resource_id'):
-                print(f"DB IAM: skipping permission set for {rid} (db_resource_id missing; ensure RDS instance has DbiResourceId)", flush=True)
-            else:
-                ps_result = _create_and_assign_dbconnect_access(
-                    user_email=req.get('user_email') or '',
-                    account_id=req.get('account_id') or '',
-                    db_username=req['db_username'],
-                    db_name=db_names[0] if db_names else 'default',
-                    duration_hours=duration_hours,
-                    auth_profile=auth_profile,
-                    request_id=rid,
-                )
-                if ps_result and 'error' not in ps_result:
-                    req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
-                    req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
-                    print(f"DB IAM: permission set created and assigned for {rid}", flush=True)
-                else:
-                    print(f"DB IAM permission set failed for {rid}: {ps_result.get('error', 'unknown')}", flush=True)
+                raise RuntimeError("DB resource ID not available for IAM DB connect policy generation.")
+
+            ps_result = _create_and_assign_dbconnect_access(
+                user_email=req.get('user_email') or '',
+                account_id=req.get('account_id') or '',
+                db_username=req['db_username'],
+                db_name=db_names[0] if db_names else 'default',
+                duration_hours=duration_hours,
+                auth_profile=auth_profile,
+                request_id=rid,
+            )
+            if not ps_result or ('error' in ps_result):
+                raise RuntimeError(f"Permission set assignment failed: {ps_result.get('error', 'unknown') if isinstance(ps_result, dict) else 'unknown'}")
+
+            req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
+            req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
+            req['status'] = 'ACTIVE'
+            req.pop('activation_error', None)
+            print(f"DB IAM: permission set created and assigned for {rid}", flush=True)
         else:
             # Password flow: mint dynamic user/password via Vault DB secrets engine.
             requester = _resolve_requester_for_vault(req)
@@ -6779,7 +6891,10 @@ def get_database_request_credentials(request_id):
         if status == 'approved':
             needs_activation = False
             if effective_auth == 'iam':
-                needs_activation = not str(req.get('db_username') or '').strip()
+                needs_activation = (
+                    not str(req.get('db_username') or '').strip()
+                    or not str(req.get('iam_permission_set_arn') or '').strip()
+                )
             else:
                 pwd_probe = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
                 needs_activation = (not str(req.get('db_username') or '').strip()) or (not pwd_probe)
@@ -6798,6 +6913,13 @@ def get_database_request_credentials(request_id):
                 if status not in ('active', 'approved'):
                     return jsonify({'error': 'Request is not active yet'}), 400
 
+        if effective_auth == 'iam' and not str(req.get('iam_permission_set_arn') or '').strip():
+            return jsonify({
+                'status': 'approved',
+                'message': '✅ Approved. IAM permission assignment is pending.',
+                'error': 'IAM permission assignment is not complete yet. Please retry shortly.'
+            }), 400
+
         proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         if not proxy_host or proxy_host == 'proxy-not-configured':
             return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
@@ -6810,11 +6932,6 @@ def get_database_request_credentials(request_id):
             if not username:
                 return jsonify({'error': 'Credentials are not available (request may be pending or expired).'}), 400
             try:
-                tok = _generate_rds_iam_db_auth_token(
-                    instance_id=str(req.get('db_instance_id') or '').strip(),
-                    region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
-                    db_username=username,
-                )
                 local_instructions = _local_iam_token_instructions(
                     instance_id=str(req.get('db_instance_id') or '').strip(),
                     region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
@@ -6826,16 +6943,18 @@ def get_database_request_credentials(request_id):
                     'proxy_host': proxy_host,
                     'proxy_port': proxy_port,
                     'db_username': username,
-                    'password': tok.get('token', ''),
-                    'iam_token_expires_at': tok.get('token_expires_at', ''),
+                    # Do not mint IAM tokens on server-side credentials.
+                    # User must generate token using their own Identity Center session.
+                    'password': '',
+                    'iam_token_expires_at': '',
                     'expires_at': str(req.get('expires_at') or '').strip(),
-                    'note': 'IAM token expires in ~15 minutes. Generate a fresh token if it expires.',
+                    'note': 'Generate IAM token locally with your own Identity Center credentials (valid ~15 minutes).',
                 }
                 if local_instructions.get('available'):
                     payload['local_token_instructions'] = local_instructions
                 return jsonify(payload)
             except Exception:
-                return jsonify({'error': 'Failed to generate IAM token. Please retry or contact an administrator.'}), 500
+                return jsonify({'error': 'Failed to prepare IAM token instructions. Please retry or contact an administrator.'}), 500
 
         username = str(req.get('db_username') or '').strip()
         token = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
@@ -6889,6 +7008,37 @@ def activate_database_request(request_id):
         return jsonify({'error': 'Activation failed. Please retry or contact an administrator.'}), 500
 
 
+@app.route('/api/databases/request/<request_id>/delete', methods=['DELETE'])
+def delete_database_request(request_id):
+    """Owner-only delete for old/expired/completed DB requests."""
+    try:
+        data = request.get_json(silent=True) or {}
+        user_email = str(data.get('user_email') or request.args.get('user_email') or '').strip()
+        if not user_email:
+            return jsonify({'error': 'user_email required'}), 400
+        if request_id not in requests_db:
+            return jsonify({'error': 'Request not found'}), 404
+        req = requests_db[request_id]
+        if req.get('type') != 'database_access':
+            return jsonify({'error': 'Not a database request'}), 400
+        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+            return jsonify({'error': 'Access denied'}), 403
+
+        status = str(req.get('status') or '').strip().lower()
+        expired = _is_db_request_expired(req)
+        deletable_statuses = {'denied', 'rejected', 'failed', 'revoked', 'expired'}
+        if status not in deletable_statuses and not expired:
+            return jsonify({'error': 'Only expired/completed requests can be deleted.'}), 400
+
+        del requests_db[request_id]
+        if request_id in approvals_db:
+            del approvals_db[request_id]
+        _save_requests()
+        return jsonify({'status': 'deleted', 'request_id': request_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/vault/create-db-session', methods=['POST'])
 @app.route('/api/vault/create-db-session', methods=['POST'])
 def internal_create_db_session():
@@ -6933,7 +7083,7 @@ def execute_database_query():
             return jsonify({'error': 'Invalid request type'}), 400
         if db_request.get('user_email') != user_email:
             return jsonify({'error': 'Access denied: user mismatch'}), 403
-        if str(db_request.get('status') or '').lower() not in ('active', 'approved'):
+        if str(db_request.get('status') or '').lower() not in ('active',):
             return jsonify({'error': 'Access not active. Please wait for approval.'}), 403
 
         if _is_db_request_expired(db_request):
@@ -6957,16 +7107,13 @@ def execute_database_query():
         password = db_request.get('password') or db_request.get('vault_token') or db_request.get('db_password')
 
         if effective_auth == 'iam':
-            # Generate a short-lived IAM auth token on demand (do not persist the token).
-            try:
-                tok = _generate_rds_iam_db_auth_token(
-                    instance_id=str(db_request.get('db_instance_id') or '').strip(),
-                    region=str(db_request.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
-                    db_username=str(username or '').strip(),
+            return jsonify({
+                'error': (
+                    'PAM terminal is disabled for IAM-auth requests. '
+                    'Use "Get login details", generate token locally with your own AWS Identity Center credentials, '
+                    'and connect from your SQL client.'
                 )
-                password = tok.get('token') or password
-            except Exception:
-                return jsonify({'error': 'IAM token generation failed. Please retry or use External Tool credentials.'}), 500
+            }), 400
         
         if not all([host, username, password, database]):
             return jsonify({'error': 'Database credentials not available. Request may have expired.'}), 400

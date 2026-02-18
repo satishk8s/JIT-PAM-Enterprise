@@ -2059,6 +2059,10 @@ async function loadDbRequests() {
             const requesterEmail = String(req.user_email || '').trim().toLowerCase();
             return isAdminUser || (currentUserEmail && requesterEmail === currentUserEmail);
         };
+        const canDeleteRequest = (req) => {
+            const s = String(req.status || '').toLowerCase();
+            return s === 'expired' || s === 'rejected';
+        };
         list.innerHTML = requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = String(db?.engine || 'db');
@@ -2070,8 +2074,20 @@ async function loadDbRequests() {
                 ? req.permissions
                 : (typeof req.permissions === 'string' ? req.permissions.split(',').map(s => s.trim()).filter(Boolean) : []);
             const permsText = perms.length ? perms.join(', ') : '—';
+            const queryTypes = Array.isArray(req.query_types)
+                ? req.query_types.map(s => String(s || '').trim()).filter(Boolean)
+                : [];
+            const actionsText = queryTypes.length ? queryTypes.join(', ') : permsText;
             const expires = req.expires_at ? new Date(req.expires_at).toLocaleString() : '—';
+            const requestedAt = req.requested_at || req.created_at;
+            const requestedAtText = requestedAt ? new Date(requestedAt).toLocaleString() : '—';
             const justification = String(req.justification || '').trim();
+            const accountId = String(req.account_id || '').trim();
+            const accountName = String(req.account_name || '').trim();
+            const accountText = accountName
+                ? (accountId ? `${accountName} (${accountId})` : accountName)
+                : (accountId || '—');
+            const instanceText = String(req.db_instance_id || db?.id || '—').trim() || '—';
             const requestIdRaw = String(req.request_id || '');
             const requestIdEsc = requestIdRaw.replace(/'/g, "\\'");
             const isActive = req.status === 'active';
@@ -2091,8 +2107,12 @@ async function loadDbRequests() {
                 </summary>
                 <div class="db-request-details">
                     <div class="db-request-body">
+                        <p><strong>Requested:</strong> ${escapeHtml(requestedAtText)}</p>
+                        <p><strong>AWS Account:</strong> <span class="db-req-perms">${escapeHtml(accountText)}</span></p>
+                        <p><strong>RDS Instance:</strong> <code>${escapeHtml(instanceText)}</code></p>
+                        <p><strong>Database(s):</strong> ${escapeHtml(dbNames || '—')}</p>
+                        <p><strong>Actions:</strong> <span class="db-req-perms">${escapeHtml(actionsText)}</span></p>
                         <p><span class="db-req-proxy">Proxy:</span> <code>${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</code></p>
-                        <p>Queries: <span class="db-req-perms">${escapeHtml(permsText)}</span></p>
                         <p>Role: ${escapeHtml(roleLabel(req.role))} | ${escapeHtml(String(req.duration_hours || 2))}h</p>
                         ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
                         ${isActive ? `<div class="db-cred-inline" id="dbCredInline-${escapeAttr(domId)}" style="display:none;"></div>` : ''}
@@ -2110,6 +2130,9 @@ async function loadDbRequests() {
                         ${canApprove(req) ? `
                         <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
                         <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
+                        ` : ''}
+                        ${canDeleteRequest(req) ? `
+                        <button class="btn-danger btn-sm" onclick="deleteDbRequest('${requestIdEsc}')"><i class="fas fa-trash"></i> Delete</button>
                         ` : ''}
                     </div>
                 </div>
@@ -2138,6 +2161,23 @@ async function denyDbRequest(requestId) {
         alert('Request rejected');
         loadDbRequests();
         if (typeof loadRequests === 'function') loadRequests();
+    } catch (e) {
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
+    }
+}
+
+async function deleteDbRequest(requestId) {
+    if (!confirm('Delete this old request from your list?')) return;
+    const userEmail = localStorage.getItem('userEmail') || '';
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/delete?user_email=${encodeURIComponent(userEmail)}`, {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        alert('Request deleted');
+        loadDbRequests();
+        refreshApprovedDatabases();
     } catch (e) {
         alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
@@ -2207,10 +2247,30 @@ function closeDbCredInline(requestId) {
 }
 
 async function copyToClipboard(text) {
+    const value = String(text || '');
     try {
-        await navigator.clipboard.writeText(String(text || ''));
-        return true;
-    } catch (_) {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(value);
+            return true;
+        }
+    } catch (e) {
+        // fall through to legacy copy fallback
+    }
+    try {
+        const el = document.createElement('textarea');
+        el.value = value;
+        el.setAttribute('readonly', 'readonly');
+        el.style.position = 'fixed';
+        el.style.top = '-9999px';
+        el.style.left = '-9999px';
+        document.body.appendChild(el);
+        el.focus();
+        el.select();
+        el.setSelectionRange(0, el.value.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(el);
+        return !!ok;
+    } catch (e) {
         return false;
     }
 }
@@ -2308,6 +2368,7 @@ function renderDbCredentialsInline(containerEl, creds) {
     const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
     const tokenExpires = creds.iam_token_expires_at ? new Date(creds.iam_token_expires_at).toLocaleString() : '';
     const localInstr = creds.local_token_instructions;
+    const inlineId = escapeAttr(containerEl.dataset.reqid || '');
     const localBlock = (localInstr && localInstr.available && Array.isArray(localInstr.steps))
         ? `
         <details class="db-cred-local-instr" style="margin-top:14px;border:1px solid var(--border-color);border-radius:10px;overflow:hidden;">
@@ -2317,33 +2378,65 @@ function renderDbCredentialsInline(containerEl, creds) {
             <div style="padding:12px 14px;font-size:13px;">
                 <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (SSO or access key), then run:</p>
                 <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command || '')}</pre>
+                ${localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Save token in shell variable:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
+                ${localInstr.mysql_connect_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Connect with MySQL CLI:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.mysql_connect_command)}</pre>` : ''}
                 <ol style="margin:8px 0 0 0;padding-left:18px;">
                     ${(localInstr.steps || []).map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}
                 </ol>
+                ${Array.isArray(localInstr.dbeaver_steps) && localInstr.dbeaver_steps.length ? `<div style="margin-top:10px;"><strong>DBeaver</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.dbeaver_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
+                ${Array.isArray(localInstr.workbench_steps) && localInstr.workbench_steps.length ? `<div style="margin-top:10px;"><strong>MySQL Workbench</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.workbench_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
             </div>
         </details>`
         : '';
+
+    const iamPasswordInfo = isIam
+        ? `
+        <div class="db-cred-password">
+            <div class="db-cred-k">IAM Token Password</div>
+            <div class="db-cred-note">
+                Generate token locally with your own AWS Identity Center credentials, then use that token as password.
+                ${tokenExpires ? `Token valid until ${escapeHtml(tokenExpires)}.` : ''}
+            </div>
+            ${localInstr && localInstr.token_command ? `
+            <div class="db-cred-password-row" style="margin-top:8px;">
+                <input id="dbCredTokenCmd-${inlineId}" type="text" value="${escapeAttr(localInstr.token_command)}" readonly>
+                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredTokenCmd-${inlineId}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                    <i class="fas fa-copy"></i> Copy token command
+                </button>
+            </div>` : ''}
+        </div>`
+        : `
+        <div class="db-cred-password">
+            <div class="db-cred-k">Password</div>
+            <div class="db-cred-password-row">
+                <input id="dbCredPwd-${inlineId}" type="password" value="${escapeAttr(password)}" readonly>
+                <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbCredPwd-${inlineId}'); if(!el) return; el.type = (el.type==='password')?'text':'password';})()">
+                    <i class="fas fa-eye"></i> Show
+                </button>
+                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredPwd-${inlineId}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                    <i class="fas fa-copy"></i> Copy
+                </button>
+            </div>
+        </div>`;
 
     containerEl.innerHTML = `
         <div class="db-cred-inline-grid">
             <div><div class="db-cred-k">Proxy Host</div><div class="db-cred-v"><code>${escapeHtml(proxyHost)}</code></div></div>
             <div><div class="db-cred-k">Proxy Port</div><div class="db-cred-v"><code>${escapeHtml(String(proxyPort))}</code></div></div>
-            <div><div class="db-cred-k">DB Username</div><div class="db-cred-v"><code>${escapeHtml(username)}</code></div></div>
+            <div>
+                <div class="db-cred-k">DB Username</div>
+                <div class="db-cred-v">
+                    <div class="db-cred-password-row">
+                        <input id="dbCredUser-${inlineId}" type="text" value="${escapeAttr(username)}" readonly>
+                        <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredUser-${inlineId}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                            <i class="fas fa-copy"></i> Copy
+                        </button>
+                    </div>
+                </div>
+            </div>
             <div><div class="db-cred-k">Expiry</div><div class="db-cred-v">${escapeHtml(expires)}</div></div>
         </div>
-        <div class="db-cred-password">
-            <div class="db-cred-k">${isIam ? 'IAM Token (Password)' : 'Password'}</div>
-            ${isIam && tokenExpires ? `<div class="db-cred-note">Token valid until ${escapeHtml(tokenExpires)} (generate a fresh token if it expires).</div>` : ''}
-            <div class="db-cred-password-row">
-                <input id="dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}" type="password" value="${escapeAttr(password)}" readonly>
-                <button class="btn-secondary btn-sm" onclick="(function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; el.type = (el.type==='password')?'text':'password';})()">
-                    <i class="fas fa-eye"></i> Show
-                </button>
-                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredPwd-${escapeAttr(containerEl.dataset.reqid || '')}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
-                    <i class="fas fa-copy"></i> Copy
-                </button>
-            </div>
-        </div>
+        ${iamPasswordInfo}
         ${localBlock}
     `;
 }
@@ -2420,13 +2513,33 @@ async function openDbExternalToolModal(requestId) {
         const username = data.db_username || '—';
         const dbName = data.database || 'default';
         const isIam = String(data.effective_auth || '').toLowerCase() === 'iam';
+        const usernameFieldId = `dbModalUsername-${domIdFromRequestId(String(requestId))}`;
 
         const tokenExpires = data.iam_token_expires_at ? new Date(data.iam_token_expires_at).toLocaleString() : '';
-        const tokenField = `
+        const localInstr = data.local_token_instructions || {};
+        const tokenField = isIam ? `
             <div class="db-modal-grid" style="margin-top:14px;">
                 <div style="grid-column: 1 / -1;">
-                    <strong>${isIam ? 'IAM Token (Password)' : 'Password (Vault Token)'}</strong>
-                    ${isIam && tokenExpires ? `<div class="db-step-hint" style="margin-top:6px;">Token valid until <strong>${escapeHtml(tokenExpires)}</strong>. Generate a fresh token if it expires.</div>` : ''}
+                    <strong>IAM Token Password</strong>
+                    <div class="db-step-hint" style="margin-top:6px;">
+                        Generate token locally with your own AWS Identity Center session and paste it as password in your DB client.
+                        ${tokenExpires ? `Token valid until <strong>${escapeHtml(tokenExpires)}</strong>.` : ''}
+                    </div>
+                    ${localInstr.token_command ? `
+                    <div class="db-step-hint" style="margin-top:8px;">Token command:</div>
+                    <pre style="margin:6px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>
+                    <button class="btn-primary btn-sm" onclick="(async function(){const ok=await copyToClipboard(${JSON.stringify(localInstr.token_command)}); alert(ok?'Copied':'Copy failed');})()">
+                        <i class="fas fa-copy"></i> Copy token command
+                    </button>` : ''}
+                    <small class="db-step-hint" style="display:block;margin-top:8px;">
+                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (proxy only). Access expires automatically.
+                    </small>
+                </div>
+            </div>
+        ` : `
+            <div class="db-modal-grid" style="margin-top:14px;">
+                <div style="grid-column: 1 / -1;">
+                    <strong>Password (Vault Token)</strong>
                     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
                         <input id="dbVaultTokenInput" type="password" value="${escapeAttr(data.password || data.vault_token || '')}" readonly
                                style="flex:1;min-width:240px;padding:10px 12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);">
@@ -2443,8 +2556,6 @@ async function openDbExternalToolModal(requestId) {
                 </div>
             </div>
         `;
-
-        const localInstr = data.local_token_instructions;
         const localBlock = (localInstr && localInstr.available && localInstr.cli_command)
             ? `
             <details class="db-cred-local-instr" style="margin-top:14px;border:1px solid var(--border-color);border-radius:10px;overflow:hidden;">
@@ -2454,7 +2565,11 @@ async function openDbExternalToolModal(requestId) {
                 <div style="padding:12px 14px;font-size:13px;">
                     <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (e.g. <code>aws sso login</code> or access key), then run:</p>
                     <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command)}</pre>
+                    ${localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Save token in shell variable:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
+                    ${localInstr.mysql_connect_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Connect with MySQL CLI:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.mysql_connect_command)}</pre>` : ''}
                     ${Array.isArray(localInstr.steps) && localInstr.steps.length ? `<ol style="margin:8px 0 0 0;padding-left:18px;">${localInstr.steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol>` : ''}
+                    ${Array.isArray(localInstr.dbeaver_steps) && localInstr.dbeaver_steps.length ? `<div style="margin-top:10px;"><strong>DBeaver</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.dbeaver_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
+                    ${Array.isArray(localInstr.workbench_steps) && localInstr.workbench_steps.length ? `<div style="margin-top:10px;"><strong>MySQL Workbench</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.workbench_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
                 </div>
             </details>`
             : '';
@@ -2474,8 +2589,17 @@ async function openDbExternalToolModal(requestId) {
                 <div><strong>Proxy Host:</strong> <code>${escapeHtml(proxyHost)}</code></div>
                 <div><strong>Proxy Port:</strong> <code>${escapeHtml(String(proxyPort))}</code></div>
                 <div><strong>Database:</strong> <code>${escapeHtml(dbName)}</code></div>
-                <div><strong>Username:</strong> <code>${escapeHtml(username)}</code></div>
                 <div><strong>Expires:</strong> ${escapeHtml(expires)}</div>
+              </div>
+              <div style="margin-top:10px;">
+                <strong>Username</strong>
+                <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                  <input id="${escapeAttr(usernameFieldId)}" type="text" value="${escapeAttr(username)}" readonly
+                         style="flex:1;min-width:240px;padding:10px 12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);">
+                  <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('${escapeAttr(usernameFieldId)}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                    <i class="fas fa-copy"></i> Copy username
+                  </button>
+                </div>
               </div>
               ${tokenField}
               ${localBlock}
@@ -2513,12 +2637,22 @@ async function viewDbRequestDetails(requestId) {
             ? data.permissions
             : (typeof data.permissions === 'string' ? data.permissions.split(',').map(s => s.trim()).filter(Boolean) : []);
         const permsText = perms.length ? perms.join(', ') : '—';
+        const queryTypes = Array.isArray(data.query_types)
+            ? data.query_types.map(s => String(s || '').trim()).filter(Boolean)
+            : [];
+        const actionsText = queryTypes.length ? queryTypes.join(', ') : permsText;
         const created = data.created_at ? new Date(data.created_at).toLocaleString() : '—';
         const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
         const status = String(data.status || 'pending');
         const role = getDbRoleLabel(String(data.role || 'custom'));
         const justification = String(data.justification || '').trim() || '—';
         const dbNames = dbs.map(d => d?.name).filter(Boolean).join(', ') || '—';
+        const accountId = String(data.account_id || '').trim();
+        const accountName = String(data.account_name || '').trim();
+        const accountText = accountName
+            ? (accountId ? `${accountName} (${accountId})` : accountName)
+            : (accountId || '—');
+        const instanceText = String(data.db_instance_id || db.id || '—').trim() || '—';
         const proxyEndpoint = (data.proxy_host && data.proxy_port)
             ? `${data.proxy_host}:${data.proxy_port}`
             : ((db.host && db.port) ? `${db.host}:${db.port}` : (db.host || '—'));
@@ -2542,8 +2676,10 @@ async function viewDbRequestDetails(requestId) {
                 <div><strong>Status:</strong> <span class="badge">${escapeHtml(status)}</span></div>
                 <div><strong>Engine:</strong> ${escapeHtml(String(db.engine || data.engine || '—'))}</div>
                 <div><strong>Proxy Endpoint:</strong> <code>${escapeHtml(proxyEndpoint)}</code></div>
+                <div><strong>AWS Account:</strong> ${escapeHtml(accountText)}</div>
+                <div><strong>RDS Instance:</strong> <code>${escapeHtml(instanceText)}</code></div>
                 <div><strong>Database(s):</strong> ${escapeHtml(dbNames)}</div>
-                <div><strong>Selected Queries:</strong> ${escapeHtml(permsText)}</div>
+                <div><strong>Actions:</strong> ${escapeHtml(actionsText)}</div>
                 <div><strong>Role:</strong> ${escapeHtml(role)}</div>
                 <div><strong>Duration:</strong> ${escapeHtml(String(data.duration_hours || 2))}h</div>
                 <div><strong>Created:</strong> ${escapeHtml(created)}</div>
