@@ -3244,9 +3244,37 @@ def list_identity_center_users():
         return jsonify({'error': str(e), 'users': []}), 500
 
 
+@app.route('/api/admin/identity-center/groups/search', methods=['GET'])
+def search_identity_center_groups():
+    """Search Identity Center groups by display name or description. Requires ?q= (min 1 char)."""
+    try:
+        q = (request.args.get('q') or request.args.get('search') or '').strip()
+        if not q:
+            return jsonify({'error': 'Query parameter q or search is required (e.g. ?q=devops)', 'groups': []}), 400
+        identity_store_id = CONFIG.get('identity_store_id')
+        if not identity_store_id:
+            return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
+        identitystore = boto3.client('identitystore', region_name='ap-south-1', config=AWS_CONFIG)
+        groups = []
+        for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
+            for g in page.get('Groups', []):
+                groups.append({
+                    'group_id': g.get('GroupId'),
+                    'display_name': g.get('DisplayName', ''),
+                    'description': g.get('Description', ''),
+                })
+        q_lower = q.lower()
+        groups = [g for g in groups
+                  if q_lower in (g.get('display_name') or '').lower()
+                  or q_lower in (g.get('description') or '').lower()]
+        return jsonify({'groups': groups})
+    except Exception as e:
+        return jsonify({'error': str(e), 'groups': []}), 500
+
+
 @app.route('/api/admin/identity-center/groups', methods=['GET'])
 def list_identity_center_groups():
-    """List groups from AWS Identity Center (live pull). Requires identitystore:ListGroups."""
+    """List groups from AWS Identity Center (live pull). Optional ?q= or ?search= filters."""
     try:
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
@@ -3260,6 +3288,12 @@ def list_identity_center_groups():
                     'display_name': g.get('DisplayName', ''),
                     'description': g.get('Description', ''),
                 })
+        search = (request.args.get('search') or request.args.get('q') or '').strip()
+        if search:
+            q_lower = search.lower()
+            groups = [g for g in groups
+                      if q_lower in (g.get('display_name') or '').lower()
+                      or q_lower in (g.get('description') or '').lower()]
         return jsonify({'groups': groups})
     except Exception as e:
         return jsonify({'error': str(e), 'groups': []}), 500
@@ -4767,10 +4801,12 @@ def _resolve_account_environment(account_id):
 
 
 def _resolve_requester_for_vault(req):
-    """Return a safe requester string for Vault username template. Avoid literal 'Email' or invalid emails."""
+    """Return a safe requester string for Vault username template. Never use literal 'Email' or invalid emails."""
     email = str(req.get('user_email') or '').strip()
-    if email and '@' in email and email.lower() != 'email':
-        return email
+    if email and '@' in email:
+        local = email.split('@', 1)[0].strip().lower()
+        if local and local != 'email':
+            return email
     rid = str(req.get('id') or '')[:12]
     return 'req-' + (rid or 'unknown') if rid else 'req-unknown'
 

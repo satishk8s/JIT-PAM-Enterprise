@@ -179,7 +179,9 @@ class VaultManager:
             s = s.split("@", 1)[0]
         s = re.sub(r"[^a-z0-9]+", "_", s)
         s = re.sub(r"_+", "_", s).strip("_")
-        return s or "user"
+        if not s or s == "email":
+            return "user"
+        return s
 
     @staticmethod
     def _username_template_for(*, requester: str, request_id: str, engine: str) -> str:
