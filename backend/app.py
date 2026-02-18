@@ -1384,11 +1384,29 @@ def saml_complete():
 (function() {
   var email = %s;
   var displayName = %s;
+  var prevEmail = localStorage.getItem('userEmail') || '';
+  var prevName = localStorage.getItem('userName') || '';
+  var prevIsAdmin = (localStorage.getItem('isAdmin') === 'true');
+  var finalEmail = (email && email !== 'Email') ? email : prevEmail;
+  function deriveNameFromEmail(em) {
+    if (!em || em === 'Email' || em.indexOf('@') < 0) return '';
+    var local = em.split('@')[0].replace(/[._-]+/g, ' ').replace(/\\s+/g, ' ').trim();
+    if (!local) return '';
+    return local.split(' ').map(function(p){ return p ? (p.charAt(0).toUpperCase() + p.slice(1)) : ''; }).join(' ').trim();
+  }
+  var finalName = (displayName && displayName !== 'User' && displayName !== 'Email')
+    ? displayName
+    : ((prevName && prevName !== 'User' && prevName !== 'Email') ? prevName : deriveNameFromEmail(finalEmail));
+  var samlAdmin = %s;
+  var finalIsAdmin = samlAdmin;
+  if (!email && (!displayName || displayName === 'User' || displayName === 'Email')) {
+    finalIsAdmin = samlAdmin || prevIsAdmin;
+  }
   localStorage.setItem('isLoggedIn', 'true');
-  localStorage.setItem('userEmail', email || '');
-  localStorage.setItem('userName', displayName || 'User');
-  localStorage.setItem('isAdmin', %s);
-  localStorage.setItem('userRole', %s);
+  localStorage.setItem('userEmail', finalEmail || '');
+  localStorage.setItem('userName', finalName || 'User');
+  localStorage.setItem('isAdmin', String(finalIsAdmin));
+  localStorage.setItem('userRole', finalIsAdmin ? 'admin' : 'user');
   localStorage.setItem('loginMethod', 'sso');
   window.location.replace('/');
 })();
@@ -1397,8 +1415,7 @@ def saml_complete():
     return html % (
         json.dumps(email),
         json.dumps(display_name or 'User'),
-        json.dumps(str(is_admin).lower()),
-        json.dumps('admin' if is_admin else 'user'),
+        json.dumps(bool(is_admin)),
     )
 
 

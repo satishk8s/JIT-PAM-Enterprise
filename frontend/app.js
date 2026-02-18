@@ -9,6 +9,14 @@ let isAdmin = false;
 // PAM admin check: isAdmin is set from API /api/admin/check-pam-admin (backend stores PAM solution admins)
 const API_BASE_FOR_ADMIN = (typeof window !== 'undefined' && window.API_BASE) ? window.API_BASE : ((!window.location.port || window.location.port === '80' || window.location.port === '443') ? '/api' : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
 
+function deriveNameFromEmail(email) {
+    const em = String(email || '').trim();
+    if (!em || em.toLowerCase() === 'email' || em.indexOf('@') < 0) return '';
+    const local = em.split('@', 1)[0].replace(/[._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!local) return '';
+    return local.split(' ').map(p => p ? (p.charAt(0).toUpperCase() + p.slice(1)) : '').join(' ').trim();
+}
+
 function setPamAdminFromApi(email) {
     if (typeof fetch === 'undefined') return;
     const em = String(email || '').trim();
@@ -63,8 +71,19 @@ async function syncSsoProfileFromSession() {
         const email = String(data.email || '').trim();
         const fallbackEmail = String(localStorage.getItem('userEmail') || '').trim();
         const resolvedEmail = email || fallbackEmail;
-        const displayName = String(data.display_name || '').trim();
-        const isAdminFromSession = data.is_admin === true;
+        const profileName = String(data.display_name || '').trim();
+        const storedName = String(localStorage.getItem('userName') || '').trim();
+        let displayName = profileName;
+        if (!displayName || displayName.toLowerCase() === 'user' || displayName.toLowerCase() === 'email') {
+            displayName = (storedName && storedName.toLowerCase() !== 'user' && storedName.toLowerCase() !== 'email')
+                ? storedName
+                : deriveNameFromEmail(resolvedEmail);
+        }
+
+        const profileLooksIncomplete = !email && (!profileName || profileName.toLowerCase() === 'user');
+        const isAdminFromSession = profileLooksIncomplete
+            ? (localStorage.getItem('isAdmin') === 'true')
+            : (data.is_admin === true);
 
         if (resolvedEmail) localStorage.setItem('userEmail', resolvedEmail);
         if (displayName) localStorage.setItem('userName', displayName);
@@ -76,7 +95,7 @@ async function syncSsoProfileFromSession() {
         isAdmin = isAdminFromSession;
         currentUser = {
             email: resolvedEmail,
-            name: displayName || (localStorage.getItem('userName') || 'User'),
+            name: displayName || deriveNameFromEmail(resolvedEmail) || (localStorage.getItem('userName') || 'User'),
             isAdmin: isAdminFromSession
         };
 
@@ -443,7 +462,12 @@ function showMainApp() {
 
 function updateUIForRole() {
     var rawName = localStorage.getItem('userName') || (currentUser && currentUser.name) || (localStorage.getItem('userEmail') || '').split('@')[0].replace(/\./g, ' ') || 'User';
-    if (rawName === 'Email' || (localStorage.getItem('userEmail') || '').trim() === 'Email') rawName = 'User';
+    const storedEmail = (localStorage.getItem('userEmail') || '').trim();
+    if (rawName === 'Email' || storedEmail === 'Email') rawName = 'User';
+    if (!rawName || String(rawName).trim().toLowerCase() === 'user') {
+        const derived = deriveNameFromEmail(storedEmail);
+        if (derived) rawName = derived;
+    }
     const displayName = rawName || 'User';
     const userNameEl = document.getElementById('userNameDisplay');
     if (userNameEl) {
