@@ -127,11 +127,32 @@ Create an IAM policy (e.g. `PAM-IdentityCenter-Policy`) with the following. Atta
 
 - IAM → Roles → Create role.
 - **Option A (PAM in management account):** Trusted entity: **AWS service** → EC2. Attach `PAM-IdentityCenter-Policy`. Name e.g. `PAM-IdentityCenter-Role`. Then EC2 → your PAM instance → Actions → Security → Modify IAM role → select this role.
-- **Option B (PAM in POC account):** Trusted entity: **Another AWS account** → POC account ID. Optionally restrict to a specific role in POC (e.g. `arn:aws:iam::POC_ACCOUNT_ID:role/PAM-App-Role`). Attach `PAM-IdentityCenter-Policy`. Name e.g. `PAMIdentityCenterRole`. Note the role ARN (e.g. `arn:aws:iam::MANAGEMENT_ACCOUNT_ID:role/PAMIdentityCenterRole`).
+- **Option B (PAM in POC account):** Trusted entity: **Another AWS account** → POC account ID `867625663987`. Use the trust policy below (restricts to role `ssm-role`). Attach `PAM-IdentityCenter-Policy`. Name e.g. `PAMIdentityCenterRole`. Note the role ARN (e.g. `arn:aws:iam::MANAGEMENT_ACCOUNT_ID:role/PAMIdentityCenterRole`).
+
+#### Trust relationship for management account role (Option B)
+
+When creating the role in the **management account**, set this **Trust relationship** so only the PAM EC2 role in POC can assume it (POC role: `arn:aws:iam::867625663987:role/ssm-role`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::867625663987:role/ssm-role"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+```
+
+After creating the role, IAM → Roles → **PAMIdentityCenterRole** → Trust relationships → Edit → paste the above.
 
 ### 3. If using Option B (cross-account)
 
-In **POC account**, ensure the PAM EC2 instance profile has a policy that allows assuming the management role, for example:
+In **POC account** (867625663987), ensure the PAM EC2 instance profile role **ssm-role** can assume the management role. Add this inline policy or a dedicated policy to **ssm-role**:
 
 ```json
 {
@@ -146,7 +167,7 @@ In **POC account**, ensure the PAM EC2 instance profile has a policy that allows
 }
 ```
 
-Replace `MANAGEMENT_ACCOUNT_ID` with the management account ID.
+Replace `MANAGEMENT_ACCOUNT_ID` with your management account ID.
 
 Then the PAM application must assume this role (e.g. on startup) and use the returned temporary credentials for all Identity Center and SSO-admin calls. Until that is implemented, you can still use **temporary credentials** (access key, secret key, session token) from your SSO login and set them in the environment on the PAM EC2 for testing.
 

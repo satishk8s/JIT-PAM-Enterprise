@@ -1819,6 +1819,28 @@
                             <div class="notice-warning-pam" style="margin-top: 20px;">
                                 <strong>⚠️ Security Note:</strong> Only users synced from AD or Identity Center can access cloud resources. This ensures unauthorized users cannot gain access even if they're in the company.
                             </div>
+                            <!-- Identity Center: List Users, Groups, Permission Sets -->
+                            <div class="management-identity-center-lists" style="margin-top: 24px;">
+                                <h4 style="margin-bottom: 12px;"><i class="fas fa-list"></i> Identity Center data</h4>
+                                <div class="mgmt-ic-tabs" style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                                    <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab active" data-tab="users" onclick="showManagementICTab('users')"><i class="fas fa-users"></i> List users</button>
+                                    <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab" data-tab="groups" onclick="showManagementICTab('groups')"><i class="fas fa-user-friends"></i> List groups</button>
+                                    <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab" data-tab="permission-sets" onclick="showManagementICTab('permission-sets')"><i class="fas fa-key"></i> List permission sets</button>
+                                    <button type="button" class="btn-primary btn-pam btn-sm" onclick="loadManagementIdentityCenterLists()"><i class="fas fa-sync-alt"></i> Refresh</button>
+                                </div>
+                                <div id="mgmtICUsersPanel" class="mgmt-ic-panel" style="display: block;">
+                                    <p class="mgmt-ic-hint">Users from AWS Identity Center (live). Click Refresh to load.</p>
+                                    <div id="mgmtICUsersTableWrap" style="overflow: auto; max-height: 360px;"><table class="users-table" style="width:100%;"><thead><tr><th>Username</th><th>Email</th><th>Display name</th><th>First / Last</th></tr></thead><tbody id="mgmtICUsersBody"><tr><td colspan="4" class="text-muted">No data yet. Click Refresh.</td></tr></tbody></table></div>
+                                </div>
+                                <div id="mgmtICGroupsPanel" class="mgmt-ic-panel" style="display: none;">
+                                    <p class="mgmt-ic-hint">Groups from AWS Identity Center (live). Click Refresh to load.</p>
+                                    <div id="mgmtICGroupsTableWrap" style="overflow: auto; max-height: 360px;"><table class="users-table" style="width:100%;"><thead><tr><th>Display name</th><th>Description</th><th>Group ID</th></tr></thead><tbody id="mgmtICGroupsBody"><tr><td colspan="3" class="text-muted">No data yet. Click Refresh.</td></tr></tbody></table></div>
+                                </div>
+                                <div id="mgmtICPermissionSetsPanel" class="mgmt-ic-panel" style="display: none;">
+                                    <p class="mgmt-ic-hint">Permission sets from IAM Identity Center. Click Refresh to load.</p>
+                                    <div id="mgmtICPermissionSetsTableWrap" style="overflow: auto; max-height: 360px;"><table class="users-table" style="width:100%;"><thead><tr><th>Name</th><th>ARN</th></tr></thead><tbody id="mgmtICPermissionSetsBody"><tr><td colspan="2" class="text-muted">No data yet. Click Refresh.</td></tr></tbody></table></div>
+                                </div>
+                            </div>
                         </div>
                         
                         <!-- Policy builder tiles (same logic, tile layout) -->

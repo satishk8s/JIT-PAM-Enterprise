@@ -117,13 +117,18 @@ function showSyncFromAD() {
 }
 
 function showSyncFromIdentityCenter() {
-    if (confirm('🔄 Sync from AWS Identity Center?\n\nThis will:\n✓ Import all users from Identity Center\n✓ Import all groups\n✓ Only Identity Center users can access cloud\n\nContinue?')) {
-        var apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
-        fetch(apiBase + '/admin/sync-from-identity-center', {
-            method: 'POST'
+    if (!confirm('🔄 Sync from AWS Identity Center?\n\nThis will:\n✓ Import all users from Identity Center\n✓ Import all groups\n✓ Only Identity Center users can access cloud\n\nContinue?')) return;
+    var apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+    var url = apiBase + '/admin/sync-from-identity-center';
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+        .then(function(res) {
+            var ct = (res.headers.get('Content-Type') || '').toLowerCase();
+            if (!ct.includes('application/json')) {
+                throw new Error('Backend returned non-JSON. Is the API URL correct? Use backend that serves this app (e.g. same host or set API_BASE).');
+            }
+            return res.json();
         })
-        .then(res => res.json())
-        .then(data => {
+        .then(function(data) {
             if (data.error) {
                 alert('❌ Sync failed: ' + data.error);
                 return;
@@ -131,12 +136,14 @@ function showSyncFromIdentityCenter() {
             if (data.status === 'success') {
                 alert('✅ Identity Center Sync Complete!\n\nUsers synced: ' + (data.summary && data.summary.users_synced) + '\nGroups synced: ' + (data.summary && data.summary.groups_synced));
                 if (typeof loadUsersManagement === 'function') loadUsersManagement();
+                if (typeof loadManagementIdentityCenterLists === 'function') loadManagementIdentityCenterLists();
             } else {
                 alert('❌ Sync failed: ' + (data.summary && data.summary.error || data.error || 'Unknown error'));
             }
         })
-        .catch(err => alert('❌ Error: ' + err.message));
-    }
+        .catch(function(err) {
+            alert('❌ Error: ' + (err.message || 'Failed to fetch. Check backend is running and API URL (API_BASE) points to it.'));
+        });
 }
 
 function showManualUserManagement() {
@@ -169,4 +176,73 @@ function exportConfiguration() {
     a.click();
     
     alert('✅ Configuration exported as JSON');
+}
+
+function getApiBase() {
+    return typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')));
+}
+
+function showManagementICTab(tab) {
+    ['users', 'groups', 'permission-sets'].forEach(function(t) {
+        var panel = document.getElementById('mgmtIC' + (t === 'users' ? 'Users' : t === 'groups' ? 'Groups' : 'PermissionSets') + 'Panel');
+        var btn = document.querySelector('.mgmt-ic-tab[data-tab="' + t + '"]');
+        if (panel) panel.style.display = t === tab ? 'block' : 'none';
+        if (btn) btn.classList.toggle('active', t === tab);
+    });
+}
+
+function loadManagementIdentityCenterLists() {
+    var apiBase = getApiBase();
+    var errMsg = 'Check backend is running and API_BASE points to it.';
+    function safeJson(res) {
+        var ct = (res.headers.get('Content-Type') || '').toLowerCase();
+        if (!ct.includes('application/json')) throw new Error('Backend returned non-JSON. ' + errMsg);
+        return res.json();
+    }
+    function showListError(panelId, bodyId, msg) {
+        var body = document.getElementById(bodyId);
+        if (!body) return;
+        body.innerHTML = '<tr><td colspan="10" class="text-muted">' + (msg || 'Failed to load. ' + errMsg) + '</td></tr>';
+    }
+    function showUsers(data) {
+        var body = document.getElementById('mgmtICUsersBody');
+        if (!body) return;
+        if (data && data.error) { showListError('mgmtICUsersPanel', 'mgmtICUsersBody', data.error); return; }
+        var list = Array.isArray(data) ? data : (data && data.users) ? data.users : [];
+        if (list.length === 0) { body.innerHTML = '<tr><td colspan="4" class="text-muted">No users returned.</td></tr>'; return; }
+        body.innerHTML = list.map(function(u) {
+            return '<tr><td>' + (u.username || u.user_name || '-') + '</td><td>' + (u.email || '-') + '</td><td>' + (u.display_name || '-') + '</td><td>' + (u.first_name || '') + ' ' + (u.last_name || '') + '</td></tr>';
+        }).join('');
+    }
+    function showGroups(data) {
+        var body = document.getElementById('mgmtICGroupsBody');
+        if (!body) return;
+        if (data && data.error) { showListError('mgmtICGroupsPanel', 'mgmtICGroupsBody', data.error); return; }
+        var list = Array.isArray(data) ? data : (data && data.groups) ? data.groups : [];
+        if (list.length === 0) { body.innerHTML = '<tr><td colspan="3" class="text-muted">No groups returned.</td></tr>'; return; }
+        body.innerHTML = list.map(function(g) {
+            return '<tr><td>' + (g.display_name || g.DisplayName || '-') + '</td><td>' + (g.description || g.Description || '-') + '</td><td>' + (g.group_id || g.GroupId || '-') + '</td></tr>';
+        }).join('');
+    }
+    function showPermissionSets(data) {
+        var body = document.getElementById('mgmtICPermissionSetsBody');
+        if (!body) return;
+        if (data && data.error) { showListError('mgmtICPermissionSetsPanel', 'mgmtICPermissionSetsBody', data.error); return; }
+        var list = Array.isArray(data) ? data : (data && data.permission_sets) ? data.permission_sets : [];
+        if (list.length === 0) { body.innerHTML = '<tr><td colspan="2" class="text-muted">No permission sets returned.</td></tr>'; return; }
+        body.innerHTML = list.map(function(p) {
+            var name = p.name || p.Name || p.permission_set_name || '-';
+            var arn = p.arn || p.Arn || p.permission_set_arn || '-';
+            return '<tr><td>' + name + '</td><td style="word-break:break-all;">' + arn + '</td></tr>';
+        }).join('');
+    }
+    fetch(apiBase + '/admin/identity-center/users', { method: 'GET' })
+        .then(safeJson).then(showUsers)
+        .catch(function(e) { showUsers({ error: (e.message || 'Failed to fetch users. ' + errMsg) }); });
+    fetch(apiBase + '/admin/identity-center/groups', { method: 'GET' })
+        .then(safeJson).then(showGroups)
+        .catch(function(e) { showGroups({ error: (e.message || 'Failed to fetch groups. ' + errMsg) }); });
+    fetch(apiBase + '/admin/identity-center/permission-sets', { method: 'GET' })
+        .then(safeJson).then(showPermissionSets)
+        .catch(function(e) { showPermissionSets({ error: (e.message || 'Failed to fetch permission sets. ' + errMsg) }); });
 }
