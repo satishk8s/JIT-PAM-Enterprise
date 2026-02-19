@@ -1072,11 +1072,21 @@ function getStructuredPermissionGroupsForEngine(engine) {
     let groups = DB_STRUCTURED_PERMISSIONS.map(g => ({ ...g, ops: [...g.ops] }));
 
     if (isMysql) {
-        // MySQL doesn't support MERGE keyword.
-        groups = groups.map(g => (g.id === 'modification' ? { ...g, ops: g.ops.filter(op => op !== 'MERGE') } : g));
+        const mysqlAllowed = new Set([
+            'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE',
+            'INSERT', 'UPDATE', 'DELETE',
+            'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME',
+            'CREATE INDEX', 'DROP INDEX',
+            'EXECUTE', 'CALL', 'LOCK', 'UNLOCK'
+        ]);
+        groups = groups.map(g => ({ ...g, ops: g.ops.filter(op => mysqlAllowed.has(op)) }));
     } else if (isPostgres) {
-        // Postgres doesn't support DESCRIBE as a SQL keyword.
-        groups = groups.map(g => (g.id === 'retrieval' ? { ...g, ops: g.ops.filter(op => op !== 'DESCRIBE') } : g));
+        const postgresAllowed = new Set([
+            'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE',
+            'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
+            'EXECUTE', 'CALL'
+        ]);
+        groups = groups.map(g => ({ ...g, ops: g.ops.filter(op => postgresAllowed.has(op)) }));
     } else if (isRedshift) {
         // Redshift is Postgres-like; keep without DESCRIBE.
         groups = groups.map(g => (g.id === 'retrieval' ? { ...g, ops: g.ops.filter(op => op !== 'DESCRIBE') } : g));

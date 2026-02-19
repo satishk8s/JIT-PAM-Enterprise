@@ -5346,6 +5346,16 @@ def _public_db_activation_error(err) -> tuple[str, str]:
             "Backend IAM role does not have IAM Identity Center permissions required to create/assign permission sets. Please contact an administrator.",
             "IDC_ACCESS_DENIED",
         )
+    if 'unsupported high-risk database operation' in low:
+        return (
+            "Requested database operations are blocked for safety. Please request only explicit least-privilege operations.",
+            "DB_OP_BLOCKED",
+        )
+    if 'unsupported operation(s) for mysql least-privilege grants' in low or 'unsupported operation(s) for postgresql least-privilege grants' in low:
+        return (
+            "One or more requested operations are not supported for the selected database engine. Update the request operations and retry.",
+            "DB_OP_UNSUPPORTED",
+        )
     if 'user not found in identity store' in low or 'identity store' in low and 'not found' in low:
         return (
             "Requester is not available in IAM Identity Center. Please sign in using an Identity Center user and retry.",
@@ -5458,6 +5468,35 @@ def _normalize_permissions_list(value):
     if isinstance(value, str):
         return [p.strip() for p in value.split(',') if p.strip()]
     return []
+
+def _normalize_db_engine_for_permissions(engine):
+    e = str(engine or '').strip().lower()
+    if not e:
+        return ''
+    if 'aurora' in e or 'maria' in e:
+        return 'mysql'
+    if 'postgres' in e:
+        return 'postgres'
+    return e
+
+def _validate_permissions_for_engine(engine, perms):
+    """
+    Validate requested DB operations against engine-specific least-privilege rules.
+    Returns None when valid, otherwise a safe user-facing error string.
+    """
+    eng = _normalize_db_engine_for_permissions(engine)
+    ops = _normalize_permissions_list(perms)
+    if not eng or not ops:
+        return None
+
+    try:
+        if eng == 'mysql':
+            VaultManager._mysql_privileges_from_ops(ops)
+        elif eng == 'postgres':
+            VaultManager._postgres_privileges_from_ops(ops)
+    except Exception as e:
+        return str(e)
+    return None
 
 def _is_read_only_ops(perms_upper):
     read_ops = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
@@ -7211,6 +7250,15 @@ def request_database_access():
         if not perms_upper:
             return jsonify({'error': 'At least one permission/query operation is required'}), 400
 
+        first_db = databases[0] if isinstance(databases[0], dict) else {}
+        selected_engine = str(first_db.get('engine') or data.get('engine') or '').strip()
+        permission_validation_error = _validate_permissions_for_engine(selected_engine, perms_upper)
+        if permission_validation_error:
+            engine_label = selected_engine or 'selected database engine'
+            return jsonify({
+                'error': f"Requested operations are not supported for {engine_label}: {permission_validation_error}"
+            }), 400
+
         # Derive role from ops when not explicitly provided.
         known_roles = {'read_only', 'read_limited_write', 'read_full_write', 'admin'}
         if role not in known_roles:
@@ -7223,7 +7271,6 @@ def request_database_access():
             else:
                 role = 'read_only'
 
-        first_db = databases[0] if isinstance(databases[0], dict) else {}
         auth_profile = _resolve_rds_auth_profile(
             instance_id=selected_instance_id or str(first_db.get('id') or ''),
             host=str(first_db.get('host') or ''),

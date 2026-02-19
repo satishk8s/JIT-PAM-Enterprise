@@ -119,58 +119,124 @@ class VaultManager:
     @staticmethod
     def _mysql_privileges_from_ops(ops: list[str]) -> tuple[str, bool]:
         """
-        Convert structured operations into a MySQL GRANT privilege string.
+        Convert requested operations into a strict MySQL GRANT privilege string.
+
+        Security model:
+        - Grant only what was explicitly requested.
+        - Never auto-expand to broader write/admin bundles.
+        - Reject unsupported/high-risk operations instead of over-granting.
 
         Returns: (privileges_csv, with_grant_option)
         """
-        up = {str(o or "").strip().upper() for o in (ops or []) if str(o or "").strip()}
+        normalized_ops = {
+            re.sub(r"\s+", " ", str(o or "").strip().upper())
+            for o in (ops or [])
+            if str(o or "").strip()
+        }
+        if not normalized_ops:
+            raise RuntimeError("At least one database operation is required")
 
-        # Read-ish operations
-        read_ops = {"SELECT", "SHOW", "EXPLAIN", "DESCRIBE", "ANALYZE"}
-        # Write operations
-        write_ops = {"INSERT", "UPDATE", "DELETE", "MERGE"}
-        # Schema operations
-        schema_ops = {"CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "CREATE INDEX", "DROP INDEX"}
-        # Privilege operations
-        priv_ops = {"GRANT", "REVOKE"}
-        # Admin-ish
-        admin_ops = {"EXECUTE", "CALL", "LOCK", "UNLOCK"}
+        # Never convert admin requests into blanket DB admin.
+        banned_ops = {"ALL", "ALL PRIVILEGES", "GRANT", "REVOKE"}
+        requested_banned = sorted(op for op in normalized_ops if op in banned_ops)
+        if requested_banned:
+            raise RuntimeError(
+                "Unsupported high-risk database operation(s): "
+                + ", ".join(requested_banned)
+                + ". Please request explicit least-privilege operations."
+            )
 
-        requested = set()
-        with_grant_option = False
+        # Operation -> MySQL privilege mapping (strict, no broad write expansion).
+        op_to_priv = {
+            "SELECT": "SELECT",
+            "SHOW": "SHOW VIEW",
+            # EXPLAIN/DESCRIBE are read metadata/query-plan operations that require SELECT.
+            "EXPLAIN": "SELECT",
+            "DESCRIBE": "SELECT",
+            "INSERT": "INSERT",
+            "UPDATE": "UPDATE",
+            "DELETE": "DELETE",
+            "CREATE": "CREATE",
+            "ALTER": "ALTER",
+            "DROP": "DROP",
+            # TRUNCATE uses DROP privilege in MySQL.
+            "TRUNCATE": "DROP",
+            # RENAME TABLE requires ALTER privilege.
+            "RENAME": "ALTER",
+            "CREATE INDEX": "INDEX",
+            "DROP INDEX": "INDEX",
+            "EXECUTE": "EXECUTE",
+            "CALL": "EXECUTE",
+            "LOCK": "LOCK TABLES",
+            "UNLOCK": "LOCK TABLES",
+        }
 
-        if up & read_ops:
-            requested.add("SELECT")
-        if up & {"SHOW"}:
-            # SHOW VIEW allows SHOW CREATE VIEW; safe default for visibility (optional)
-            requested.add("SHOW VIEW")
-        if up & write_ops:
-            requested.update({"INSERT", "UPDATE", "DELETE"})
-        if up & schema_ops:
-            # MySQL doesn't have granular TRUNCATE privilege; TRUNCATE requires DROP.
-            requested.update({"CREATE", "ALTER", "DROP"})
-            if ("CREATE INDEX" in up) or ("DROP INDEX" in up):
-                requested.add("INDEX")
-        if up & admin_ops:
-            # Stored routines
-            if ("EXECUTE" in up) or ("CALL" in up):
-                requested.add("EXECUTE")
-            if ("LOCK" in up) or ("UNLOCK" in up):
-                requested.add("LOCK TABLES")
-        if up & priv_ops:
-            # Highly privileged; require WITH GRANT OPTION.
-            requested.add("ALL PRIVILEGES")
-            with_grant_option = True
+        unsupported = sorted(op for op in normalized_ops if op not in op_to_priv)
+        if unsupported:
+            raise RuntimeError(
+                "Unsupported operation(s) for MySQL least-privilege grants: "
+                + ", ".join(unsupported)
+            )
 
-        if "ALL PRIVILEGES" in requested:
-            return "ALL PRIVILEGES", with_grant_option
-
-        # Stable ordering for readability/debugging
+        requested = {op_to_priv[op] for op in normalized_ops}
         order = ["SELECT", "SHOW VIEW", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "INDEX", "EXECUTE", "LOCK TABLES"]
         privs = [p for p in order if p in requested]
         if not privs:
-            privs = ["SELECT"]
-        return ", ".join(privs), with_grant_option
+            raise RuntimeError("No MySQL privileges could be derived from requested operations")
+        return ", ".join(privs), False
+
+    @staticmethod
+    def _postgres_privileges_from_ops(ops: list[str]) -> tuple[list[str], bool]:
+        """
+        Convert requested operations into strict PostgreSQL table privileges.
+
+        Returns: (table_privileges, include_execute)
+        """
+        normalized_ops = {
+            re.sub(r"\s+", " ", str(o or "").strip().upper())
+            for o in (ops or [])
+            if str(o or "").strip()
+        }
+        if not normalized_ops:
+            raise RuntimeError("At least one database operation is required")
+
+        banned_ops = {"ALL", "ALL PRIVILEGES", "GRANT", "REVOKE"}
+        requested_banned = sorted(op for op in normalized_ops if op in banned_ops)
+        if requested_banned:
+            raise RuntimeError(
+                "Unsupported high-risk database operation(s): "
+                + ", ".join(requested_banned)
+                + ". Please request explicit least-privilege operations."
+            )
+
+        op_to_table_priv = {
+            "SELECT": "SELECT",
+            # EXPLAIN/DESCRIBE are read metadata/query-plan operations that require SELECT.
+            "SHOW": "SELECT",
+            "EXPLAIN": "SELECT",
+            "DESCRIBE": "SELECT",
+            "INSERT": "INSERT",
+            "UPDATE": "UPDATE",
+            "DELETE": "DELETE",
+            "TRUNCATE": "TRUNCATE",
+        }
+        exec_ops = {"EXECUTE", "CALL"}
+
+        unsupported = sorted(op for op in normalized_ops if (op not in op_to_table_priv and op not in exec_ops))
+        if unsupported:
+            raise RuntimeError(
+                "Unsupported operation(s) for PostgreSQL least-privilege grants: "
+                + ", ".join(unsupported)
+            )
+
+        table_privs = {op_to_table_priv[op] for op in normalized_ops if op in op_to_table_priv}
+        include_execute = bool(normalized_ops & exec_ops)
+
+        if not table_privs and not include_execute:
+            raise RuntimeError("No PostgreSQL privileges could be derived from requested operations")
+
+        order = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"]
+        return [p for p in order if p in table_privs], include_execute
 
     @staticmethod
     def _normalize_user_fragment(value: str) -> str:
@@ -280,7 +346,20 @@ class VaultManager:
         use_iam_auth = auth_l == "iam"
         if "postgres" in engine_l:
             db_name = db_names[0]
-            # Basic Postgres grants (public schema); can be extended later.
+            table_privs, include_execute = VaultManager._postgres_privileges_from_ops(allowed_ops or [])
+            table_privs_csv = ", ".join(table_privs) if table_privs else ""
+            table_grants = []
+            if table_privs_csv:
+                table_grants = [
+                    f"GRANT {table_privs_csv} ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
+                    f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT {table_privs_csv} ON TABLES TO \"{{{{name}}}}\";",
+                ]
+            execute_grants = []
+            if include_execute:
+                execute_grants = [
+                    f"GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO \"{{{{name}}}}\";",
+                    f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO \"{{{{name}}}}\";",
+                ]
             if use_iam_auth:
                 creation_statements = [
                     "CREATE ROLE \"{{name}}\" WITH LOGIN;",
@@ -288,7 +367,8 @@ class VaultManager:
                     "GRANT rds_iam TO \"{{name}}\";",
                     f"GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{{{{name}}}}\";",
                     f"GRANT USAGE ON SCHEMA public TO \"{{{{name}}}}\";",
-                    f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
+                    *table_grants,
+                    *execute_grants,
                 ]
             else:
                 # Note: Postgres uses "role" as a user; Vault will create a user with a password.
@@ -296,9 +376,13 @@ class VaultManager:
                     "CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';",
                     f"GRANT CONNECT ON DATABASE \"{db_name}\" TO \"{{{{name}}}}\";",
                     f"GRANT USAGE ON SCHEMA public TO \"{{{{name}}}}\";",
-                    f"GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"{{{{name}}}}\";",
+                    *table_grants,
+                    *execute_grants,
                 ]
             revocation_statements = [
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM \"{{name}}\";",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON FUNCTIONS FROM \"{{name}}\";",
+                "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM \"{{name}}\";",
                 "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM \"{{name}}\";",
                 "REVOKE USAGE ON SCHEMA public FROM \"{{name}}\";",
                 f"REVOKE CONNECT ON DATABASE \"{db_name}\" FROM \"{{{{name}}}}\";",
