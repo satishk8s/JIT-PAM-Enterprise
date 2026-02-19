@@ -1308,7 +1308,39 @@
     border-color: var(--primary-color);
 }
 
-.db-perm-btn.is-selected {
+.db-perm-btn:disabled,
+.db-perm-btn.is-policy-locked {
+    cursor: not-allowed;
+    opacity: 0.48;
+    border-color: color-mix(in srgb, var(--border-color) 90%, #64748b 10%);
+    background: color-mix(in srgb, var(--bg-secondary) 92%, #1e293b 8%);
+    color: color-mix(in srgb, var(--text-secondary) 88%, #cbd5e1 12%);
+    transform: none;
+    box-shadow: none;
+}
+
+.db-policy-notice {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, #f59e0b 65%, var(--border-color) 35%);
+    background: color-mix(in srgb, #f59e0b 12%, var(--bg-primary) 88%);
+    color: color-mix(in srgb, #f59e0b 70%, var(--text-primary) 30%);
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.db-policy-notice.db-policy-notice-error {
+    border-color: color-mix(in srgb, #ef4444 68%, var(--border-color) 32%);
+    background: color-mix(in srgb, #ef4444 12%, var(--bg-primary) 88%);
+    color: color-mix(in srgb, #ef4444 78%, var(--text-primary) 22%);
+}
+
+.db-policy-notice.db-policy-notice-warning {
+    border-color: color-mix(in srgb, #f59e0b 70%, var(--border-color) 30%);
+}
+
+.db-perm-btn.is-selected:not(:disabled) {
     background: linear-gradient(145deg, rgba(14, 165, 233, 0.92) 0%, rgba(56, 189, 248, 0.92) 60%, rgba(20, 184, 166, 0.88) 100%);
     border-color: rgba(255, 255, 255, 0.22);
     color: #ffffff;
@@ -2274,6 +2306,17 @@
     min-width: 0;
 }
 
+.db-request-select-wrap {
+    display: inline-flex;
+    align-items: center;
+}
+
+.db-request-select-checkbox {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
 .db-request-title {
     color: var(--text-primary);
     font-size: 13px;
@@ -2434,6 +2477,36 @@
     padding: 24px;
     text-align: center;
     color: var(--text-secondary);
+}
+
+.db-bulk-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 10px 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, #38bdf8 22%);
+    background: color-mix(in srgb, var(--bg-secondary) 88%, #0ea5e9 12%);
+}
+
+.db-bulk-select-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.db-bulk-select-label input {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+}
+
+.db-bulk-count {
+    color: var(--text-secondary);
+    font-size: 12px;
 }
 
 .btn-icon {

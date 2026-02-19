@@ -14,6 +14,19 @@ const dbCredCache = {}; // requestId -> { data, fetchedAt }
 let dbRequestsPage = 1;
 let dbRequestsPageSize = 20;
 let dbRequestsSearch = '';
+let dbBulkDeleteSelection = new Set();
+let dbVisibleBulkDeleteIds = [];
+let dbInstancePolicy = {
+    account_env: '',
+    data_classification: '',
+    is_sensitive_classification: false,
+    enforce_read_only: false,
+    tags_present: true,
+    request_allowed: true,
+    request_block_reason: ''
+};
+
+const DB_READ_ONLY_OPS = new Set(['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE']);
 
 // Structured permission catalog (engine-specific filtering applied at render time)
 const DB_STRUCTURED_PERMISSIONS = [
@@ -166,6 +179,8 @@ function selectDbEngine(engId, label, engine) {
     dbStepState = { step: 1, provider };
     selectedDatabases = [];
     dbStructuredPermissions = [];
+    resetDbInstancePolicy();
+    applyDbInstancePolicyNotice(null);
     showDbStepPanel();
     renderDbStepContent();
 }
@@ -185,6 +200,8 @@ function closeDbStepPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    resetDbInstancePolicy();
+    applyDbInstancePolicyNotice(null);
 }
 
 function closeDbAiPanel() {
@@ -198,6 +215,8 @@ function closeDbAiPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    resetDbInstancePolicy();
+    applyDbInstancePolicyNotice(null);
 }
 
 function closeDbStructuredPanel() {
@@ -211,6 +230,8 @@ function closeDbStructuredPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    resetDbInstancePolicy();
+    applyDbInstancePolicyNotice(null);
 }
 
 function openStructuredDatabaseAccess() {
@@ -323,6 +344,13 @@ async function renderDbStepContent() {
                                     data-password-auth-enabled="${escapeAttr(String(inst.password_auth_enabled !== false))}"
                                     data-db-resource-id="${escapeAttr(inst.db_resource_id || '')}"
                                     data-region="${escapeAttr(inst.region || '')}"
+                                    data-account-env="${escapeAttr(inst.account_env || '')}"
+                                    data-data-classification="${escapeAttr(inst.data_classification || '')}"
+                                    data-is-sensitive-classification="${escapeAttr(String(!!inst.is_sensitive_classification))}"
+                                    data-enforce-read-only="${escapeAttr(String(!!inst.enforce_read_only))}"
+                                    data-tags-present="${escapeAttr(String(!!inst.tags_present))}"
+                                    data-request-allowed="${escapeAttr(String(inst.request_allowed !== false))}"
+                                    data-request-block-reason="${escapeAttr(inst.request_block_reason || '')}"
                                     data-search="${searchText}"
                                 >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | default DB ${escapeHtml(defaultDb)}</option>`;
                             }).join('')}
@@ -609,9 +637,79 @@ function onDbStepAccountChange() {
     dbRequestDraft.account_id = document.getElementById('dbStepAccount')?.value || '';
 }
 
+function resetDbInstancePolicy() {
+    dbInstancePolicy = {
+        account_env: '',
+        data_classification: '',
+        is_sensitive_classification: false,
+        enforce_read_only: false,
+        tags_present: true,
+        request_allowed: true,
+        request_block_reason: ''
+    };
+}
+
+function extractDbPolicyFromSourceEl(sourceEl) {
+    if (!sourceEl) return null;
+    return {
+        account_env: (sourceEl.getAttribute('data-account-env') || '').toLowerCase(),
+        data_classification: sourceEl.getAttribute('data-data-classification') || '',
+        is_sensitive_classification: String(sourceEl.getAttribute('data-is-sensitive-classification') || '').toLowerCase() === 'true',
+        enforce_read_only: String(sourceEl.getAttribute('data-enforce-read-only') || '').toLowerCase() === 'true',
+        tags_present: String(sourceEl.getAttribute('data-tags-present') || '').toLowerCase() === 'true',
+        request_allowed: String(sourceEl.getAttribute('data-request-allowed') || '').toLowerCase() !== 'false',
+        request_block_reason: sourceEl.getAttribute('data-request-block-reason') || ''
+    };
+}
+
+function isReadOnlyDbOperation(op) {
+    const v = String(op || '').trim().toUpperCase();
+    return DB_READ_ONLY_OPS.has(v);
+}
+
+function enforceStructuredPermissionPolicy() {
+    if (!dbInstancePolicy?.enforce_read_only) return;
+    if (!Array.isArray(dbStructuredPermissions) || !dbStructuredPermissions.length) return;
+    const filtered = dbStructuredPermissions.filter(isReadOnlyDbOperation);
+    if (filtered.length !== dbStructuredPermissions.length) {
+        dbStructuredPermissions = filtered;
+        syncStructuredPermissionUI();
+        hydrateStructuredSummary();
+        alert('This production RDS is tagged as sensitive data. Only view access operations are allowed.');
+    }
+}
+
+function applyDbInstancePolicyNotice(policy) {
+    const noticeEl = document.getElementById('dbInstancePolicyNotice');
+    if (!noticeEl) return;
+    const p = policy || dbInstancePolicy || {};
+    if (!p || (!p.enforce_read_only && p.request_allowed !== false)) {
+        noticeEl.style.display = 'none';
+        noticeEl.className = 'db-policy-notice';
+        noticeEl.textContent = '';
+        return;
+    }
+    if (p.request_allowed === false) {
+        noticeEl.style.display = 'block';
+        noticeEl.className = 'db-policy-notice db-policy-notice-error';
+        noticeEl.textContent = p.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.";
+        return;
+    }
+    if (p.enforce_read_only) {
+        const cls = String(p.data_classification || 'sensitive').toUpperCase();
+        noticeEl.style.display = 'block';
+        noticeEl.className = 'db-policy-notice db-policy-notice-warning';
+        noticeEl.textContent = `Selected production RDS is tagged as ${cls}. Only view access operations are allowed.`;
+        return;
+    }
+    noticeEl.style.display = 'none';
+}
+
 function onDbStepInstanceSelect(radio) {
     if (!radio) return;
     dbRequestDraft = dbRequestDraft || {};
+    const policy = extractDbPolicyFromSourceEl(radio);
+    dbInstancePolicy = policy || dbInstancePolicy;
     dbRequestDraft._selectedInstance = {
         id: radio.value,
         name: radio.getAttribute('data-name'),
@@ -620,8 +718,16 @@ function onDbStepInstanceSelect(radio) {
         iam_auth_enabled: String(radio.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
         password_auth_enabled: String(radio.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
         db_resource_id: radio.getAttribute('data-db-resource-id') || '',
-        region: radio.getAttribute('data-region') || ''
+        region: radio.getAttribute('data-region') || '',
+        account_env: policy?.account_env || '',
+        data_classification: policy?.data_classification || '',
+        is_sensitive_classification: !!policy?.is_sensitive_classification,
+        enforce_read_only: !!policy?.enforce_read_only,
+        tags_present: policy?.tags_present !== false,
+        request_allowed: policy?.request_allowed !== false,
+        request_block_reason: policy?.request_block_reason || ''
     };
+    applyDbInstancePolicyNotice(dbInstancePolicy);
 }
 
 function renderDbStepSelectedInstanceMeta(sourceEl) {
@@ -648,7 +754,9 @@ function onDbStepInstanceDropdownChange(selectEl) {
     if (!selected || !selected.value) {
         dbRequestDraft = dbRequestDraft || {};
         dbRequestDraft._selectedInstance = null;
+        resetDbInstancePolicy();
         renderDbStepSelectedInstanceMeta(null);
+        applyDbInstancePolicyNotice(null);
         return;
     }
     onDbStepInstanceSelect(selected);
@@ -687,7 +795,9 @@ function filterDbStepInstances() {
             select.value = '';
             dbRequestDraft = dbRequestDraft || {};
             dbRequestDraft._selectedInstance = null;
+            resetDbInstancePolicy();
             renderDbStepSelectedInstanceMeta(null);
+            applyDbInstancePolicyNotice(null);
         }
 
         if (countEl) countEl.textContent = String(visible);
@@ -776,6 +886,8 @@ async function dbStepNext() {
                 return;
             }
             dbRequestDraft.account_id = accountId;
+            resetDbInstancePolicy();
+            applyDbInstancePolicyNotice(null);
             dbStepState.step = 2;
             renderDbStepContent();
             return;
@@ -787,10 +899,19 @@ async function dbStepNext() {
             const manualInstanceId = document.getElementById('dbStepInstanceId')?.value?.trim();
             const manualRegion = document.getElementById('dbStepInstanceRegion')?.value?.trim();
             if (manualInstanceId) {
+                resetDbInstancePolicy();
+                applyDbInstancePolicyNotice(null);
                 dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
             } else if (hasDiscoveredInstances) {
                 if (!selectedOption) {
                     alert('Please select an RDS instance or enter instance ID manually.');
+                    return;
+                }
+                const policy = extractDbPolicyFromSourceEl(selectedOption) || {};
+                dbInstancePolicy = policy;
+                applyDbInstancePolicyNotice(policy);
+                if (policy.request_allowed === false) {
+                    alert(policy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
                     return;
                 }
                 dbRequestDraft._selectedInstance = {
@@ -801,13 +922,22 @@ async function dbStepNext() {
                     iam_auth_enabled: String(selectedOption.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
                     password_auth_enabled: String(selectedOption.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
                     db_resource_id: selectedOption.getAttribute('data-db-resource-id') || '',
-                    region: selectedOption.getAttribute('data-region') || ''
+                    region: selectedOption.getAttribute('data-region') || '',
+                    account_env: policy.account_env || '',
+                    data_classification: policy.data_classification || '',
+                    is_sensitive_classification: !!policy.is_sensitive_classification,
+                    enforce_read_only: !!policy.enforce_read_only,
+                    tags_present: policy.tags_present !== false,
+                    request_allowed: policy.request_allowed !== false,
+                    request_block_reason: policy.request_block_reason || ''
                 };
             } else {
                 if (!manualInstanceId) {
                     alert('Please enter the RDS instance ID.');
                     return;
                 }
+                resetDbInstancePolicy();
+                applyDbInstancePolicyNotice(null);
                 dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
             }
             dbStepState.step = 3;
@@ -907,6 +1037,7 @@ function transitionToDbChatUI() {
     const aiPanel = document.getElementById('dbAiPanel');
     if (stepPanel) stepPanel.classList.add('db-step-hidden');
     if (aiPanel) aiPanel.classList.remove('db-ai-panel-hidden');
+    applyDbInstancePolicyNotice(dbInstancePolicy);
     document.getElementById('dbAiEngineLabel').textContent = selectedEngine?.label || 'Database';
     initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
 }
@@ -922,7 +1053,9 @@ function transitionToDbStructuredUI() {
     const engine = (selectedEngine?.engine || '').toLowerCase();
     const engineLabel = document.getElementById('dbStructuredEngineLabel');
     if (engineLabel) engineLabel.textContent = label;
+    applyDbInstancePolicyNotice(dbInstancePolicy);
     renderStructuredPermissionGroups(engine);
+    enforceStructuredPermissionPolicy();
     if (typeof initDbDurationMode === 'function' && !document.getElementById('dbDurationModeHours')?.dataset.dbDurationInited) {
         initDbDurationMode();
         const el = document.getElementById('dbDurationModeHours');
@@ -1112,12 +1245,18 @@ function renderStructuredPermissionGroups(engine) {
     if (!container || !selectedContainer) return;
 
     const groups = getStructuredPermissionGroupsForEngine(engine);
+    const enforceReadOnly = !!dbInstancePolicy?.enforce_read_only;
     container.innerHTML = groups.map(g => `
         <div class="db-perm-group" data-group="${escapeAttr(g.id)}">
             <div class="db-perm-group-title">${escapeHtml(g.title)}</div>
             <div class="db-perm-btns">
                 ${(g.ops || []).map(op => `
-                    <button type="button" class="db-perm-btn" data-op="${escapeAttr(op)}">${escapeHtml(op)}</button>
+                    <button
+                        type="button"
+                        class="db-perm-btn${enforceReadOnly && !isReadOnlyDbOperation(op) ? ' is-policy-locked' : ''}"
+                        data-op="${escapeAttr(op)}"
+                        ${enforceReadOnly && !isReadOnlyDbOperation(op) ? 'disabled title="Disabled by data-classification policy (view-only access)."' : ''}
+                    >${escapeHtml(op)}</button>
                 `).join('')}
             </div>
         </div>
@@ -1146,12 +1285,14 @@ function renderStructuredPermissionGroups(engine) {
     }
 
     // Sync UI state
+    enforceStructuredPermissionPolicy();
     syncStructuredPermissionUI();
 }
 
 function toggleStructuredPermission(op) {
     const perm = String(op || '').trim();
     if (!perm) return;
+    if (dbInstancePolicy?.enforce_read_only && !isReadOnlyDbOperation(perm)) return;
     const idx = dbStructuredPermissions.indexOf(perm);
     if (idx >= 0) dbStructuredPermissions.splice(idx, 1);
     else dbStructuredPermissions.push(perm);
@@ -1376,8 +1517,16 @@ async function submitStructuredDbRequest() {
         alert('Please select account, instance, and database first.');
         return;
     }
+    if (dbInstancePolicy?.request_allowed === false) {
+        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
+        return;
+    }
     if (!dbStructuredPermissions.length) {
         alert('Please select at least one query permission.');
+        return;
+    }
+    if (dbInstancePolicy?.enforce_read_only && dbStructuredPermissions.some(op => !isReadOnlyDbOperation(op))) {
+        alert('Only view access operations are allowed for this selected production RDS.');
         return;
     }
     const duration = getDbStructuredDurationHours();
@@ -1680,7 +1829,13 @@ function buildDbAiContext() {
             iam_auth_enabled: !!selectedInstance.iam_auth_enabled,
             password_auth_enabled: selectedInstance.password_auth_enabled !== false,
             db_resource_id: selectedInstance.db_resource_id || '',
-            region: selectedInstance.region || ''
+            region: selectedInstance.region || '',
+            account_env: selectedInstance.account_env || '',
+            data_classification: selectedInstance.data_classification || '',
+            enforce_read_only: !!selectedInstance.enforce_read_only,
+            tags_present: selectedInstance.tags_present !== false,
+            request_allowed: selectedInstance.request_allowed !== false,
+            request_block_reason: selectedInstance.request_block_reason || ''
         } : null,
         region: selectedInstance?.region || '',
         databases
@@ -1934,6 +2089,21 @@ async function submitDbRequestViaAi(opts = {}) {
         alert('Please select an instance and database name first.');
         return;
     }
+    if (dbInstancePolicy?.request_allowed === false) {
+        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
+        return;
+    }
+    if (dbInstancePolicy?.enforce_read_only) {
+        const requestedOps = Array.isArray(dbRequestDraft.permissions)
+            ? dbRequestDraft.permissions.map(x => String(x || '').trim()).filter(Boolean)
+            : String(dbRequestDraft.permissions || '').split(',').map(x => x.trim()).filter(Boolean);
+        const role = String(dbRequestDraft.role || '').trim().toLowerCase();
+        const roleImpliesWrite = role === 'admin' || role === 'read_full_write' || role === 'read_limited_write';
+        if (roleImpliesWrite || requestedOps.some(op => !isReadOnlyDbOperation(op))) {
+            alert('Only view access operations are allowed for this selected production RDS.');
+            return;
+        }
+    }
     try {
         const inst = dbRequestDraft?._selectedInstance || {};
         const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
@@ -1975,6 +2145,9 @@ async function submitDbRequestViaAi(opts = {}) {
 function filterDbRequests(status) {
     dbStatusFilter = (status || 'active');
     dbRequestsPage = 1;
+    dbBulkDeleteSelection = new Set();
+    dbVisibleBulkDeleteIds = [];
+    renderDbBulkDeleteToolbar();
     loadDbRequests();
 }
 
@@ -1989,9 +2162,104 @@ function mapDbLifecycleToUiStatus(status) {
     return s;
 }
 
+function isDbRequestDeletableStatus(status) {
+    const s = String(status || '').toLowerCase();
+    return s === 'pending' || s === 'expired' || s === 'rejected';
+}
+
+function isDbBulkDeleteStatus(status) {
+    const s = String(status || '').toLowerCase();
+    return s === 'pending' || s === 'expired';
+}
+
+function renderDbBulkDeleteToolbar() {
+    const box = document.getElementById('dbRequestsBulkActions');
+    if (!box) return;
+    const visibleIds = Array.isArray(dbVisibleBulkDeleteIds) ? dbVisibleBulkDeleteIds : [];
+    if (!isDbBulkDeleteStatus(dbStatusFilter) || !visibleIds.length) {
+        box.style.display = 'none';
+        box.innerHTML = '';
+        return;
+    }
+    const selectedCount = visibleIds.filter(id => dbBulkDeleteSelection.has(id)).length;
+    const allChecked = selectedCount > 0 && selectedCount === visibleIds.length;
+    box.style.display = 'flex';
+    box.innerHTML = `
+        <label class="db-bulk-select-label">
+            <input type="checkbox" ${allChecked ? 'checked' : ''} onchange="toggleDbBulkSelectAll(this.checked)">
+            <span>Select all</span>
+        </label>
+        <span class="db-bulk-count">${selectedCount} selected</span>
+        <button class="btn-danger btn-sm" ${selectedCount ? '' : 'disabled'} onclick="deleteSelectedDbRequests()">
+            <i class="fas fa-trash"></i> Delete selected
+        </button>
+    `;
+}
+
+function syncDbBulkSelectionToDom() {
+    const checkboxes = document.querySelectorAll('.db-request-select-checkbox');
+    checkboxes.forEach(cb => {
+        const rid = cb.getAttribute('data-request-id') || '';
+        cb.checked = dbBulkDeleteSelection.has(rid);
+    });
+}
+
+function toggleDbRequestSelection(requestId, checked) {
+    const rid = String(requestId || '').trim();
+    if (!rid) return;
+    if (checked) dbBulkDeleteSelection.add(rid);
+    else dbBulkDeleteSelection.delete(rid);
+    renderDbBulkDeleteToolbar();
+}
+
+function toggleDbBulkSelectAll(checked) {
+    if (!Array.isArray(dbVisibleBulkDeleteIds)) return;
+    if (checked) {
+        dbVisibleBulkDeleteIds.forEach(id => dbBulkDeleteSelection.add(id));
+    } else {
+        dbVisibleBulkDeleteIds.forEach(id => dbBulkDeleteSelection.delete(id));
+    }
+    syncDbBulkSelectionToDom();
+    renderDbBulkDeleteToolbar();
+}
+
+async function deleteSelectedDbRequests() {
+    const userEmail = localStorage.getItem('userEmail') || '';
+    const selectedIds = (dbVisibleBulkDeleteIds || []).filter(id => dbBulkDeleteSelection.has(id));
+    if (!selectedIds.length) {
+        alert('Select at least one request to delete.');
+        return;
+    }
+    if (!confirm(`Delete ${selectedIds.length} selected request(s)?`)) return;
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/requests/bulk-delete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_email: userEmail, request_ids: selectedIds })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        const deleted = Array.isArray(data.deleted) ? data.deleted : [];
+        const failed = Array.isArray(data.failed) ? data.failed : [];
+        deleted.forEach(id => dbBulkDeleteSelection.delete(id));
+        alert(
+            failed.length
+                ? `Deleted ${deleted.length} request(s). ${failed.length} could not be deleted.`
+                : `Deleted ${deleted.length} request(s).`
+        );
+        loadDbRequests();
+        refreshApprovedDatabases();
+    } catch (e) {
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
+    }
+}
+
 function focusDbRequestsStatus(status) {
     dbStatusFilter = mapDbLifecycleToUiStatus(status);
     dbRequestsPage = 1;
+    dbBulkDeleteSelection = new Set();
+    dbVisibleBulkDeleteIds = [];
+    renderDbBulkDeleteToolbar();
     document.querySelectorAll('.requests-status-btn[data-category="databases"]').forEach(btn => {
         btn.classList.remove('requests-status-glow');
         if (btn.dataset.status === dbStatusFilter) btn.classList.add('requests-status-glow');
@@ -2056,9 +2324,16 @@ async function loadDbRequests() {
         if (!list) return;
         const requests = data.requests || [];
         renderDbRequestsPager(data);
+        if (!isDbBulkDeleteStatus(dbStatusFilter)) {
+            dbBulkDeleteSelection = new Set();
+            dbVisibleBulkDeleteIds = [];
+        }
         if (!requests || requests.length === 0) {
             const label = dbStatusFilter ? dbStatusFilter : 'active';
             list.innerHTML = `<div class="db-requests-empty">No ${escapeHtml(label)} database requests</div>`;
+            dbBulkDeleteSelection = new Set();
+            dbVisibleBulkDeleteIds = [];
+            renderDbBulkDeleteToolbar();
             return;
         }
         const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
@@ -2069,10 +2344,15 @@ async function loadDbRequests() {
             const requesterEmail = String(req.user_email || '').trim().toLowerCase();
             return isAdminUser || (currentUserEmail && requesterEmail === currentUserEmail);
         };
-        const canDeleteRequest = (req) => {
-            const s = String(req.status || '').toLowerCase();
-            return s === 'expired' || s === 'rejected';
-        };
+        const canDeleteRequest = (req) => isDbRequestDeletableStatus(req?.status);
+        dbVisibleBulkDeleteIds = isDbBulkDeleteStatus(dbStatusFilter)
+            ? requests.filter(canDeleteRequest).map(req => String(req.request_id || '').trim()).filter(Boolean)
+            : [];
+        if (isDbBulkDeleteStatus(dbStatusFilter)) {
+            dbBulkDeleteSelection = new Set(
+                Array.from(dbBulkDeleteSelection).filter(id => dbVisibleBulkDeleteIds.includes(id))
+            );
+        }
         list.innerHTML = requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = String(db?.engine || 'db');
@@ -2103,9 +2383,20 @@ async function loadDbRequests() {
             const isActive = req.status === 'active';
             const statusLabel = String(req.status || '').replace(/_/g, ' ');
             const domId = domIdFromRequestId(requestIdRaw);
+            const showBulkSelect = isDbBulkDeleteStatus(dbStatusFilter) && canDeleteRequest(req);
+            const checked = dbBulkDeleteSelection.has(requestIdRaw);
             return `<details class="db-request-item db-request-${escapeAttr(req.status)}">
                 <summary class="db-request-summary">
                     <div class="db-request-summary-left">
+                        ${showBulkSelect ? `<label class="db-request-select-wrap" onclick="event.stopPropagation()">
+                            <input
+                                type="checkbox"
+                                class="db-request-select-checkbox"
+                                data-request-id="${escapeAttr(requestIdRaw)}"
+                                ${checked ? 'checked' : ''}
+                                onchange="toggleDbRequestSelection('${requestIdEsc}', this.checked)"
+                            >
+                        </label>` : ''}
                         <span class="db-request-id">${escapeHtml((req.request_id || '').slice(0, 8))}</span>
                         <span class="db-request-title"><strong>${escapeHtml(eng)}</strong>${dbNames ? ` • ${escapeHtml(dbNames)}` : ''}</span>
                     </div>
@@ -2148,9 +2439,13 @@ async function loadDbRequests() {
                 </div>
             </details>`;
         }).join('');
+        syncDbBulkSelectionToDom();
+        renderDbBulkDeleteToolbar();
     } catch (e) {
         const list = document.getElementById('dbRequestsList');
         if (list) list.innerHTML = `<div class="db-requests-empty">Error loading requests</div>`;
+        dbVisibleBulkDeleteIds = [];
+        renderDbBulkDeleteToolbar();
     }
 }
 
@@ -2325,6 +2620,115 @@ function isDbCredentialPreparingMessage(message) {
     );
 }
 
+function parseCliFlagValue(command, flagName) {
+    const cmd = String(command || '');
+    if (!cmd) return '';
+    const rx = new RegExp(`(?:^|\\s)--${flagName}\\s+([^\\s]+)`);
+    const m = cmd.match(rx);
+    if (!m) return '';
+    return String(m[1] || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function parseMysqlOptionValue(command, optName) {
+    const cmd = String(command || '');
+    if (!cmd) return '';
+    const rx = new RegExp(`(?:^|\\s)--${optName}\\s+([^\\s]+)`);
+    const m = cmd.match(rx);
+    if (!m) return '';
+    return String(m[1] || '').trim().replace(/^['"]|['"]$/g, '');
+}
+
+function normalizeIamLocalInstructions(rawInstructions, fallback = {}) {
+    const src = (rawInstructions && typeof rawInstructions === 'object') ? rawInstructions : {};
+    const out = { ...src };
+    if (!out.available) return out;
+
+    const cliCmd = String(out.cli_command || '');
+    const mysqlCmd = String(out.mysql_connect_command || '');
+
+    const hostname = String(
+        out.hostname ||
+        parseCliFlagValue(cliCmd, 'hostname') ||
+        parseMysqlOptionValue(mysqlCmd, 'host') ||
+        fallback.hostname ||
+        ''
+    ).trim();
+    const username = String(
+        out.username ||
+        parseCliFlagValue(cliCmd, 'username') ||
+        parseMysqlOptionValue(mysqlCmd, 'user') ||
+        fallback.username ||
+        ''
+    ).trim();
+    const region = String(
+        out.region ||
+        parseCliFlagValue(cliCmd, 'region') ||
+        fallback.region ||
+        ''
+    ).trim();
+
+    let port = String(
+        out.port ||
+        parseCliFlagValue(cliCmd, 'port') ||
+        parseMysqlOptionValue(mysqlCmd, 'port') ||
+        fallback.port ||
+        3306
+    ).trim();
+    if (!port || !/^\d+$/.test(port)) port = '3306';
+
+    if (hostname && username) {
+        out.cli_command = [
+            'aws rds generate-db-auth-token',
+            `--hostname ${hostname}`,
+            `--port ${port}`,
+            `--username ${username}`,
+            `--region ${region || 'ap-south-1'}`
+        ].join(' ');
+
+        out.token_command = [
+            'TOKEN="$(aws rds generate-db-auth-token \\',
+            `  --hostname ${hostname} \\`,
+            `  --port ${port} \\`,
+            `  --username ${username} \\`,
+            `  --region ${region || 'ap-south-1'})"`
+        ].join('\n');
+
+        out.mysql_connect_command = [
+            'MYSQL_PWD="$TOKEN" mysql \\',
+            `  --host ${hostname} \\`,
+            `  --port ${port} \\`,
+            `  --user ${username} \\`,
+            '  --ssl \\',
+            '  --protocol=TCP'
+        ].join('\n');
+        out.hostname = hostname;
+        out.port = parseInt(port, 10);
+        out.username = username;
+        out.region = region || 'ap-south-1';
+    } else if (mysqlCmd) {
+        // Minimum safety fallback: remove obsolete flags when backend returns legacy command text.
+        let sanitized = mysqlCmd
+            .replace(/LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1\s*/g, '')
+            .replace(/\s--ssl-mode=REQUIRED\b/g, '')
+            .replace(/\s--enable-cleartext-plugin\b/g, '')
+            .trim();
+        if (!/\s--ssl(\s|$)/.test(sanitized)) sanitized += ' --ssl';
+        if (!/\s--protocol=TCP(\s|$)/.test(sanitized)) sanitized += ' --protocol=TCP';
+        out.mysql_connect_command = sanitized;
+    }
+
+    if (Array.isArray(out.steps) && out.steps.length) {
+        out.steps = [
+            '1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).',
+            '2. Generate token using the command below (token is valid ~15 minutes).',
+            '3. Run the MySQL command with MYSQL_PWD="$TOKEN".',
+            '4. For DBeaver/Workbench, use the generated token as password and reconnect when token expires.'
+        ];
+    }
+
+    return out;
+}
+
 function renderDbPreparingHtml(secondsElapsed, details) {
     const sec = Math.max(0, parseInt(secondsElapsed || 0, 10) || 0);
     let msg = 'This can take up to 2-3 minutes while access is being prepared.';
@@ -2407,7 +2811,10 @@ function renderDbCredentialsInline(containerEl, creds) {
     const password = creds.password || creds.vault_token || '';
     const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
     const tokenExpires = creds.iam_token_expires_at ? new Date(creds.iam_token_expires_at).toLocaleString() : '';
-    const localInstr = creds.local_token_instructions;
+    const localInstr = normalizeIamLocalInstructions(creds.local_token_instructions, {
+        username,
+        region: ''
+    });
     const inlineId = escapeAttr(containerEl.dataset.reqid || '');
     const localBlock = (localInstr && localInstr.available && Array.isArray(localInstr.steps))
         ? `
@@ -2559,7 +2966,10 @@ async function openDbExternalToolModal(requestId) {
         const usernameFieldId = `dbModalUsername-${domIdFromRequestId(String(requestId))}`;
 
         const tokenExpires = data.iam_token_expires_at ? new Date(data.iam_token_expires_at).toLocaleString() : '';
-        const localInstr = data.local_token_instructions || {};
+        const localInstr = normalizeIamLocalInstructions(data.local_token_instructions, {
+            username,
+            region: ''
+        });
         const tokenField = isIam ? `
             <div class="db-modal-grid" style="margin-top:14px;">
                 <div style="grid-column: 1 / -1;">

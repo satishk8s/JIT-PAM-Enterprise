@@ -71,6 +71,7 @@ def load_org_policies():
 CONFIG = {
     'accounts': {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}},
     'permission_sets': [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}],
+    'organization': {},
     'sso_instance_arn': 'arn:aws:sso:::instance/ssoins-65955f0870d9f06f',
     'identity_store_id': 'd-9f677136b2',
     'sso_start_url': 'https://nykaa.awsapps.com/start'
@@ -437,6 +438,98 @@ def _save_pam_admins(admins):
     with open(PAM_ADMINS_PATH, 'w') as f:
         json.dump({'pam_admins': out}, f, indent=2)
 
+def _infer_env_from_account_name(name: str) -> str:
+    n = str(name or '').strip().lower()
+    if 'prod' in n or 'production' in n:
+        return 'prod'
+    if 'sandbox' in n:
+        return 'sandbox'
+    return 'nonprod'
+
+def _build_org_account_parent_map(org_client):
+    """
+    Build account -> {root_id/root_name/ou_id/ou_name} mapping from Organizations hierarchy.
+    Best-effort only; returns {} when APIs are unavailable.
+    """
+    mapping = {}
+    roots = []
+    root_name_by_id = {}
+    try:
+        paginator = org_client.get_paginator('list_roots')
+        for page in paginator.paginate():
+            for root in page.get('Roots', []) or []:
+                rid = str(root.get('Id') or '').strip()
+                if not rid:
+                    continue
+                roots.append(root)
+                root_name_by_id[rid] = str(root.get('Name') or '').strip()
+    except Exception as e:
+        print(f"Organizations list_roots error: {e}")
+        return mapping
+
+    queue = []
+    for root in roots:
+        rid = str(root.get('Id') or '').strip()
+        if not rid:
+            continue
+        queue.append({
+            'parent_id': rid,
+            'parent_type': 'ROOT',
+            'root_id': rid,
+            'root_name': root_name_by_id.get(rid, '')
+        })
+
+    while queue:
+        node = queue.pop(0)
+        parent_id = node['parent_id']
+        parent_type = node['parent_type']
+        root_id = node.get('root_id', '')
+        root_name = node.get('root_name', '')
+
+        try:
+            account_paginator = org_client.get_paginator('list_accounts_for_parent')
+            for page in account_paginator.paginate(ParentId=parent_id):
+                for acct in page.get('Accounts', []) or []:
+                    aid = str(acct.get('Id') or '').strip()
+                    if not aid:
+                        continue
+                    if parent_type == 'ORGANIZATIONAL_UNIT':
+                        mapping[aid] = {
+                            'root_id': root_id,
+                            'root_name': root_name,
+                            'ou_id': parent_id,
+                            'ou_name': node.get('ou_name', '')
+                        }
+                    else:
+                        mapping[aid] = {
+                            'root_id': root_id,
+                            'root_name': root_name,
+                            'ou_id': '',
+                            'ou_name': ''
+                        }
+        except Exception as e:
+            print(f"Organizations list_accounts_for_parent error ({parent_id}): {e}")
+
+        try:
+            ou_paginator = org_client.get_paginator('list_organizational_units_for_parent')
+            for page in ou_paginator.paginate(ParentId=parent_id):
+                for ou in page.get('OrganizationalUnits', []) or []:
+                    ou_id = str(ou.get('Id') or '').strip()
+                    if not ou_id:
+                        continue
+                    queue.append({
+                        'parent_id': ou_id,
+                        'parent_type': 'ORGANIZATIONAL_UNIT',
+                        'ou_name': str(ou.get('Name') or '').strip(),
+                        'root_id': root_id,
+                        'root_name': root_name
+                    })
+        except Exception:
+            # Some parents may not contain OUs; ignore.
+            pass
+
+    return mapping
+
 def initialize_aws_config():
     """Fetch real AWS SSO configuration"""
     print("Initializing AWS config...")
@@ -505,20 +598,58 @@ def initialize_aws_config():
                 {'name': 'PowerUserAccess', 'arn': 'arn:aws:iam::aws:policy/PowerUserAccess'}
             ]
         
-        # Get accounts
+        # Get accounts + organizations metadata
         try:
             org_client = _organizations_client()
+            org_meta = {}
+            try:
+                org = org_client.describe_organization().get('Organization', {})
+                org_id = str(org.get('Id') or '').strip()
+                org_arn = str(org.get('Arn') or '').strip()
+                org_meta = {
+                    'id': org_id,
+                    'arn': org_arn,
+                    'master_account_id': str(org.get('MasterAccountId') or '').strip(),
+                    'master_account_email': str(org.get('MasterAccountEmail') or '').strip(),
+                    'feature_set': str(org.get('FeatureSet') or '').strip(),
+                    'display_name': f"Organization {org_id}" if org_id else ''
+                }
+            except Exception as e:
+                print(f"Organizations describe_organization error: {e}")
+                org_meta = {}
+
+            account_parent_map = _build_org_account_parent_map(org_client)
             accounts = []
             paginator = org_client.get_paginator('list_accounts')
             for page in paginator.paginate():
                 accounts.extend(page['Accounts'])
-            
+
+            prev_accounts = dict(CONFIG.get('accounts') or {})
             CONFIG['accounts'] = {}
             for account in accounts:
+                account_id = str(account.get('Id') or '').strip()
+                account_name = str(account.get('Name') or '').strip()
+                prev = prev_accounts.get(account_id) or {}
+                env = str(prev.get('environment') or '').strip().lower() or _infer_env_from_account_name(account_name)
+                parent = account_parent_map.get(account_id) or {}
                 CONFIG['accounts'][account['Id']] = {
-                    'id': account['Id'],
-                    'name': account['Name']
+                    'id': account_id,
+                    'name': account_name,
+                    'email': str(account.get('Email') or '').strip(),
+                    'status': str(account.get('Status') or '').strip(),
+                    'joined_method': str(account.get('JoinedMethod') or '').strip(),
+                    'joined_timestamp': str(account.get('JoinedTimestamp') or ''),
+                    'environment': env,
+                    'organization_id': str(org_meta.get('id') or ''),
+                    'organization_arn': str(org_meta.get('arn') or ''),
+                    'organization_display_name': str(org_meta.get('display_name') or ''),
+                    'organization_master_account_id': str(org_meta.get('master_account_id') or ''),
+                    'root_id': str(parent.get('root_id') or ''),
+                    'root_name': str(parent.get('root_name') or ''),
+                    'ou_id': str(parent.get('ou_id') or ''),
+                    'ou_name': str(parent.get('ou_name') or '')
                 }
+            CONFIG['organization'] = org_meta
         except Exception as e:
             print(f"Organizations error: {e}")
             # Already set current account above
@@ -530,6 +661,7 @@ def initialize_aws_config():
         # Fallback: Do NOT call AWS again (would hang with expired creds)
         CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
         CONFIG['permission_sets'] = [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}]
+        CONFIG['organization'] = {}
 
 # Persistent storage (SQLite, survives backend restart)
 NPAMX_DB_PATH = os.getenv('NPAMX_DB_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'npamx.db')
@@ -1672,6 +1804,7 @@ def get_accounts():
     # Always return something - never block. Fallback for expired AWS creds.
     if not CONFIG['accounts']:
         CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
+        CONFIG['organization'] = {}
     return jsonify(CONFIG['accounts'])
 
 @app.route('/api/permission-sets', methods=['GET'])
@@ -2460,6 +2593,8 @@ def get_database_requests():
             'db_instance_id': str(req.get('db_instance_id') or ''),
             'db_region': str(req.get('db_region') or ''),
             'db_username': str(req.get('db_username') or ''),
+            'data_classification': str(req.get('data_classification') or ''),
+            'tags_present': bool(req.get('tags_present')),
             'user_email': str(req.get('user_email') or ''),
         })
 
@@ -2633,6 +2768,12 @@ def revoke_access(request_id):
                 return jsonify({'error': f'Vault revoke failed: {e}'}), 502
         else:
             print(f"Database revoke for {request_id}: no lease_id (e.g. not yet activated); marking revoked only.")
+        try:
+            cleanup_result = _cleanup_database_iam_access(access_request, request_id=request_id, reason='admin_revoke')
+            if cleanup_result.get('status') in ('error', 'partial'):
+                print(f"IAM cleanup warning for {request_id}: {cleanup_result}")
+        except Exception as cleanup_err:
+            print(f"IAM cleanup exception for {request_id}: {cleanup_err}")
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
@@ -2785,6 +2926,12 @@ def admin_revoke_database_sessions():
                     continue
         else:
             print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.", flush=True)
+        try:
+            cleanup_result = _cleanup_database_iam_access(req, request_id=req_id, reason='admin_bulk_revoke')
+            if cleanup_result.get('status') in ('error', 'partial'):
+                print(f"IAM cleanup warning for {req_id}: {cleanup_result}", flush=True)
+        except Exception as cleanup_err:
+            print(f"IAM cleanup exception for {req_id}: {cleanup_err}", flush=True)
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason
@@ -3111,6 +3258,168 @@ def grant_access(access_request):
         import traceback
         traceback.print_exc()
         return {'error': str(e)}
+
+def _find_identity_center_user_by_email(email):
+    """Best-effort lookup of Identity Center user by email/username variants."""
+    base_email = str(email or '').strip()
+    if not base_email:
+        return None
+    username_part = base_email.split('@')[0] if '@' in base_email else base_email
+    identitystore = _identitystore_client()
+
+    search_inputs = [
+        ('Emails.Value', base_email),
+        ('UserName', base_email),
+        ('UserName', username_part),
+        ('UserName', f"{username_part}@Nykaa.local"),
+        ('UserName', f"{username_part.lower()}@Nykaa.local"),
+        ('UserName', f"{username_part.title()}@Nykaa.local")
+    ]
+    seen = set()
+    for attr_path, attr_value in search_inputs:
+        if not attr_value:
+            continue
+        sig = f"{attr_path}:{str(attr_value).strip().lower()}"
+        if sig in seen:
+            continue
+        seen.add(sig)
+        try:
+            resp = identitystore.list_users(
+                IdentityStoreId=CONFIG['identity_store_id'],
+                Filters=[{'AttributePath': attr_path, 'AttributeValue': attr_value}]
+            )
+            users = resp.get('Users') or []
+            if users:
+                return users[0]
+        except Exception:
+            continue
+
+    # Final fallback: paginate users and match by username/email case-insensitively.
+    try:
+        target = base_email.lower()
+        next_token = None
+        while True:
+            kwargs = {'IdentityStoreId': CONFIG['identity_store_id']}
+            if next_token:
+                kwargs['NextToken'] = next_token
+            page = identitystore.list_users(**kwargs)
+            for u in page.get('Users', []) or []:
+                uname = str(u.get('UserName') or '').strip().lower()
+                emails = u.get('Emails') or []
+                email_values = [str(x.get('Value') or '').strip().lower() for x in emails if isinstance(x, dict)]
+                if target == uname or target in email_values:
+                    return u
+            next_token = page.get('NextToken')
+            if not next_token:
+                break
+    except Exception:
+        pass
+    return None
+
+def _db_open_request_uses_permission_set(permission_set_arn, exclude_request_id=''):
+    ps_arn = str(permission_set_arn or '').strip()
+    if not ps_arn:
+        return False
+    skip_id = str(exclude_request_id or '').strip()
+    now = datetime.now()
+    for rid, req in (requests_db or {}).items():
+        if str(rid) == skip_id:
+            continue
+        if not isinstance(req, dict) or req.get('type') != 'database_access':
+            continue
+        if str(req.get('iam_permission_set_arn') or '').strip() != ps_arn:
+            continue
+        status = str(req.get('status') or '').strip().lower()
+        if status in ('active', 'approved') and not _is_db_request_expired(req, now=now):
+            return True
+    return False
+
+def _cleanup_database_iam_access(req, request_id='', reason=''):
+    """
+    Best-effort cleanup of IAM Identity Center assignment + permission set for DB requests.
+    Never raises; returns {'status': 'deleted'|'partial'|'skipped'|'error', ...}.
+    """
+    result = {'status': 'skipped', 'message': 'not_applicable'}
+    if not isinstance(req, dict) or req.get('type') != 'database_access':
+        return result
+
+    ps_arn = str(req.get('iam_permission_set_arn') or '').strip()
+    if not ps_arn:
+        return result
+
+    rid = str(request_id or req.get('id') or '').strip()
+    attempted_at = datetime.now().isoformat()
+    req['iam_cleanup_last_attempt_at'] = attempted_at
+    req['iam_cleanup_reason'] = str(reason or '').strip()
+
+    if _db_open_request_uses_permission_set(ps_arn, exclude_request_id=rid):
+        req['iam_cleanup_status'] = 'skipped_in_use'
+        req['iam_cleanup_detail'] = 'Permission set is still used by another active request.'
+        return {'status': 'skipped', 'message': 'in_use'}
+
+    account_key = _ensure_account_config_key(req.get('account_id'))
+    account_id = str(((CONFIG.get('accounts') or {}).get(account_key) or {}).get('id') or '').strip()
+    user_email = str(req.get('user_email') or '').strip()
+    ps_name = str(req.get('iam_permission_set_name') or '').strip()
+    sso_admin = _sso_admin_client()
+
+    assignment_deleted = False
+    assignment_error = ''
+    if account_id and user_email:
+        try:
+            user = _find_identity_center_user_by_email(user_email)
+            user_id = str((user or {}).get('UserId') or '').strip()
+            if user_id:
+                sso_admin.delete_account_assignment(
+                    InstanceArn=CONFIG['sso_instance_arn'],
+                    TargetId=account_id,
+                    TargetType='AWS_ACCOUNT',
+                    PermissionSetArn=ps_arn,
+                    PrincipalType='USER',
+                    PrincipalId=user_id
+                )
+                assignment_deleted = True
+        except Exception as e:
+            err = str(e)
+            low = err.lower()
+            if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
+                assignment_deleted = True
+            else:
+                assignment_error = err
+
+    ps_deleted = False
+    ps_error = ''
+    should_delete_permission_set = ps_name.startswith('JIT-') or '/ps-' in ps_arn
+    if should_delete_permission_set and not _db_open_request_uses_permission_set(ps_arn, exclude_request_id=rid):
+        try:
+            sso_admin.delete_permission_set(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                PermissionSetArn=ps_arn
+            )
+            ps_deleted = True
+            req['iam_permission_set_deleted_at'] = datetime.now().isoformat()
+        except Exception as e:
+            err = str(e)
+            low = err.lower()
+            if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
+                ps_deleted = True
+            else:
+                ps_error = err
+
+    if assignment_error and ps_error:
+        req['iam_cleanup_status'] = 'error'
+        req['iam_cleanup_detail'] = f"assignment={assignment_error}; permission_set={ps_error}"
+        return {'status': 'error', 'error': req['iam_cleanup_detail']}
+    if assignment_error or ps_error:
+        req['iam_cleanup_status'] = 'partial'
+        req['iam_cleanup_detail'] = assignment_error or ps_error
+        return {'status': 'partial', 'error': req['iam_cleanup_detail']}
+
+    req['iam_cleanup_status'] = 'done'
+    req['iam_cleanup_detail'] = 'assignment_removed_and_permission_set_deleted' if ps_deleted else (
+        'assignment_removed' if assignment_deleted else 'already_absent'
+    )
+    return {'status': 'deleted' if ps_deleted else 'done', 'assignment_deleted': assignment_deleted, 'permission_set_deleted': ps_deleted}
 
 @app.route('/api/admin/users', methods=['GET'])
 def get_users():
@@ -3998,6 +4307,12 @@ def background_cleanup():
                                 VaultManager.revoke_lease(lease_id)
                             except Exception:
                                 pass
+                        try:
+                            cleanup_result = _cleanup_database_iam_access(access_request, request_id=request_id, reason='expired_cleanup')
+                            if cleanup_result.get('status') in ('error', 'partial'):
+                                print(f"IAM cleanup warning for expired request {request_id}: {cleanup_result}")
+                        except Exception as cleanup_err:
+                            print(f"IAM cleanup exception for expired request {request_id}: {cleanup_err}")
                         access_request['status'] = 'EXPIRED'
                         access_request['expired_at'] = now.isoformat()
                         access_request['vault_token'] = ''
@@ -5498,24 +5813,76 @@ def _validate_permissions_for_engine(engine, perms):
         return str(e)
     return None
 
+_READ_ONLY_DB_OPS = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
+_SENSITIVE_CLASSIFICATIONS = {'pii', 'sensitive', 'confidential', 'restricted', 'phi', 'pci'}
+
+def _normalized_data_classification(value):
+    raw = str(value or '').strip().lower()
+    if not raw:
+        return ''
+    if 'pii' in raw:
+        return 'pii'
+    if 'confidential' in raw:
+        return 'confidential'
+    if 'sensitive' in raw:
+        return 'sensitive'
+    if 'restricted' in raw:
+        return 'restricted'
+    if 'phi' in raw:
+        return 'phi'
+    if 'pci' in raw:
+        return 'pci'
+    return raw
+
+def _classify_rds_data_tags(tags):
+    """
+    Return data classification details from RDS tags.
+    Classifies Data_Classification values like PII/Sensitive/Confidential.
+    """
+    info = {
+        'is_sensitive': False,
+        'classification': '',
+        'tags_present': bool(tags),
+    }
+    for tag in tags or []:
+        key = str(tag.get('Key') or '').strip().lower()
+        val_raw = str(tag.get('Value') or '').strip()
+        val = val_raw.lower()
+        if not (key or val):
+            continue
+        if 'pii' in key or 'pii' in val:
+            info['is_sensitive'] = True
+            info['classification'] = 'pii'
+            break
+        if key in (
+            'data-classification', 'data_classification', 'dataclassification',
+            'classification', 'sensitivity', 'npamx:data-classification', 'npamx:classification'
+        ):
+            normalized = _normalized_data_classification(val_raw)
+            if normalized:
+                info['classification'] = normalized
+                if normalized in _SENSITIVE_CLASSIFICATIONS:
+                    info['is_sensitive'] = True
+            break
+    return info
+
 def _is_read_only_ops(perms_upper):
-    read_ops = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
     # Anything outside read ops is treated as non-read.
-    return bool(perms_upper) and all(p in read_ops for p in perms_upper)
+    return bool(perms_upper) and all(p in _READ_ONLY_DB_OPS for p in perms_upper)
 
 def _compute_db_approval_requirements(account_env, is_pii, perms_upper):
     """
     Approval rules (user-facing policy):
     - NON-PROD: Read-only is auto-approved; any write/schema/admin needs Manager approval.
     - PROD: Manager approval for both read and write.
-    - PII (any env): Manager + DB Owner + CISO approval for any access.
+    - PROD + sensitive classification (PII/Confidential/etc): Manager + DB Owner + CISO approval.
     """
     env = str(account_env or 'nonprod').strip().lower()
     pii = bool(is_pii)
     is_read = _is_read_only_ops(perms_upper)
 
-    if pii:
-        return 'pending', ['manager', 'db_owner', 'ciso'], 'PII database access requires Manager + DB Owner + CISO approval'
+    if env == 'prod' and pii:
+        return 'pending', ['manager', 'db_owner', 'ciso'], 'Sensitive production database access requires Manager + DB Owner + CISO approval'
     if env == 'prod':
         return 'pending', ['manager'], 'Production database access requires Manager approval'
     # nonprod/sandbox
@@ -5565,6 +5932,7 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         'auth_mode': 'password_only',
         'is_pii': False,
         'data_classification': '',
+        'tags_present': False,
         'source': 'default',
         'error': None
     }
@@ -5604,26 +5972,7 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
             except Exception:
                 tags = []
 
-        # Tag-based data classification (best-effort; conservative defaults).
-        is_pii = False
-        classification = ''
-        for tag in tags or []:
-            k = str(tag.get('Key') or '').strip().lower()
-            v = str(tag.get('Value') or '').strip().lower()
-            if not (k or v):
-                continue
-            if 'pii' in k or 'pii' in v:
-                is_pii = True
-                classification = 'pii'
-                break
-            if k in (
-                'data-classification', 'data_classification', 'dataclassification',
-                'classification', 'sensitivity', 'npamx:data-classification', 'npamx:classification'
-            ):
-                if any(x in v for x in ('pii', 'phi', 'pci', 'sensitive', 'restricted', 'confidential')):
-                    is_pii = True
-                    classification = v or 'sensitive'
-                    break
+        tag_meta = _classify_rds_data_tags(tags)
 
         profile.update({
             'instance_id': str(instance.get('DBInstanceIdentifier') or instance_id or ''),
@@ -5633,8 +5982,9 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
             'iam_auth_enabled': auth_mode in ('iam_only', 'iam_and_password'),
             'password_auth_enabled': auth_mode in ('password_only', 'iam_and_password'),
             'auth_mode': auth_mode,
-            'is_pii': bool(is_pii),
-            'data_classification': classification,
+            'is_pii': bool(tag_meta.get('is_sensitive')),
+            'data_classification': str(tag_meta.get('classification') or ''),
+            'tags_present': bool(tag_meta.get('tags_present')),
             'source': 'rds_metadata'
         })
         return profile
@@ -5707,18 +6057,18 @@ def _local_iam_token_instructions(instance_id: str, region: str, db_username: st
             f"TOKEN=\"$({cli_cmd})\""
         )
         mysql_cmd = (
-            f"LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1 MYSQL_PWD=\"$TOKEN\" "
-            f"mysql --host {hostname} --port {port} --user {user} "
-            f"--ssl-mode=REQUIRED --enable-cleartext-plugin"
+            f"MYSQL_PWD=\"$TOKEN\" mysql "
+            f"--host {hostname} --port {port} --user {user} "
+            f"--ssl --protocol=TCP"
         )
         return {
             "available": True,
             "heading": "Get credentials: run these commands on your machine",
             "steps": [
                 "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
-                "2. Log in: aws sso login --profile <your-profile>",
-                "3. Generate token (valid ~15 minutes), then connect.",
-                "4. For DBeaver/Workbench, paste token as password and reconnect when token expires.",
+                "2. Log in (example): aws sso login --profile <your-profile>",
+                "3. Generate token (valid ~15 minutes), then run the MySQL command.",
+                "4. For DBeaver/Workbench, use the generated token as password and reconnect when token expires.",
             ],
             "cli_command": cli_cmd,
             "token_command": token_export_cmd,
@@ -7143,6 +7493,17 @@ def get_databases():
                     iam_enabled = bool(db.get('IAMDatabaseAuthenticationEnabled'))
                     password_enabled = True
                     auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
+                    tags = []
+                    arn = str(db.get('DBInstanceArn') or '').strip()
+                    if arn:
+                        try:
+                            tags = rds.list_tags_for_resource(ResourceName=arn).get('TagList', [])
+                        except Exception:
+                            tags = []
+                    tag_meta = _classify_rds_data_tags(tags)
+                    account_env = _resolve_account_environment(account_id)
+                    enforce_read_only = (account_env == 'prod' and bool(tag_meta.get('is_sensitive')))
+                    prod_without_tags = (account_env == 'prod' and not bool(tag_meta.get('tags_present')))
                     databases.append({
                         'id': db['DBInstanceIdentifier'],
                         'name': db.get('DBName', db['DBInstanceIdentifier']),
@@ -7152,7 +7513,17 @@ def get_databases():
                         'password_auth_enabled': password_enabled,
                         'auth_mode': auth_mode,
                         'db_resource_id': db.get('DbiResourceId', ''),
-                        'region': region
+                        'region': region,
+                        'account_env': account_env,
+                        'data_classification': str(tag_meta.get('classification') or ''),
+                        'is_sensitive_classification': bool(tag_meta.get('is_sensitive')),
+                        'enforce_read_only': bool(enforce_read_only),
+                        'tags_present': bool(tag_meta.get('tags_present')),
+                        'request_allowed': not prod_without_tags,
+                        'request_block_reason': (
+                            "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com."
+                            if prod_without_tags else ''
+                        )
                     })
                 # Sort by engine, then id
                 databases.sort(key=lambda x: (x['engine'], x['id']))
@@ -7278,9 +7649,27 @@ def request_database_access():
         )
         effective_auth = _resolve_effective_auth_choice(preferred_auth, auth_profile)
 
-        # Policy-based approval routing (PROD/NONPROD/PII)
+        # Policy-based validation and approval routing (PROD/NONPROD/PII)
         account_env = _resolve_account_environment(account_id)
+        tags_present = bool(auth_profile.get('tags_present'))
+        data_classification = str(auth_profile.get('data_classification') or '').strip()
         is_pii = bool(auth_profile.get('is_pii'))
+
+        # Guardrail: Production requests are blocked when RDS tags are missing.
+        if account_env == 'prod' and not tags_present:
+            return jsonify({
+                'error': "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com."
+            }), 400
+
+        # Guardrail: Sensitive/PII/Confidential data can only request read-only operations.
+        if account_env == 'prod' and is_pii and not _is_read_only_ops(perms_upper):
+            return jsonify({
+                'error': (
+                    "Selected RDS is tagged as sensitive data. Only view access is allowed "
+                    "(SELECT/SHOW/EXPLAIN/DESCRIBE/ANALYZE)."
+                )
+            }), 400
+
         initial_status, approval_required, approval_message = _compute_db_approval_requirements(account_env, is_pii, perms_upper)
 
         request_id = str(uuid.uuid4())
@@ -7292,6 +7681,8 @@ def request_database_access():
             'account_id': account_id,
             'account_env': account_env,
             'is_pii': is_pii,
+            'data_classification': data_classification,
+            'tags_present': tags_present,
             'databases': databases,  # stored internally (contains real endpoint); never returned to client
             'user_email': user_email,
             'user_full_name': user_full_name,
@@ -7612,7 +8003,7 @@ def activate_database_request(request_id):
 
 @app.route('/api/databases/request/<request_id>/delete', methods=['DELETE'])
 def delete_database_request(request_id):
-    """Owner-only delete for old/expired/completed DB requests."""
+    """Owner-only delete for pending/expired/rejected DB requests."""
     try:
         data = request.get_json(silent=True) or {}
         user_email = str(data.get('user_email') or request.args.get('user_email') or '').strip()
@@ -7628,15 +8019,79 @@ def delete_database_request(request_id):
 
         status = str(req.get('status') or '').strip().lower()
         expired = _is_db_request_expired(req)
-        deletable_statuses = {'denied', 'rejected', 'failed', 'revoked', 'expired'}
+        deletable_statuses = {'pending', 'denied', 'rejected', 'failed', 'revoked', 'expired'}
         if status not in deletable_statuses and not expired:
-            return jsonify({'error': 'Only expired/completed requests can be deleted.'}), 400
+            return jsonify({'error': 'Only pending or expired requests can be deleted. Completed records are retained for audit.'}), 400
+
+        try:
+            cleanup_result = _cleanup_database_iam_access(req, request_id=request_id, reason='user_delete')
+            if cleanup_result.get('status') in ('error', 'partial'):
+                print(f"IAM cleanup warning for delete {request_id}: {cleanup_result}")
+        except Exception as cleanup_err:
+            print(f"IAM cleanup exception for delete {request_id}: {cleanup_err}")
 
         del requests_db[request_id]
         if request_id in approvals_db:
             del approvals_db[request_id]
         _save_requests()
         return jsonify({'status': 'deleted', 'request_id': request_id})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/databases/requests/bulk-delete', methods=['POST'])
+def bulk_delete_database_requests():
+    """Owner-only bulk delete for pending/expired/rejected DB requests."""
+    try:
+        data = request.get_json(silent=True) or {}
+        user_email = str(data.get('user_email') or '').strip()
+        request_ids = data.get('request_ids') or []
+        if not user_email:
+            return jsonify({'error': 'user_email required'}), 400
+        if not isinstance(request_ids, list) or not request_ids:
+            return jsonify({'error': 'request_ids must be a non-empty list'}), 400
+
+        deletable_statuses = {'pending', 'denied', 'rejected', 'failed', 'revoked', 'expired'}
+        deleted = []
+        failed = []
+        changed = False
+
+        for rid_raw in request_ids:
+            rid = str(rid_raw or '').strip()
+            if not rid:
+                continue
+            req = requests_db.get(rid)
+            if not isinstance(req, dict):
+                failed.append({'request_id': rid, 'error': 'not_found'})
+                continue
+            if req.get('type') != 'database_access':
+                failed.append({'request_id': rid, 'error': 'not_database_request'})
+                continue
+            if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+                failed.append({'request_id': rid, 'error': 'access_denied'})
+                continue
+
+            status = str(req.get('status') or '').strip().lower()
+            expired = _is_db_request_expired(req)
+            if status not in deletable_statuses and not expired:
+                failed.append({'request_id': rid, 'error': 'not_deletable_for_audit'})
+                continue
+
+            try:
+                cleanup_result = _cleanup_database_iam_access(req, request_id=rid, reason='user_bulk_delete')
+                if cleanup_result.get('status') in ('error', 'partial'):
+                    print(f"IAM cleanup warning for bulk delete {rid}: {cleanup_result}")
+            except Exception as cleanup_err:
+                print(f"IAM cleanup exception for bulk delete {rid}: {cleanup_err}")
+
+            requests_db.pop(rid, None)
+            approvals_db.pop(rid, None)
+            deleted.append(rid)
+            changed = True
+
+        if changed:
+            _save_requests()
+
+        return jsonify({'deleted': deleted, 'failed': failed, 'requested': len(request_ids)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
