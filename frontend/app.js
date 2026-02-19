@@ -1533,58 +1533,143 @@ function toggleCloudProvider(provider) {
     }
 }
 
+function _escapeHtmlText(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function _groupAccountsByOrgTree(accountsList) {
+    const tree = new Map();
+    (accountsList || []).forEach((account) => {
+        const orgId = String(account.organization_id || '').trim();
+        const orgName = String(account.organization_display_name || '').trim() || (orgId ? `Organization ${orgId}` : 'Organization');
+        const orgKey = orgId || orgName || 'org';
+        if (!tree.has(orgKey)) {
+            tree.set(orgKey, {
+                id: orgId,
+                name: orgName,
+                roots: new Map()
+            });
+        }
+        const orgNode = tree.get(orgKey);
+
+        const rootId = String(account.root_id || '').trim();
+        const rootName = String(account.root_name || '').trim() || (rootId ? 'Root' : 'Root');
+        const rootKey = rootId || rootName || 'root';
+        if (!orgNode.roots.has(rootKey)) {
+            orgNode.roots.set(rootKey, {
+                id: rootId,
+                name: rootName,
+                ous: new Map()
+            });
+        }
+        const rootNode = orgNode.roots.get(rootKey);
+
+        const ouId = String(account.ou_id || '').trim();
+        const ouName = String(account.ou_name || '').trim() || 'No OU';
+        const ouKey = ouId || ouName || 'ou';
+        if (!rootNode.ous.has(ouKey)) {
+            rootNode.ous.set(ouKey, {
+                id: ouId,
+                name: ouName,
+                accounts: []
+            });
+        }
+        rootNode.ous.get(ouKey).accounts.push(account);
+    });
+    return tree;
+}
+
 function loadAwsAccounts() {
     const grid = document.getElementById('awsAccountsGrid');
-    
-    if (Object.keys(accounts).length === 0) {
+    if (!grid) return;
+
+    const accountList = Object.values(accounts || {});
+    if (accountList.length === 0) {
         grid.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 2rem;">No accounts found</p>';
         return;
     }
-    
+
+    const tree = _groupAccountsByOrgTree(accountList);
+    const orgBlocks = Array.from(tree.values()).map((orgNode) => {
+        const rootBlocks = Array.from(orgNode.roots.values()).map((rootNode) => {
+            const ouBlocks = Array.from(rootNode.ous.values()).map((ouNode) => {
+                const rows = (ouNode.accounts || [])
+                    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+                    .map((account) => {
+                        const env = String(account.environment || 'nonprod').toLowerCase();
+                        const envClass = env === 'prod' ? 'prod' : 'nonprod';
+                        return `
+                            <tr>
+                                <td><strong>${_escapeHtmlText(account.name || account.id || 'Account')}</strong></td>
+                                <td><code>${_escapeHtmlText(account.id || '')}</code></td>
+                                <td><span class="account-type ${envClass}">${_escapeHtmlText(env)}</span></td>
+                                <td>${_escapeHtmlText(account.email || '—')}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                return `
+                    <details class="org-tree-level org-tree-ou" open>
+                        <summary>
+                            <span class="org-tree-label"><i class="fas fa-sitemap"></i> OU: ${_escapeHtmlText(ouNode.name || 'No OU')}</span>
+                            <span class="org-tree-meta">${(ouNode.accounts || []).length} account(s)</span>
+                        </summary>
+                        <div class="org-tree-table-wrap">
+                            <table class="org-tree-accounts-table">
+                                <thead>
+                                    <tr>
+                                        <th>Account Name</th>
+                                        <th>Account ID</th>
+                                        <th>Environment</th>
+                                        <th>Email</th>
+                                    </tr>
+                                </thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                    </details>
+                `;
+            }).join('');
+            return `
+                <details class="org-tree-level org-tree-root" open>
+                    <summary>
+                        <span class="org-tree-label"><i class="fas fa-folder-tree"></i> Root: ${_escapeHtmlText(rootNode.name || 'Root')}</span>
+                        <span class="org-tree-meta">${Array.from(rootNode.ous.values()).reduce((n, ou) => n + ((ou.accounts || []).length), 0)} account(s)</span>
+                    </summary>
+                    <div class="org-tree-children">${ouBlocks}</div>
+                </details>
+            `;
+        }).join('');
+
+        return `
+            <details class="org-tree-level org-tree-org" open>
+                <summary>
+                    <span class="org-tree-label"><i class="fas fa-building"></i> ${_escapeHtmlText(orgNode.name || 'Organization')}</span>
+                    <span class="org-tree-meta">${Array.from(orgNode.roots.values()).reduce((n, root) => n + Array.from(root.ous.values()).reduce((m, ou) => m + ((ou.accounts || []).length), 0), 0)} account(s)</span>
+                </summary>
+                <div class="org-tree-children">${rootBlocks}</div>
+            </details>
+        `;
+    }).join('');
+
     grid.innerHTML = `
-        <table>
-            <thead>
-                <tr>
-                    <th>Account Name</th>
-                    <th>Account ID</th>
-                    <th>Region</th>
-                </tr>
-            </thead>
-            <tbody>
-                ${Object.values(accounts).map(account => `
-                    <tr>
-                        <td><strong>${account.name}</strong></td>
-                        <td>${account.id}</td>
-                        <td>ap-south-1</td>
-                    </tr>
-                `).join('')}
-            </tbody>
-        </table>
+        <div class="accounts-tree">
+            ${orgBlocks}
+        </div>
     `;
 }
 
 // Accounts Page Functions
 function loadAccountsPage() {
-    const grid = document.getElementById('accountsGrid');
-    
-    if (Object.keys(accounts).length === 0) {
-        grid.innerHTML = '<p style="color: var(--text-secondary); text-align: center; padding: 2rem;">No accounts found</p>';
-        return;
-    }
-    
-    grid.innerHTML = Object.values(accounts).map(account => `
-        <div class="account-card">
-            <div class="account-header">
-                <h3>${account.name}</h3>
-            </div>
-            <p><strong>Account ID:</strong> ${account.id}</p>
-            <div style="margin-top: 1rem;">
-                <button class="btn-primary" onclick="requestAccessForAccount('${account.id}')">
-                    <i class="fas fa-plus"></i> Request Access
-                </button>
-            </div>
-        </div>
-    `).join('');
+    const awsAccounts = document.getElementById('awsAccounts');
+    if (awsAccounts) awsAccounts.style.display = 'block';
+    const awsToggle = document.querySelector(".cloud-provider-btn[onclick*=\"toggleCloudProvider('aws')\"]");
+    if (awsToggle) awsToggle.classList.add('active');
+    loadAwsAccounts();
 }
 
 function requestAccessForAccount(accountId) {

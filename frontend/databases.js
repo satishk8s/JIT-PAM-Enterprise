@@ -692,7 +692,7 @@ function applyDbInstancePolicyNotice(policy) {
     if (p.request_allowed === false) {
         noticeEl.style.display = 'block';
         noticeEl.className = 'db-policy-notice db-policy-notice-error';
-        noticeEl.textContent = p.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.";
+        noticeEl.textContent = p.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.";
         return;
     }
     if (p.enforce_read_only) {
@@ -911,7 +911,7 @@ async function dbStepNext() {
                 dbInstancePolicy = policy;
                 applyDbInstancePolicyNotice(policy);
                 if (policy.request_allowed === false) {
-                    alert(policy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
+                    alert(policy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
                     return;
                 }
                 dbRequestDraft._selectedInstance = {
@@ -1518,7 +1518,7 @@ async function submitStructuredDbRequest() {
         return;
     }
     if (dbInstancePolicy?.request_allowed === false) {
-        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
+        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
         return;
     }
     if (!dbStructuredPermissions.length) {
@@ -2090,7 +2090,7 @@ async function submitDbRequestViaAi(opts = {}) {
         return;
     }
     if (dbInstancePolicy?.request_allowed === false) {
-        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com.");
+        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
         return;
     }
     if (dbInstancePolicy?.enforce_read_only) {

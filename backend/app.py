@@ -2928,6 +2928,7 @@ def admin_revoke_database_sessions():
             print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.", flush=True)
         try:
             cleanup_result = _cleanup_database_iam_access(req, request_id=req_id, reason='admin_bulk_revoke')
+            print(f"IAM cleanup result for {req_id}: {cleanup_result}", flush=True)
             if cleanup_result.get('status') in ('error', 'partial'):
                 print(f"IAM cleanup warning for {req_id}: {cleanup_result}", flush=True)
         except Exception as cleanup_err:
@@ -3365,46 +3366,186 @@ def _cleanup_database_iam_access(req, request_id='', reason=''):
 
     assignment_deleted = False
     assignment_error = ''
-    if account_id and user_email:
+    if account_id:
+        assignment_errors = []
+
+        def _list_assignment_user_ids():
+            ids = []
+            next_token = None
+            while True:
+                kwargs = {
+                    'InstanceArn': CONFIG['sso_instance_arn'],
+                    'AccountId': account_id,
+                    'PermissionSetArn': ps_arn
+                }
+                if next_token:
+                    kwargs['NextToken'] = next_token
+                page = sso_admin.list_account_assignments(**kwargs)
+                for a in page.get('AccountAssignments', []) or []:
+                    if str(a.get('PrincipalType') or '').upper() == 'USER':
+                        pid = str(a.get('PrincipalId') or '').strip()
+                        if pid:
+                            ids.append(pid)
+                next_token = page.get('NextToken')
+                if not next_token:
+                    break
+            return sorted(set(ids))
+
+        def _wait_for_assignment_deletion_status(request_id, timeout_seconds=60, poll_seconds=3):
+            if not request_id:
+                return {'status': 'IN_PROGRESS'}
+            deadline = time.time() + max(10, int(timeout_seconds))
+            latest = 'IN_PROGRESS'
+            while time.time() < deadline:
+                try:
+                    desc = sso_admin.describe_account_assignment_deletion_status(
+                        InstanceArn=CONFIG['sso_instance_arn'],
+                        AccountAssignmentDeletionRequestId=request_id
+                    )
+                    details = desc.get('AccountAssignmentDeletionStatus') or {}
+                    latest = str(details.get('Status') or latest or 'IN_PROGRESS').upper()
+                    if latest in ('SUCCEEDED', 'FAILED'):
+                        return {
+                            'status': latest,
+                            'failure_reason': str(details.get('FailureReason') or '').strip()
+                        }
+                except Exception as poll_err:
+                    print(f"IAM cleanup: deletion status poll failed ({request_id}): {poll_err}", flush=True)
+                time.sleep(max(1, int(poll_seconds)))
+            return {'status': latest}
+
+        target_user_id = ''
+        if user_email:
+            try:
+                user = _find_identity_center_user_by_email(user_email)
+                target_user_id = str((user or {}).get('UserId') or '').strip()
+            except Exception as user_lookup_err:
+                print(f"IAM cleanup: user lookup failed for {user_email}: {user_lookup_err}", flush=True)
+
         try:
-            user = _find_identity_center_user_by_email(user_email)
-            user_id = str((user or {}).get('UserId') or '').strip()
-            if user_id:
-                sso_admin.delete_account_assignment(
-                    InstanceArn=CONFIG['sso_instance_arn'],
-                    TargetId=account_id,
-                    TargetType='AWS_ACCOUNT',
-                    PermissionSetArn=ps_arn,
-                    PrincipalType='USER',
-                    PrincipalId=user_id
-                )
-                assignment_deleted = True
-        except Exception as e:
-            err = str(e)
-            low = err.lower()
-            if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
-                assignment_deleted = True
-            else:
-                assignment_error = err
+            assigned_user_ids = _list_assignment_user_ids()
+        except Exception as list_err:
+            assigned_user_ids = []
+            assignment_errors.append(f"Failed to list account assignments: {list_err}")
+
+        if target_user_id:
+            target_user_ids = [target_user_id]
+        else:
+            target_user_ids = list(assigned_user_ids)
+
+        if not target_user_ids:
+            assignment_deleted = True
+        else:
+            for principal_id in target_user_ids:
+                # If we could list assignments and this user isn't attached, skip delete call.
+                if assigned_user_ids and principal_id not in assigned_user_ids:
+                    assignment_deleted = True
+                    continue
+                try:
+                    resp = sso_admin.delete_account_assignment(
+                        InstanceArn=CONFIG['sso_instance_arn'],
+                        TargetId=account_id,
+                        TargetType='AWS_ACCOUNT',
+                        PermissionSetArn=ps_arn,
+                        PrincipalType='USER',
+                        PrincipalId=principal_id
+                    )
+                    del_status = resp.get('AccountAssignmentDeletionStatus') or {}
+                    del_req_id = str(del_status.get('RequestId') or '').strip()
+                    del_state = str(del_status.get('Status') or 'IN_PROGRESS').upper()
+                    if del_req_id and del_state == 'IN_PROGRESS':
+                        waited = _wait_for_assignment_deletion_status(del_req_id)
+                        del_state = str(waited.get('status') or del_state).upper()
+                        if del_state == 'FAILED':
+                            reason_txt = str(waited.get('failure_reason') or '').strip()
+                            assignment_errors.append(
+                                f"DeleteAccountAssignment failed for principal {principal_id}: {reason_txt or 'unknown reason'}"
+                            )
+                            continue
+                    assignment_deleted = True
+                except Exception as e:
+                    err = str(e)
+                    low = err.lower()
+                    if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
+                        assignment_deleted = True
+                    elif 'in progress' in low or 'conflict' in low:
+                        # Eventual consistency: verify via list below.
+                        assignment_deleted = True
+                    else:
+                        assignment_errors.append(err)
+
+            try:
+                remaining_user_ids = _list_assignment_user_ids()
+            except Exception as list_after_err:
+                remaining_user_ids = []
+                assignment_errors.append(f"Failed to verify assignment deletion: {list_after_err}")
+
+            if target_user_ids:
+                still_attached = [uid for uid in target_user_ids if uid in remaining_user_ids]
+                if still_attached:
+                    assignment_errors.append(
+                        f"Permission set is still attached to principal(s): {', '.join(still_attached)}"
+                    )
+
+        if assignment_errors:
+            assignment_error = '; '.join([x for x in assignment_errors if str(x).strip()])
 
     ps_deleted = False
     ps_error = ''
-    should_delete_permission_set = ps_name.startswith('JIT-') or '/ps-' in ps_arn
-    if should_delete_permission_set and not _db_open_request_uses_permission_set(ps_arn, exclude_request_id=rid):
+    if not ps_name:
         try:
-            sso_admin.delete_permission_set(
+            det = sso_admin.describe_permission_set(
                 InstanceArn=CONFIG['sso_instance_arn'],
                 PermissionSetArn=ps_arn
             )
-            ps_deleted = True
-            req['iam_permission_set_deleted_at'] = datetime.now().isoformat()
-        except Exception as e:
-            err = str(e)
-            low = err.lower()
-            if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
+            ps_name = str((det.get('PermissionSet') or {}).get('Name') or '').strip()
+        except Exception:
+            ps_name = ''
+    should_delete_permission_set = ps_name.startswith('JIT-')
+    if should_delete_permission_set and not _db_open_request_uses_permission_set(ps_arn, exclude_request_id=rid):
+        if account_id:
+            try:
+                remaining = []
+                next_token = None
+                while True:
+                    kwargs = {
+                        'InstanceArn': CONFIG['sso_instance_arn'],
+                        'AccountId': account_id,
+                        'PermissionSetArn': ps_arn
+                    }
+                    if next_token:
+                        kwargs['NextToken'] = next_token
+                    page = sso_admin.list_account_assignments(**kwargs)
+                    remaining.extend(page.get('AccountAssignments', []) or [])
+                    next_token = page.get('NextToken')
+                    if not next_token:
+                        break
+                if remaining:
+                    ps_error = 'Permission set still has account assignments attached.'
+            except Exception as verify_err:
+                ps_error = f'Failed to verify account assignment cleanup: {verify_err}'
+        if ps_error:
+            pass
+        else:
+            try:
+                sso_admin.delete_permission_set(
+                    InstanceArn=CONFIG['sso_instance_arn'],
+                    PermissionSetArn=ps_arn
+                )
                 ps_deleted = True
-            else:
-                ps_error = err
+                req['iam_permission_set_deleted_at'] = datetime.now().isoformat()
+            except Exception as e:
+                err = str(e)
+                low = err.lower()
+                if any(x in low for x in ('resourcenotfound', 'not found', 'does not exist')):
+                    ps_deleted = True
+                else:
+                    ps_error = err
+
+    if ps_deleted:
+        req['iam_permission_set_arn'] = ''
+        req['iam_permission_set_name'] = ''
+        req['db_connect_arn'] = ''
 
     if assignment_error and ps_error:
         req['iam_cleanup_status'] = 'error'
@@ -5839,31 +5980,46 @@ def _classify_rds_data_tags(tags):
     Return data classification details from RDS tags.
     Classifies Data_Classification values like PII/Sensitive/Confidential.
     """
+    classification_keys = {
+        'data-classification',
+        'data_classification',
+        'dataclassification',
+        'npamx:data-classification',
+        'npamx:classification',
+        'classification',
+        'sensitivity',
+    }
+    customer_tags = []
+    for tag in tags or []:
+        key = str(tag.get('Key') or '').strip().lower()
+        # Ignore AWS system tags (aws:*) for policy checks.
+        if key.startswith('aws:'):
+            continue
+        customer_tags.append(tag)
+
     info = {
         'is_sensitive': False,
         'classification': '',
-        'tags_present': bool(tags),
+        # Backward-compatible flag used by frontend/request APIs.
+        # True only when required classification tag key is present.
+        'tags_present': False,
+        'classification_tag_present': False,
     }
-    for tag in tags or []:
+    for tag in customer_tags:
         key = str(tag.get('Key') or '').strip().lower()
         val_raw = str(tag.get('Value') or '').strip()
-        val = val_raw.lower()
-        if not (key or val):
+        if not key:
             continue
-        if 'pii' in key or 'pii' in val:
-            info['is_sensitive'] = True
-            info['classification'] = 'pii'
-            break
-        if key in (
-            'data-classification', 'data_classification', 'dataclassification',
-            'classification', 'sensitivity', 'npamx:data-classification', 'npamx:classification'
-        ):
-            normalized = _normalized_data_classification(val_raw)
-            if normalized:
-                info['classification'] = normalized
-                if normalized in _SENSITIVE_CLASSIFICATIONS:
-                    info['is_sensitive'] = True
-            break
+        if key not in classification_keys:
+            continue
+        info['classification_tag_present'] = True
+        info['tags_present'] = True
+        normalized = _normalized_data_classification(val_raw)
+        if normalized:
+            info['classification'] = normalized
+            if normalized in _SENSITIVE_CLASSIFICATIONS:
+                info['is_sensitive'] = True
+        break
     return info
 
 def _is_read_only_ops(perms_upper):
@@ -5873,22 +6029,19 @@ def _is_read_only_ops(perms_upper):
 def _compute_db_approval_requirements(account_env, is_pii, perms_upper):
     """
     Approval rules (user-facing policy):
-    - NON-PROD: Read-only is auto-approved; any write/schema/admin needs Manager approval.
-    - PROD: Manager approval for both read and write.
+    - NON-PROD: Manager approval required.
+    - PROD: Manager approval required.
     - PROD + sensitive classification (PII/Confidential/etc): Manager + DB Owner + CISO approval.
     """
     env = str(account_env or 'nonprod').strip().lower()
     pii = bool(is_pii)
-    is_read = _is_read_only_ops(perms_upper)
 
     if env == 'prod' and pii:
         return 'pending', ['manager', 'db_owner', 'ciso'], 'Sensitive production database access requires Manager + DB Owner + CISO approval'
     if env == 'prod':
         return 'pending', ['manager'], 'Production database access requires Manager approval'
     # nonprod/sandbox
-    if is_read:
-        return 'approved', ['self'], 'Auto-approved for non-production read-only access'
-    return 'pending', ['manager'], 'Non-production write/schema access requires Manager approval'
+    return 'pending', ['manager'], 'Non-production database access requires Manager approval'
 
 def _normalize_auth_choice(value):
     v = str(value or '').strip().lower()
@@ -5933,6 +6086,7 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         'is_pii': False,
         'data_classification': '',
         'tags_present': False,
+        'classification_tag_present': False,
         'source': 'default',
         'error': None
     }
@@ -5984,7 +6138,9 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
             'auth_mode': auth_mode,
             'is_pii': bool(tag_meta.get('is_sensitive')),
             'data_classification': str(tag_meta.get('classification') or ''),
-            'tags_present': bool(tag_meta.get('tags_present')),
+            'classification_tag_present': bool(tag_meta.get('classification_tag_present')),
+            # Keep legacy field name expected by existing UI.
+            'tags_present': bool(tag_meta.get('classification_tag_present')),
             'source': 'rds_metadata'
         })
         return profile
@@ -7503,7 +7659,7 @@ def get_databases():
                     tag_meta = _classify_rds_data_tags(tags)
                     account_env = _resolve_account_environment(account_id)
                     enforce_read_only = (account_env == 'prod' and bool(tag_meta.get('is_sensitive')))
-                    prod_without_tags = (account_env == 'prod' and not bool(tag_meta.get('tags_present')))
+                    missing_tags = not bool(tag_meta.get('classification_tag_present'))
                     databases.append({
                         'id': db['DBInstanceIdentifier'],
                         'name': db.get('DBName', db['DBInstanceIdentifier']),
@@ -7518,11 +7674,12 @@ def get_databases():
                         'data_classification': str(tag_meta.get('classification') or ''),
                         'is_sensitive_classification': bool(tag_meta.get('is_sensitive')),
                         'enforce_read_only': bool(enforce_read_only),
-                        'tags_present': bool(tag_meta.get('tags_present')),
-                        'request_allowed': not prod_without_tags,
+                        'classification_tag_present': bool(tag_meta.get('classification_tag_present')),
+                        'tags_present': bool(tag_meta.get('classification_tag_present')),
+                        'request_allowed': not missing_tags,
                         'request_block_reason': (
-                            "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com."
-                            if prod_without_tags else ''
+                            "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com."
+                            if missing_tags else ''
                         )
                     })
                 # Sort by engine, then id
@@ -7651,14 +7808,14 @@ def request_database_access():
 
         # Policy-based validation and approval routing (PROD/NONPROD/PII)
         account_env = _resolve_account_environment(account_id)
-        tags_present = bool(auth_profile.get('tags_present'))
+        tags_present = bool(auth_profile.get('classification_tag_present') or auth_profile.get('tags_present'))
         data_classification = str(auth_profile.get('data_classification') or '').strip()
         is_pii = bool(auth_profile.get('is_pii'))
 
-        # Guardrail: Production requests are blocked when RDS tags are missing.
-        if account_env == 'prod' and not tags_present:
+        # Guardrail: Requests are blocked when required classification tag is missing.
+        if not tags_present:
             return jsonify({
-                'error': "Oops, I don't see any tags on the selected RDS. Please reach out to devops@nykaa.com."
+                'error': "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com."
             }), 400
 
         # Guardrail: Sensitive/PII/Confidential data can only request read-only operations.
@@ -7704,8 +7861,8 @@ def request_database_access():
             'justification': justification,
             'ai_generated': ai_generated,
             'conversation_id': conversation_id,
-            # If auto-approved (NONPROD read-only), keep status as approved even if activation is pending.
-            'status': 'approved' if initial_status == 'approved' else 'pending',
+            # DB requests must always move through explicit approval.
+            'status': 'pending',
             'approval_required': approval_required,
             'approval_note': approval_message,
             # Vault session fields (populated only after approval/activation)
@@ -7732,23 +7889,8 @@ def request_database_access():
         requests_db[request_id] = db_request
         _save_requests()
 
-        # Auto-approved NONPROD read-only requests activate immediately.
         create_error = None
         create_error_public = None
-        if initial_status == 'approved':
-            try:
-                activate_result = _activate_database_access_request(request_id)
-                if activate_result.get('error'):
-                    create_error = activate_result['error']
-                    create_error_public, _ = _public_db_activation_error(create_error)
-            except Exception as e:
-                create_error = str(e)
-                create_error_public, _ = _public_db_activation_error(create_error)
-            if create_error:
-                try:
-                    print(f"❌ Auto-activation failed for request {request_id}: {create_error}")
-                except Exception:
-                    pass
 
         # Update conversation state (helps prevent accidental duplicate submissions).
         if conversation_id and conversation_id in db_conversation_states:

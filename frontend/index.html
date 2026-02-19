@@ -27,7 +27,7 @@
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="preload" href="enterprise-theme.css?v=13" as="style">
-    <link rel="preload" href="styles.css?v=11" as="style">
+    <link rel="preload" href="styles.css?v=13" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
     <link href="calendar.css" rel="stylesheet">
@@ -35,7 +35,7 @@
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
     <link href="enterprise-theme.css?v=13" rel="stylesheet">
-    <link href="styles.css?v=11" rel="stylesheet">
+    <link href="styles.css?v=13" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
     <link href="security-ui.css?v=9" rel="stylesheet">
@@ -1049,10 +1049,10 @@
                             <div class="db-info-section">
                                 <h4>Approval Matrix</h4>
                                 <ul class="db-info-approvals">
-                                    <li><strong>Non-Prod Read:</strong> Auto-approved</li>
-                                    <li><strong>Non-Prod Write (any write action):</strong> Manager approval required</li>
-                                    <li><strong>Production Read and Write:</strong> Manager approval required</li>
-                                    <li><strong>PII Database (Read and Write):</strong> CISO + Manager + DB Owner approvals required</li>
+                                    <li><strong>Non-Prod Access:</strong> Manager approval required</li>
+                                    <li><strong>Production Access:</strong> Manager approval required</li>
+                                    <li><strong>Sensitive Production DB:</strong> CISO + Manager + DB Owner approvals required</li>
+                                    <li><strong>Untagged RDS:</strong> Request blocked until tags are added</li>
                                 </ul>
                             </div>
                         </div>
@@ -2653,13 +2653,13 @@
     <script src="request-drafts.js" defer></script>
     <script src="account-tagging.js" defer></script>
     <script src="instances.js?v=2" defer></script>
-    <script src="databases.js?v=29" defer></script>
+    <script src="databases.js?v=30" defer></script>
     <script src="terminal-page.js?v=7" defer></script>
     <script src="s3-explorer.js" defer></script>
     <script src="security-ui-helpers.js?v=2" defer></script>
     <script src="unified-assistant.js" defer></script>
     <script src="workflow-designer.js" defer></script>
-    <script src="app.js?v=21"></script>
+    <script src="app.js?v=22"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

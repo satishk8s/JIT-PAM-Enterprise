@@ -1325,6 +1325,81 @@ td {
     color: #155724;
 }
 
+.accounts-tree {
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.org-tree-level {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.org-tree-level > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text-primary);
+}
+
+.org-tree-level > summary::-webkit-details-marker {
+    display: none;
+}
+
+.org-tree-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+}
+
+.org-tree-meta {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.org-tree-children {
+    padding: 8px 10px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.org-tree-table-wrap {
+    padding: 4px 8px 10px;
+}
+
+.org-tree-accounts-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.org-tree-accounts-table th,
+.org-tree-accounts-table td {
+    border-bottom: 1px solid var(--border-color);
+    padding: 8px 10px;
+    text-align: left;
+}
+
+.org-tree-accounts-table th {
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.org-tree-accounts-table tr:last-child td {
+    border-bottom: none;
+}
+
 /* Modal Styles */
 .modal-overlay {
     position: fixed;
