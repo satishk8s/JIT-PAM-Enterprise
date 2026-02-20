@@ -4200,6 +4200,42 @@ td {
     gap: 10px;
 }
 
+.feature-child-list {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--border-color);
+    display: grid;
+    gap: 10px;
+}
+
+.feature-child-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.feature-child-item.disabled {
+    opacity: 0.55;
+}
+
+.feature-child-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.feature-child-label span {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.feature-child-label small {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
 /* Toggle Switch */
 .toggle-switch {
     position: relative;

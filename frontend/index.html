@@ -2262,6 +2262,28 @@
                                         <span id="featureCloudStatusBadge" class="badge badge-success">Enabled</span>
                                         <span id="featureCloudStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
                                     </div>
+                                    <div class="feature-child-list">
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>AWS Access</span>
+                                                <small>Show AWS module only when enabled.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureAwsAccess" onchange="toggleFeature('aws_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>GCP Access</span>
+                                                <small>Hide or show GCP module independently.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureGcpAccess" onchange="toggleFeature('gcp_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div class="feature-card">
@@ -2278,6 +2300,28 @@
                                     <div class="feature-status">
                                         <span id="featureStorageStatusBadge" class="badge badge-success">Enabled</span>
                                         <span id="featureStorageStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                    <div class="feature-child-list">
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>S3 Access</span>
+                                                <small>Show AWS storage requests and pages.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureS3Access" onchange="toggleFeature('s3_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>GCS Access</span>
+                                                <small>Show Google Cloud Storage requests and pages.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureGcsAccess" onchange="toggleFeature('gcs_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2296,6 +2340,28 @@
                                         <span id="featureDatabasesStatusBadge" class="badge badge-success">Enabled</span>
                                         <span id="featureDatabasesStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
                                     </div>
+                                    <div class="feature-child-list">
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>Structured Access Mode</span>
+                                                <small>Keep only structured DB access workflows visible.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureDatabasesStructuredAccess" onchange="toggleFeature('databases_structured_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>Database Terminal</span>
+                                                <small>Show DB terminal entry in sidebar when enabled.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureDatabaseTerminalAccess" onchange="toggleFeature('database_terminal_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
                                 </div>
 
                                 <div class="feature-card">
@@ -2312,6 +2378,38 @@
                                     <div class="feature-status">
                                         <span id="featureWorkloadsStatusBadge" class="badge badge-success">Enabled</span>
                                         <span id="featureWorkloadsStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                    <div class="feature-child-list">
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>Instances Access</span>
+                                                <small>Show AWS EC2 workload access module.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureInstancesAccess" onchange="toggleFeature('instances_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>GCP VM Access</span>
+                                                <small>Show GCP VM workload access module.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureGcpVmsAccess" onchange="toggleFeature('gcp_vms_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>VM Terminal</span>
+                                                <small>Show VM terminal entry in sidebar when enabled.</small>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureVmTerminalAccess" onchange="toggleFeature('vm_terminal_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2784,7 +2882,7 @@
     <script src="policy-config.js" defer></script>
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
-    <script src="feature-management.js?v=2" defer></script>
+    <script src="feature-management.js?v=3" defer></script>
     <script src="admin-functions.js?v=3" defer></script>
     <script src="security-management.js" defer></script>
     <script src="guardrails.js" defer></script>
@@ -2797,7 +2895,7 @@
     <script src="security-ui-helpers.js?v=2" defer></script>
     <script src="unified-assistant.js" defer></script>
     <script src="workflow-designer.js" defer></script>
-    <script src="app.js?v=24"></script>
+    <script src="app.js?v=25"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {

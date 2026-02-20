@@ -1366,14 +1366,18 @@ let currentRequestsCategory = 'cloud';
 let currentRequestsStatus = 'pending';
 
 function filterRequestsByCategory(category, status) {
-    const categoryFeature = {
-        cloud: 'cloud_access',
-        storage: 'storage_access',
-        databases: 'databases_access',
-        workloads: 'workloads_access'
-    };
-    if (categoryFeature[category] && typeof isFeatureEnabled === 'function' && !isFeatureEnabled(categoryFeature[category])) {
-        return;
+    if (typeof isFeatureEnabled === 'function') {
+        const cloudEnabled = isFeatureEnabled('cloud_access') && (isFeatureEnabled('aws_access') || isFeatureEnabled('gcp_access'));
+        const storageEnabled = isFeatureEnabled('storage_access') && (isFeatureEnabled('s3_access') || isFeatureEnabled('gcs_access'));
+        const workloadsEnabled = isFeatureEnabled('workloads_access') && (isFeatureEnabled('instances_access') || isFeatureEnabled('gcp_vms_access'));
+        const dbEnabled = isFeatureEnabled('databases_access');
+        const categoryEnabled = {
+            cloud: cloudEnabled,
+            storage: storageEnabled,
+            databases: dbEnabled,
+            workloads: workloadsEnabled
+        };
+        if (categoryEnabled[category] === false) return;
     }
     currentRequestsCategory = category;
     currentRequestsStatus = status;

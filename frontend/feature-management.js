@@ -4,10 +4,19 @@
 
     const FEATURE_DEFAULTS = {
         cloud_access: true,
+        aws_access: true,
+        gcp_access: true,
         storage_access: true,
+        s3_access: true,
+        gcs_access: true,
         databases_access: true,
+        databases_structured_access: true,
         workloads_access: true,
+        instances_access: true,
+        gcp_vms_access: true,
         terminal_access: true,
+        database_terminal_access: true,
+        vm_terminal_access: true,
         request_calendar: true,
         database_ai_assistant: true
     };
@@ -15,16 +24,34 @@
     const FEATURE_KEY_ALIASES = {
         cloud: 'cloud_access',
         cloud_access: 'cloud_access',
+        aws: 'aws_access',
+        aws_access: 'aws_access',
+        gcp: 'gcp_access',
+        gcp_access: 'gcp_access',
         storage: 'storage_access',
         storage_access: 'storage_access',
+        s3: 's3_access',
+        s3_access: 's3_access',
+        gcs: 'gcs_access',
+        gcs_access: 'gcs_access',
         database: 'databases_access',
         databases: 'databases_access',
         databases_access: 'databases_access',
+        databases_structured: 'databases_structured_access',
+        databases_structured_access: 'databases_structured_access',
         workload: 'workloads_access',
         workloads: 'workloads_access',
         workloads_access: 'workloads_access',
+        instances: 'instances_access',
+        instances_access: 'instances_access',
+        gcp_vms: 'gcp_vms_access',
+        gcp_vms_access: 'gcp_vms_access',
         terminal: 'terminal_access',
         terminal_access: 'terminal_access',
+        database_terminal: 'database_terminal_access',
+        database_terminal_access: 'database_terminal_access',
+        vm_terminal: 'vm_terminal_access',
+        vm_terminal_access: 'vm_terminal_access',
         calendar: 'request_calendar',
         request_calendar: 'request_calendar',
         requestable_calendar: 'request_calendar',
@@ -46,14 +73,37 @@
     })();
     let adminFeatureLoadInFlight = false;
 
-    function getApiBase() {
+    function getApiBases() {
+        const bases = [];
+        const pushBase = function (value) {
+            const normalized = String(value || '').replace(/\/+$/, '');
+            if (!normalized) return;
+            if (bases.indexOf(normalized) === -1) bases.push(normalized);
+        };
+        const pushWithApiVariants = function (value) {
+            const normalized = String(value || '').replace(/\/+$/, '');
+            if (!normalized) return;
+            if (normalized.endsWith('/api')) {
+                pushBase(normalized);
+                pushBase(normalized.slice(0, -4));
+            } else {
+                pushBase(normalized + '/api');
+                pushBase(normalized);
+            }
+        };
+
         if (typeof window !== 'undefined' && window.API_BASE) {
-            return String(window.API_BASE).replace(/\/+$/, '');
+            pushWithApiVariants(window.API_BASE);
         }
-        if (!window.location.port || window.location.port === '80' || window.location.port === '443') {
-            return (window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api';
-        }
-        return window.location.protocol + '//' + window.location.hostname + ':5000/api';
+        pushBase((window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api');
+        pushBase(window.location.protocol + '//' + window.location.hostname + ':5000/api');
+        return bases;
+    }
+
+    function rememberWorkingApiBase(base) {
+        const normalized = String(base || '').replace(/\/+$/, '');
+        if (!normalized) return;
+        window.API_BASE = normalized;
     }
 
     function canonicalFeatureKey(key) {
@@ -105,18 +155,18 @@
         const p = String(pageId || '').trim();
         if (!p) return true;
         const required = {
-            aws: ['cloud_access'],
-            gcp: ['cloud_access'],
+            aws: ['cloud_access', 'aws_access'],
+            gcp: ['cloud_access', 'gcp_access'],
             accounts: ['cloud_access'],
             newRequest: ['cloud_access'],
             policy: ['cloud_access'],
-            s3: ['storage_access'],
-            gcs: ['storage_access'],
+            s3: ['storage_access', 's3_access'],
+            gcs: ['storage_access', 'gcs_access'],
             databases: ['databases_access'],
-            databaseTerminal: ['databases_access', 'terminal_access'],
-            instances: ['workloads_access'],
-            gcpVms: ['workloads_access'],
-            vmTerminal: ['workloads_access', 'terminal_access']
+            databaseTerminal: ['databases_access', 'terminal_access', 'database_terminal_access'],
+            instances: ['workloads_access', 'instances_access'],
+            gcpVms: ['workloads_access', 'gcp_vms_access'],
+            vmTerminal: ['workloads_access', 'terminal_access', 'vm_terminal_access']
         };
         const needs = required[p];
         if (!needs || !needs.length) return true;
@@ -126,16 +176,49 @@
     function syncFeatureToggleControls(flags) {
         const mapping = {
             featureCloudAccess: 'cloud_access',
+            featureAwsAccess: 'aws_access',
+            featureGcpAccess: 'gcp_access',
             featureStorageAccess: 'storage_access',
+            featureS3Access: 's3_access',
+            featureGcsAccess: 'gcs_access',
             featureDatabasesAccess: 'databases_access',
+            featureDatabasesStructuredAccess: 'databases_structured_access',
             featureWorkloadsAccess: 'workloads_access',
+            featureInstancesAccess: 'instances_access',
+            featureGcpVmsAccess: 'gcp_vms_access',
             featureTerminalAccess: 'terminal_access',
+            featureDatabaseTerminalAccess: 'database_terminal_access',
+            featureVmTerminalAccess: 'vm_terminal_access',
             featureRequestCalendar: 'request_calendar',
             featureDatabaseAIAssistant: 'database_ai_assistant'
         };
         Object.keys(mapping).forEach(function (id) {
             const el = document.getElementById(id);
             if (el) el.checked = !!flags[mapping[id]];
+        });
+    }
+
+    function syncFeatureToggleDependencies(flags) {
+        const dependencies = {
+            featureAwsAccess: ['cloud_access'],
+            featureGcpAccess: ['cloud_access'],
+            featureS3Access: ['storage_access'],
+            featureGcsAccess: ['storage_access'],
+            featureDatabasesStructuredAccess: ['databases_access'],
+            featureInstancesAccess: ['workloads_access'],
+            featureGcpVmsAccess: ['workloads_access'],
+            featureDatabaseTerminalAccess: ['databases_access', 'terminal_access'],
+            featureVmTerminalAccess: ['workloads_access', 'terminal_access']
+        };
+
+        Object.keys(dependencies).forEach(function (id) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const req = dependencies[id];
+            const enabled = req.every(function (k) { return !!flags[k]; });
+            el.disabled = !enabled;
+            const row = el.closest('.feature-child-item');
+            if (row) row.classList.toggle('disabled', !enabled);
         });
     }
 
@@ -165,54 +248,68 @@
     }
 
     function applySidebarGating(flags) {
-        const cloudEnabled = !!flags.cloud_access;
-        const storageEnabled = !!flags.storage_access;
-        const dbEnabled = !!flags.databases_access;
-        const workloadsEnabled = !!flags.workloads_access;
-        const terminalEnabled = !!flags.terminal_access;
+        const cloudParent = !!flags.cloud_access;
+        const awsEnabled = cloudParent && !!flags.aws_access;
+        const gcpEnabled = cloudParent && !!flags.gcp_access;
 
-        setVisible(document.getElementById('navCategoryCloudAccess'), cloudEnabled, 'block');
-        setVisible(document.getElementById('navItemAws'), cloudEnabled, 'flex');
-        setVisible(document.getElementById('navItemGcp'), cloudEnabled, 'flex');
+        const storageParent = !!flags.storage_access;
+        const s3Enabled = storageParent && !!flags.s3_access;
+        const gcsEnabled = storageParent && !!flags.gcs_access;
 
-        setVisible(document.getElementById('navCategoryStorageAccess'), storageEnabled, 'block');
-        setVisible(document.getElementById('navItemS3'), storageEnabled, 'flex');
-        setVisible(document.getElementById('navItemGcs'), storageEnabled, 'flex');
+        const workloadsParent = !!flags.workloads_access;
+        const instancesEnabled = workloadsParent && !!flags.instances_access;
+        const gcpVmsEnabled = workloadsParent && !!flags.gcp_vms_access;
 
-        setVisible(document.getElementById('navCategoryWorkloadsAccess'), workloadsEnabled, 'block');
-        setVisible(document.getElementById('navItemInstances'), workloadsEnabled, 'flex');
-        setVisible(document.getElementById('navItemGcpVms'), workloadsEnabled, 'flex');
+        const dbParent = !!flags.databases_access;
+        const dbStructuredEnabled = dbParent && !!flags.databases_structured_access;
 
-        setVisible(document.getElementById('navCategoryDatabasesAccess'), dbEnabled, 'block');
-        setVisible(document.getElementById('navItemDatabases'), dbEnabled, 'flex');
-        setVisible(document.getElementById('navItemDatabasesStructured'), dbEnabled, 'flex');
+        const terminalParent = !!flags.terminal_access;
+        const showDbTerminal = terminalParent && dbParent && !!flags.database_terminal_access;
+        const showVmTerminal = terminalParent && workloadsParent && !!flags.vm_terminal_access;
 
-        const showDbTerminal = terminalEnabled && dbEnabled;
-        const showVmTerminal = terminalEnabled && workloadsEnabled;
+        setVisible(document.getElementById('navCategoryCloudAccess'), awsEnabled || gcpEnabled, 'block');
+        setVisible(document.getElementById('navItemAws'), awsEnabled, 'flex');
+        setVisible(document.getElementById('navItemGcp'), gcpEnabled, 'flex');
+
+        setVisible(document.getElementById('navCategoryStorageAccess'), s3Enabled || gcsEnabled, 'block');
+        setVisible(document.getElementById('navItemS3'), s3Enabled, 'flex');
+        setVisible(document.getElementById('navItemGcs'), gcsEnabled, 'flex');
+
+        setVisible(document.getElementById('navCategoryWorkloadsAccess'), instancesEnabled || gcpVmsEnabled, 'block');
+        setVisible(document.getElementById('navItemInstances'), instancesEnabled, 'flex');
+        setVisible(document.getElementById('navItemGcpVms'), gcpVmsEnabled, 'flex');
+
+        setVisible(document.getElementById('navCategoryDatabasesAccess'), dbParent, 'block');
+        setVisible(document.getElementById('navItemDatabases'), dbParent, 'flex');
+        setVisible(document.getElementById('navItemDatabasesStructured'), dbStructuredEnabled, 'flex');
+
         setVisible(document.getElementById('navItemDatabaseTerminal'), showDbTerminal, 'flex');
         setVisible(document.getElementById('navItemVmTerminal'), showVmTerminal, 'flex');
         setVisible(document.getElementById('navCategoryTerminalAccess'), showDbTerminal || showVmTerminal, 'block');
     }
 
     function applyRequestsGating(flags) {
-        setVisible(document.getElementById('requestsCloudCard'), !!flags.cloud_access, 'block');
-        setVisible(document.getElementById('requestsStorageCard'), !!flags.storage_access, 'block');
+        const cloudVisible = !!flags.cloud_access && (!!flags.aws_access || !!flags.gcp_access);
+        const storageVisible = !!flags.storage_access && (!!flags.s3_access || !!flags.gcs_access);
+        const workloadsVisible = !!flags.workloads_access && (!!flags.instances_access || !!flags.gcp_vms_access);
+
+        setVisible(document.getElementById('requestsCloudCard'), cloudVisible, 'block');
+        setVisible(document.getElementById('requestsStorageCard'), storageVisible, 'block');
         setVisible(document.getElementById('requestsDatabasesCard'), !!flags.databases_access, 'block');
-        setVisible(document.getElementById('requestsWorkloadsCard'), !!flags.workloads_access, 'block');
+        setVisible(document.getElementById('requestsWorkloadsCard'), workloadsVisible, 'block');
 
         if (typeof currentRequestsCategory !== 'undefined') {
-            const categoryToFeature = {
-                cloud: 'cloud_access',
-                storage: 'storage_access',
-                databases: 'databases_access',
-                workloads: 'workloads_access'
+            const categoryEnabled = {
+                cloud: cloudVisible,
+                storage: storageVisible,
+                databases: !!flags.databases_access,
+                workloads: workloadsVisible
             };
-            const feature = categoryToFeature[currentRequestsCategory];
-            if (feature && !isFeatureEnabled(feature)) {
-                const fallbackCategory = isFeatureEnabled('cloud_access') ? 'cloud'
-                    : isFeatureEnabled('databases_access') ? 'databases'
-                    : isFeatureEnabled('storage_access') ? 'storage'
-                    : isFeatureEnabled('workloads_access') ? 'workloads'
+            if (categoryEnabled[currentRequestsCategory] === false) {
+                const fallbackCategory = categoryEnabled.cloud ? 'cloud'
+                    : categoryEnabled.databases ? 'databases'
+                    : categoryEnabled.storage ? 'storage'
+                    : categoryEnabled.workloads ? 'workloads'
                     : 'cloud';
                 if (typeof filterRequestsByCategory === 'function') {
                     filterRequestsByCategory(fallbackCategory, fallbackCategory === 'databases' ? 'active' : 'pending');
@@ -255,6 +352,7 @@
             localStorage.setItem('npam_feature_flags', JSON.stringify(normalized));
         } catch (_) {}
         if (opts.syncControls !== false) syncFeatureToggleControls(normalized);
+        syncFeatureToggleDependencies(normalized);
         updateFeatureCardStatus(normalized);
         applySidebarGating(normalized);
         applyRequestsGating(normalized);
@@ -265,16 +363,29 @@
     }
 
     async function fetchFeatures(path) {
-        const apiBase = getApiBase();
-        const res = await fetch(apiBase + path, { credentials: 'include' });
-        const text = await res.text();
-        let data = {};
-        try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
-        if (!res.ok) {
-            const msg = data && data.error ? data.error : ('Request failed (' + res.status + ')');
-            throw new Error(msg);
+        const candidates = getApiBases();
+        let lastError = null;
+        for (const apiBase of candidates) {
+            try {
+                const res = await fetch(apiBase + path, { credentials: 'include' });
+                const text = await res.text();
+                let data = {};
+                try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+                if (!res.ok) {
+                    const msg = data && data.error ? data.error : ('Request failed (' + res.status + ')');
+                    if (res.status === 404 || res.status === 405) {
+                        lastError = new Error(msg);
+                        continue;
+                    }
+                    throw new Error(msg);
+                }
+                rememberWorkingApiBase(apiBase);
+                return data || {};
+            } catch (e) {
+                lastError = e;
+            }
         }
-        return data || {};
+        throw (lastError || new Error('Backend unavailable'));
     }
 
     async function refreshFeaturesFromServer() {
@@ -306,17 +417,34 @@
     }
 
     async function postJson(path, body) {
-        const apiBase = getApiBase();
-        const res = await fetch(apiBase + path, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify(body || {})
-        });
-        const text = await res.text();
-        let data = {};
-        try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
-        return { ok: res.ok, status: res.status, data: data };
+        const candidates = getApiBases();
+        let last = { ok: false, status: 0, data: { error: 'Backend unavailable' } };
+        for (const apiBase of candidates) {
+            try {
+                const res = await fetch(apiBase + path, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify(body || {})
+                });
+                const text = await res.text();
+                let data = {};
+                try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+                const out = { ok: res.ok, status: res.status, data: data };
+                if (res.ok) {
+                    rememberWorkingApiBase(apiBase);
+                    return out;
+                }
+                if (res.status === 404 || res.status === 405) {
+                    last = out;
+                    continue;
+                }
+                return out;
+            } catch (e) {
+                last = { ok: false, status: 0, data: { error: e.message || 'Request failed' } };
+            }
+        }
+        return last;
     }
 
     async function saveFeaturePatchLegacy(patch) {
