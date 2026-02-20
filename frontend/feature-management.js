@@ -92,12 +92,46 @@
             }
         };
 
+        const originBase = window.location.origin || (window.location.protocol + '//' + window.location.hostname);
+        // Prefer same-origin routes first; stale cross-origin API_BASE should not break feature toggles.
+        pushBase(originBase + '/api');
+        pushBase(originBase);
+        pushBase((window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api');
         if (typeof window !== 'undefined' && window.API_BASE) {
             pushWithApiVariants(window.API_BASE);
         }
-        pushBase((window.location.origin || (window.location.protocol + '//' + window.location.hostname)) + '/api');
         pushBase(window.location.protocol + '//' + window.location.hostname + ':5000/api');
         return bases;
+    }
+
+    function withLeadingSlash(path) {
+        const raw = String(path || '').trim();
+        if (!raw) return '/';
+        return raw.charAt(0) === '/' ? raw : ('/' + raw);
+    }
+
+    function joinBasePath(base, path) {
+        const b = String(base || '').replace(/\/+$/, '');
+        const p = withLeadingSlash(path);
+        return b + p;
+    }
+
+    function candidateUrlsFor(path) {
+        const p = withLeadingSlash(path);
+        const urls = [];
+        const pushUrl = function (value) {
+            const normalized = String(value || '').trim();
+            if (!normalized) return;
+            if (urls.indexOf(normalized) === -1) urls.push(normalized);
+        };
+
+        // First attempt relative URLs to avoid CORS/network mismatch.
+        pushUrl('/api' + p);
+        pushUrl(p);
+        getApiBases().forEach(function (base) {
+            pushUrl(joinBasePath(base, p));
+        });
+        return urls;
     }
 
     function rememberWorkingApiBase(base) {
@@ -362,12 +396,33 @@
         return Object.assign({}, normalized);
     }
 
+    function rememberApiBaseFromUrl(url) {
+        const raw = String(url || '');
+        if (!raw) return;
+        const originBase = window.location.origin || (window.location.protocol + '//' + window.location.hostname);
+        if (raw.startsWith('/')) {
+            rememberWorkingApiBase(originBase + '/api');
+            return;
+        }
+        try {
+            const u = new URL(raw);
+            if (/\/api(?:\/|$)/.test(u.pathname)) {
+                const idx = u.pathname.indexOf('/api');
+                rememberWorkingApiBase(u.origin + u.pathname.slice(0, idx + 4));
+            } else {
+                rememberWorkingApiBase(u.origin + '/api');
+            }
+        } catch (_) {
+            // Ignore malformed URL.
+        }
+    }
+
     async function fetchFeatures(path) {
-        const candidates = getApiBases();
+        const candidates = candidateUrlsFor(path);
         let lastError = null;
-        for (const apiBase of candidates) {
+        for (const url of candidates) {
             try {
-                const res = await fetch(apiBase + path, { credentials: 'include' });
+                const res = await fetch(url, { credentials: 'include' });
                 const text = await res.text();
                 let data = {};
                 try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
@@ -379,7 +434,7 @@
                     }
                     throw new Error(msg);
                 }
-                rememberWorkingApiBase(apiBase);
+                rememberApiBaseFromUrl(url);
                 return data || {};
             } catch (e) {
                 lastError = e;
@@ -417,11 +472,11 @@
     }
 
     async function postJson(path, body) {
-        const candidates = getApiBases();
+        const candidates = candidateUrlsFor(path);
         let last = { ok: false, status: 0, data: { error: 'Backend unavailable' } };
-        for (const apiBase of candidates) {
+        for (const url of candidates) {
             try {
-                const res = await fetch(apiBase + path, {
+                const res = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
@@ -432,7 +487,7 @@
                 try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
                 const out = { ok: res.ok, status: res.status, data: data };
                 if (res.ok) {
-                    rememberWorkingApiBase(apiBase);
+                    rememberApiBaseFromUrl(url);
                     return out;
                 }
                 if (res.status === 404 || res.status === 405) {
