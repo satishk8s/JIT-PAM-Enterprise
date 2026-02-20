@@ -670,15 +670,40 @@ function _envTagSelectHtml(targetType, targetId, selectedEnv) {
         return '<option value="' + value + '"' + sel + '>' + label + '</option>';
     }
     return ''
-        + '<label class="aws-idc-env-tag">'
+        + '<label class="aws-idc-env-tag" onclick="event.stopPropagation();" onmousedown="event.stopPropagation();" onmouseup="event.stopPropagation();">'
         + '<span>Tag:</span>'
-        + '<select onchange="saveAwsIdentityCenterEnvTag(\'' + jsType + '\', \'' + jsId + '\', this.value)">'
+        + '<select onclick="event.stopPropagation();" onmousedown="event.stopPropagation();" onmouseup="event.stopPropagation();" onchange="event.stopPropagation(); saveAwsIdentityCenterEnvTag(\'' + jsType + '\', \'' + jsId + '\', this.value)">'
         + option('', 'inherit')
         + option('prod', 'prod')
         + option('nonprod', 'non prod')
         + option('sandbox', 'sandbox')
         + '</select>'
         + '</label>';
+}
+
+function _treeNodeKey(prefix, id, name) {
+    var pid = String(id || '').trim();
+    var pname = String(name || '').trim();
+    return String(prefix || 'node') + ':' + (pid || pname || 'unknown');
+}
+
+function _captureAwsIdcTreeOpenState(treeEl) {
+    var state = {};
+    if (!treeEl) return state;
+    var nodes = treeEl.querySelectorAll('details.aws-idc-tree-node[data-node-key]');
+    nodes.forEach(function(node) {
+        var key = node.getAttribute('data-node-key');
+        if (!key) return;
+        state[key] = !!node.open;
+    });
+    return state;
+}
+
+function _isAwsIdcNodeOpen(openState, key, fallbackOpen) {
+    if (openState && Object.prototype.hasOwnProperty.call(openState, key)) {
+        return !!openState[key];
+    }
+    return !!fallbackOpen;
 }
 
 function _countHierarchyAccounts(rootNode) {
@@ -743,16 +768,17 @@ function _renderAwsIdcAccountNode(account, depth) {
         + '</div>';
 }
 
-function _renderAwsIdcOuNode(ou, depth) {
+function _renderAwsIdcOuNode(ou, depth, openState) {
     var ouId = String(ou.id || '').trim();
     var ouName = String(ou.name || ouId || 'OU').trim();
+    var ouKey = _treeNodeKey('ou', ouId, ouName);
     var assigned = _normalizeEnvOption(ou.assigned_environment);
     var effective = _normalizeEnvOption(ou.effective_environment || 'nonprod') || 'nonprod';
     var childrenHtml = '';
 
     var childOus = Array.isArray(ou.ous) ? ou.ous : [];
     childOus.forEach(function(child) {
-        childrenHtml += _renderAwsIdcOuNode(child, depth + 1);
+        childrenHtml += _renderAwsIdcOuNode(child, depth + 1, openState);
     });
     var accounts = Array.isArray(ou.accounts) ? ou.accounts : [];
     accounts.forEach(function(acc) {
@@ -761,7 +787,7 @@ function _renderAwsIdcOuNode(ou, depth) {
     if (!childrenHtml) childrenHtml = '<p class="text-muted" style="margin-left:' + ((depth + 1) * 10) + 'px;">No accounts in this OU.</p>';
 
     return ''
-        + '<details class="aws-idc-tree-node" open>'
+        + '<details class="aws-idc-tree-node"' + (_isAwsIdcNodeOpen(openState, ouKey, true) ? ' open' : '') + ' data-node-key="' + _escHtml(ouKey) + '">'
         + '<summary>'
         + 'OU: ' + _escHtml(ouName) + ' <small>(' + _escHtml(ouId) + ')</small> '
         + '<small>' + _escHtml(effective) + (assigned ? ' (tagged)' : ' (inherited)') + '</small> '
@@ -775,6 +801,7 @@ function _renderAwsIdcOrgHierarchy(payload) {
     var summaryEl = document.getElementById('awsIdcOrgSummary');
     var treeEl = document.getElementById('awsIdcOrgTree');
     if (!summaryEl || !treeEl) return;
+    var openState = _captureAwsIdcTreeOpenState(treeEl);
     if (payload && payload.error) {
         summaryEl.textContent = payload.error;
         treeEl.innerHTML = '<p class="text-danger">' + _escHtml(payload.error) + '</p>';
@@ -806,24 +833,26 @@ function _renderAwsIdcOrgHierarchy(payload) {
     var org = payload.organization || {};
     var orgId = String(org.id || '').trim();
     var orgName = String(org.display_name || '').trim() || (orgId ? ('Organization ' + orgId) : 'Organization');
+    var orgKey = _treeNodeKey('org', orgId, orgName);
     var totalAccounts = roots.reduce(function(sum, r) { return sum + _countHierarchyAccounts(r); }, 0);
     summaryEl.textContent = 'Organizations: ' + (orgId ? 1 : 0) + ' | Roots: ' + roots.length + ' | Accounts: ' + totalAccounts;
 
     var rootHtml = roots.map(function(root) {
         var rootId = String(root.id || '').trim();
         var rootName = String(root.name || rootId || 'Root').trim();
+        var rootKey = _treeNodeKey('root', rootId, rootName);
         var rootAssigned = _normalizeEnvOption(root.assigned_environment);
         var rootEffective = _normalizeEnvOption(root.effective_environment || 'nonprod') || 'nonprod';
 
         var childrenHtml = '';
         var ous = Array.isArray(root.ous) ? root.ous : [];
-        ous.forEach(function(ou) { childrenHtml += _renderAwsIdcOuNode(ou, 1); });
+        ous.forEach(function(ou) { childrenHtml += _renderAwsIdcOuNode(ou, 1, openState); });
         var directAccounts = Array.isArray(root.accounts) ? root.accounts : [];
         directAccounts.forEach(function(acc) { childrenHtml += _renderAwsIdcAccountNode(acc, 1); });
         if (!childrenHtml) childrenHtml = '<p class="text-muted">No accounts under this root.</p>';
 
         return ''
-            + '<details class="aws-idc-tree-node" open>'
+            + '<details class="aws-idc-tree-node"' + (_isAwsIdcNodeOpen(openState, rootKey, true) ? ' open' : '') + ' data-node-key="' + _escHtml(rootKey) + '">'
             + '<summary>'
             + 'Root: ' + _escHtml(rootName) + ' <small>(' + _escHtml(rootId) + ')</small> '
             + '<small>' + _escHtml(rootEffective) + (rootAssigned ? ' (tagged)' : ' (inherited)') + '</small> '
@@ -833,7 +862,7 @@ function _renderAwsIdcOrgHierarchy(payload) {
             + '</details>';
     }).join('');
 
-    treeEl.innerHTML = warningHtml + '<details class="aws-idc-tree-node" open>'
+    treeEl.innerHTML = warningHtml + '<details class="aws-idc-tree-node"' + (_isAwsIdcNodeOpen(openState, orgKey, true) ? ' open' : '') + ' data-node-key="' + _escHtml(orgKey) + '">'
         + '<summary>' + _escHtml(orgName) + (orgId ? (' <small>(' + _escHtml(orgId) + ')</small>') : '') + '</summary>'
         + '<div class="aws-idc-tree-children">' + (rootHtml || '<p class="text-muted">No roots found.</p>') + '</div>'
         + '</details>';

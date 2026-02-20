@@ -316,7 +316,7 @@
         setVisible(document.getElementById('navItemGcpVms'), gcpVmsEnabled, 'flex');
 
         setVisible(document.getElementById('navCategoryDatabasesAccess'), dbParent, 'block');
-        setVisible(document.getElementById('navItemDatabases'), dbParent, 'flex');
+        setVisible(document.getElementById('navItemDatabases'), false, 'flex');
         setVisible(document.getElementById('navItemDatabasesStructured'), dbStructuredEnabled, 'flex');
 
         setVisible(document.getElementById('navItemDatabaseTerminal'), showDbTerminal, 'flex');
