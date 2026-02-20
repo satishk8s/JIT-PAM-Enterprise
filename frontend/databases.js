@@ -26,6 +26,54 @@ let dbInstancePolicy = {
     request_block_reason: ''
 };
 
+function isDbFeatureEnabled(key, fallback) {
+    const defaultValue = (typeof fallback === 'boolean') ? fallback : true;
+    if (typeof window.isFeatureEnabled === 'function') {
+        try {
+            return window.isFeatureEnabled(key);
+        } catch (_) {
+            return defaultValue;
+        }
+    }
+    return defaultValue;
+}
+
+function applyDatabaseFeatureFlags(flags) {
+    const f = (flags && typeof flags === 'object')
+        ? flags
+        : ((typeof window.getCurrentFeatures === 'function') ? window.getCurrentFeatures() : null);
+    const aiEnabled = f ? f.database_ai_assistant !== false : isDbFeatureEnabled('database_ai_assistant', true);
+    const calendarEnabled = f ? f.request_calendar !== false : isDbFeatureEnabled('request_calendar', true);
+
+    const aiBtn = document.getElementById('dbModeAiBtn');
+    if (aiBtn) aiBtn.style.display = aiEnabled ? '' : 'none';
+    if (!aiEnabled && dbAccessMode !== 'structured') {
+        try { setDbAccessMode('structured'); } catch (_) {}
+    }
+    const aiPanel = document.getElementById('dbAiPanel');
+    if (!aiEnabled && aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+
+    const dateModeLabel = document.getElementById('dbDurationModeDaterangeLabel');
+    const dateModeRadio = document.getElementById('dbDurationModeDaterange');
+    const hoursModeRadio = document.getElementById('dbDurationModeHours');
+    const dateRangeBlock = document.getElementById('dbDurationDaterangeBlock');
+    const hoursBlock = document.getElementById('dbDurationHoursBlock');
+
+    if (dateModeLabel) dateModeLabel.style.display = calendarEnabled ? '' : 'none';
+    if (dateModeRadio) {
+        dateModeRadio.disabled = !calendarEnabled;
+        if (!calendarEnabled && dateModeRadio.checked && hoursModeRadio) {
+            hoursModeRadio.checked = true;
+        }
+    }
+    if (!calendarEnabled) {
+        if (dateRangeBlock) dateRangeBlock.style.display = 'none';
+        if (hoursBlock) hoursBlock.style.display = '';
+    }
+}
+
+window.applyDatabaseFeatureFlags = applyDatabaseFeatureFlags;
+
 const DB_READ_ONLY_OPS = new Set(['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE']);
 
 // Structured permission catalog (engine-specific filtering applied at render time)
@@ -240,7 +288,10 @@ function openStructuredDatabaseAccess() {
 }
 
 function setDbAccessMode(mode) {
-    const m = (mode || '').toLowerCase() === 'structured' ? 'structured' : 'ai';
+    let m = (mode || '').toLowerCase() === 'structured' ? 'structured' : 'ai';
+    if (m === 'ai' && !isDbFeatureEnabled('database_ai_assistant', true)) {
+        m = 'structured';
+    }
     dbAccessMode = m;
     const aiBtn = document.getElementById('dbModeAiBtn');
     const stBtn = document.getElementById('dbModeStructuredBtn');
@@ -1376,6 +1427,7 @@ function initDbDurationMode() {
     const hoursBlock = document.getElementById('dbDurationHoursBlock');
     const daterangeBlock = document.getElementById('dbDurationDaterangeBlock');
     if (!modeHours || !modeDaterange || !hoursBlock || !daterangeBlock) return;
+    const calendarEnabled = isDbFeatureEnabled('request_calendar', true);
 
     const today = new Date();
     const todayStr = today.toISOString().slice(0, 10);
@@ -1410,6 +1462,12 @@ function initDbDurationMode() {
         hydrateStructuredSummary();
     });
     modeDaterange.addEventListener('change', function() {
+        if (!isDbFeatureEnabled('request_calendar', true)) {
+            modeHours.checked = true;
+            hoursBlock.style.display = '';
+            daterangeBlock.style.display = 'none';
+            return;
+        }
         hoursBlock.style.display = 'none';
         daterangeBlock.style.display = 'block';
         if (startEl && !startEl.value) startEl.value = todayStr;
@@ -1432,6 +1490,14 @@ function initDbDurationMode() {
             hydrateStructuredSummary();
         });
     }
+
+    if (!calendarEnabled) {
+        modeDaterange.checked = false;
+        modeDaterange.disabled = true;
+        modeHours.checked = true;
+        hoursBlock.style.display = '';
+        daterangeBlock.style.display = 'none';
+    }
 }
 
 function resetStructuredDbRequest() {
@@ -1448,6 +1514,11 @@ function resetStructuredDbRequest() {
     const daterangeBlock = document.getElementById('dbDurationDaterangeBlock');
     if (hoursBlock) hoursBlock.style.display = '';
     if (daterangeBlock) daterangeBlock.style.display = 'none';
+    const modeDaterange = document.getElementById('dbDurationModeDaterange');
+    if (modeDaterange) {
+        const calendarEnabled = isDbFeatureEnabled('request_calendar', true);
+        modeDaterange.disabled = !calendarEnabled;
+    }
     const today = new Date().toISOString().slice(0, 10);
     if (startEl) startEl.value = '';
     if (endEl) endEl.value = '';
@@ -3176,14 +3247,21 @@ async function editDbRequestDurationModal(requestId) {
 
 async function loadDatabases() {
     try {
+        applyDatabaseFeatureFlags();
         renderDbTree();
         loadDbRequests();
         refreshApprovedDatabases();
     } catch (e) {
         console.error('Error loading databases:', e);
+        applyDatabaseFeatureFlags();
         renderDbTree();
     }
 }
+
+document.addEventListener('npam-features-updated', function (evt) {
+    const flags = evt && evt.detail ? evt.detail.features : null;
+    applyDatabaseFeatureFlags(flags);
+});
 
 async function refreshApprovedDatabases() {
     const tbody = document.getElementById('approvedDatabasesTableBody');

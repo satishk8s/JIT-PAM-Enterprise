@@ -252,52 +252,52 @@
                         <span>Active Sessions</span>
                     </div>
                     
-                    <div class="nav-category">Cloud Access</div>
-                    <div class="nav-item" onclick="showPage('aws')">
+                    <div class="nav-category" id="navCategoryCloudAccess">Cloud Access</div>
+                    <div class="nav-item" id="navItemAws" onclick="showPage('aws')">
                         <i class="fab fa-aws nav-icon-cloud nav-icon-aws"></i>
                         <span>AWS</span>
                     </div>
-                    <div class="nav-item" onclick="showPage('gcp')">
+                    <div class="nav-item" id="navItemGcp" onclick="showPage('gcp')">
                         <i class="fab fa-google nav-icon-cloud nav-icon-gcp"></i>
                         <span>GCP</span>
                     </div>
                     
-                    <div class="nav-category">Workloads</div>
-                    <div class="nav-item" onclick="showPage('instances')">
+                    <div class="nav-category" id="navCategoryWorkloadsAccess">Workloads</div>
+                    <div class="nav-item" id="navItemInstances" onclick="showPage('instances')">
                         <i class="fab fa-aws nav-icon-workload nav-icon-aws"></i>
                         <span>EC2 Instances</span>
                     </div>
-                    <div class="nav-item" onclick="showPage('gcpVms')">
+                    <div class="nav-item" id="navItemGcpVms" onclick="showPage('gcpVms')">
                         <i class="fab fa-google nav-icon-workload nav-icon-gcp"></i>
                         <span>GCP VM's</span>
                     </div>
                     
-                    <div class="nav-category">Storage</div>
-                    <div class="nav-item" onclick="showPage('s3')">
+                    <div class="nav-category" id="navCategoryStorageAccess">Storage</div>
+                    <div class="nav-item" id="navItemS3" onclick="showPage('s3')">
                         <i class="fab fa-aws nav-icon-storage nav-icon-aws"></i>
                         <span>S3</span>
                     </div>
-                    <div class="nav-item" onclick="showPage('gcs')">
+                    <div class="nav-item" id="navItemGcs" onclick="showPage('gcs')">
                         <i class="fab fa-google nav-icon-storage nav-icon-gcp"></i>
                         <span>GCS</span>
                     </div>
                     
-                    <div class="nav-category">Databases</div>
-                    <div class="nav-item" onclick="showPage('databases')">
+                    <div class="nav-category" id="navCategoryDatabasesAccess">Databases</div>
+                    <div class="nav-item" id="navItemDatabases" onclick="showPage('databases')">
                         <i class="fas fa-database"></i>
                         <span>Databases</span>
                     </div>
-                    <div class="nav-item" onclick="openStructuredDatabaseAccess()">
+                    <div class="nav-item" id="navItemDatabasesStructured" onclick="openStructuredDatabaseAccess()">
                         <i class="fas fa-sliders"></i>
                         <span>Database Access (Structured)</span>
                     </div>
                     
-                    <div class="nav-category">Terminal</div>
-                    <div class="nav-item" onclick="showPage('databaseTerminal')">
+                    <div class="nav-category" id="navCategoryTerminalAccess">Terminal</div>
+                    <div class="nav-item" id="navItemDatabaseTerminal" onclick="showPage('databaseTerminal')">
                         <i class="fas fa-database"></i>
                         <span>Database Terminal</span>
                     </div>
-                    <div class="nav-item" onclick="showPage('vmTerminal')">
+                    <div class="nav-item" id="navItemVmTerminal" onclick="showPage('vmTerminal')">
                         <i class="fas fa-server"></i>
                         <span>VM Terminal</span>
                     </div>
@@ -469,7 +469,7 @@
                     </div>
 
                     <!-- Cloud Access Request -->
-                    <div class="requests-category-card">
+                    <div class="requests-category-card" id="requestsCloudCard">
                         <h3 class="requests-category-title"><i class="fas fa-cloud"></i> Cloud Access Request</h3>
                         <div class="requests-status-buttons">
                             <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="cloud" data-status="pending" onclick="filterRequestsByCategory('cloud', 'pending')"><i class="fas fa-clock"></i> Pending</button>
@@ -483,7 +483,7 @@
                     </div>
 
                     <!-- Storage -->
-                    <div class="requests-category-card">
+                    <div class="requests-category-card" id="requestsStorageCard">
                         <h3 class="requests-category-title"><i class="fas fa-hdd"></i> Storage</h3>
                         <div class="requests-status-buttons">
                             <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="storage" data-status="pending" onclick="filterRequestsByCategory('storage', 'pending')"><i class="fas fa-clock"></i> Pending</button>
@@ -497,7 +497,7 @@
                     </div>
 
                     <!-- Databases -->
-                    <div class="requests-category-card">
+                    <div class="requests-category-card" id="requestsDatabasesCard">
                         <h3 class="requests-category-title"><i class="fas fa-database"></i> Databases</h3>
                         <div class="requests-status-buttons">
                             <button class="requests-status-btn requests-status-inprogress requests-status-glow" data-category="databases" data-status="active" onclick="filterRequestsByCategory('databases', 'active')"><i class="fas fa-bolt"></i> Active</button>
@@ -540,7 +540,7 @@
                     </div>
 
                     <!-- Workloads -->
-                    <div class="requests-category-card">
+                    <div class="requests-category-card" id="requestsWorkloadsCard">
                         <h3 class="requests-category-title"><i class="fas fa-server"></i> Workloads</h3>
                         <div class="requests-status-buttons">
                             <button class="requests-status-btn requests-status-pending requests-status-glow" data-category="workloads" data-status="pending" onclick="filterRequestsByCategory('workloads', 'pending')"><i class="fas fa-clock"></i> Pending</button>
@@ -1118,7 +1118,7 @@
                                             <label>Access duration</label>
                                             <div class="db-duration-mode-row">
                                                 <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="hours" id="dbDurationModeHours" checked> Hours</label>
-                                                <label class="db-radio-label"><input type="radio" name="dbDurationMode" value="daterange" id="dbDurationModeDaterange"> Date range (max 3 days)</label>
+                                                <label class="db-radio-label" id="dbDurationModeDaterangeLabel"><input type="radio" name="dbDurationMode" value="daterange" id="dbDurationModeDaterange"> Date range (max 3 days)</label>
                                             </div>
                                             <div id="dbDurationHoursBlock" class="db-structured-duration-row">
                                                 <input type="number" id="dbStructuredDuration" min="1" max="72" step="1" value="2" title="1–72 hours">
@@ -1782,6 +1782,14 @@
                 
                 <!-- Admin Management Tab (PAM theme, real icons) -->
                 <div id="adminPoliciesTab" class="admin-tab admin-tab-pam" style="display: none; font-family: 'Inter', sans-serif;">
+                    <div class="admin-subtabs">
+                        <button class="btn-secondary btn-pam admin-subtab active" id="policiesSubTab" onclick="showManagementSubTab('policies')">
+                            <i class="fas fa-sliders-h"></i> Policies
+                        </button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="featuresSubTab" onclick="showManagementSubTab('features')">
+                            <i class="fas fa-toggle-on"></i> Features
+                        </button>
+                    </div>
                     <div id="policiesSection" class="admin-tab-pam-inner" style="font-family: 'Inter', sans-serif;">
                         <div class="policy-builder">
                         <div class="builder-header">
@@ -2231,6 +2239,136 @@
                         </div>
                     </div>
 
+                    <div id="featuresSection" class="admin-tab-pam-inner" style="display: none; font-family: 'Inter', sans-serif;">
+                        <div class="features-management">
+                            <div class="section-header">
+                                <h3><i class="fas fa-toggle-on"></i> Feature Controls</h3>
+                                <p style="color: var(--text-secondary); font-size: 13px;">Enable or disable user-visible modules and request options.</p>
+                            </div>
+                            <p class="admin-role-hint">Break-glass SuperAdmin should bootstrap the first Admin user, then Admins can manage day-to-day users and feature visibility.</p>
+                            <div class="features-grid">
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-cloud"></i> Cloud Access</h4>
+                                            <p>Show or hide cloud access pages and controls.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureCloudAccess" onchange="toggleFeature('cloud_access', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureCloudStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureCloudStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-hdd"></i> Storage Access</h4>
+                                            <p>Show or hide storage modules and request sections.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureStorageAccess" onchange="toggleFeature('storage_access', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureStorageStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureStorageStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-database"></i> Databases Access</h4>
+                                            <p>Show or hide database request pages and DB terminal.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureDatabasesAccess" onchange="toggleFeature('databases_access', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureDatabasesStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureDatabasesStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-server"></i> Workloads Access</h4>
+                                            <p>Show or hide workload request pages and VM terminal.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureWorkloadsAccess" onchange="toggleFeature('workloads_access', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureWorkloadsStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureWorkloadsStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-terminal"></i> Terminal Access</h4>
+                                            <p>Global terminal visibility control.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureTerminalAccess" onchange="toggleFeature('terminal_access', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureTerminalStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureTerminalStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-calendar-days"></i> Requestable Access by Calendar</h4>
+                                            <p>Enable date-range access requests. If off, only hour-based duration is shown.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureRequestCalendar" onchange="toggleFeature('request_calendar', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureCalendarStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureCalendarStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+
+                                <div class="feature-card">
+                                    <div class="feature-header">
+                                        <div>
+                                            <h4><i class="fas fa-robot"></i> Database AI Assistant</h4>
+                                            <p>Enable AI-guided database request mode. If off, users see only structured mode.</p>
+                                        </div>
+                                        <label class="toggle-switch">
+                                            <input type="checkbox" id="featureDatabaseAIAssistant" onchange="toggleFeature('database_ai_assistant', this.checked)">
+                                            <span class="toggle-slider"></span>
+                                        </label>
+                                    </div>
+                                    <div class="feature-status">
+                                        <span id="featureDbAiStatusBadge" class="badge badge-success">Enabled</span>
+                                        <span id="featureDbAiStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                 </div>
 
                 <!-- Admin Integrations Tab: sub-tabs Cloud | Ticketing | SIEM | IGP -->
@@ -2646,20 +2784,20 @@
     <script src="policy-config.js" defer></script>
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
-    <script src="feature-management.js" defer></script>
+    <script src="feature-management.js?v=2" defer></script>
     <script src="admin-functions.js?v=3" defer></script>
     <script src="security-management.js" defer></script>
     <script src="guardrails.js" defer></script>
     <script src="request-drafts.js" defer></script>
     <script src="account-tagging.js" defer></script>
     <script src="instances.js?v=2" defer></script>
-    <script src="databases.js?v=30" defer></script>
+    <script src="databases.js?v=31" defer></script>
     <script src="terminal-page.js?v=7" defer></script>
     <script src="s3-explorer.js" defer></script>
     <script src="security-ui-helpers.js?v=2" defer></script>
     <script src="unified-assistant.js" defer></script>
     <script src="workflow-designer.js" defer></script>
-    <script src="app.js?v=23"></script>
+    <script src="app.js?v=24"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
@@ -2712,26 +2850,31 @@
         }
         
         function showManagementSubTab(tab) {
-            document.getElementById('policiesSection').style.display = tab === 'policies' ? 'block' : 'none';
-            document.getElementById('featuresSection').style.display = tab === 'features' ? 'block' : 'none';
-            
-            const policiesBtn = document.getElementById('policiesSubTab');
-            const featuresBtn = document.getElementById('featuresSubTab');
-            
-            if (tab === 'policies') {
-                policiesBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-                policiesBtn.style.color = 'white';
-                policiesBtn.style.border = 'none';
-                featuresBtn.style.background = 'var(--bg-secondary)';
-                featuresBtn.style.color = 'var(--text-primary)';
-                featuresBtn.style.border = '1.5px solid var(--border-color)';
-            } else {
-                featuresBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-                featuresBtn.style.color = 'white';
-                featuresBtn.style.border = 'none';
-                policiesBtn.style.background = 'var(--bg-secondary)';
-                policiesBtn.style.color = 'var(--text-primary)';
-                policiesBtn.style.border = '1.5px solid var(--border-color)';
+            var policiesSection = document.getElementById('policiesSection');
+            var featuresSection = document.getElementById('featuresSection');
+            if (policiesSection) policiesSection.style.display = tab === 'policies' ? 'block' : 'none';
+            if (featuresSection) featuresSection.style.display = tab === 'features' ? 'block' : 'none';
+
+            var policiesBtn = document.getElementById('policiesSubTab');
+            var featuresBtn = document.getElementById('featuresSubTab');
+            [policiesBtn, featuresBtn].forEach(function(btn) {
+                if (!btn) return;
+                btn.classList.remove('active');
+                btn.style.background = 'var(--bg-secondary)';
+                btn.style.color = 'var(--text-primary)';
+                btn.style.border = '1.5px solid var(--border-color)';
+            });
+
+            var activeBtn = tab === 'features' ? featuresBtn : policiesBtn;
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+                activeBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+                activeBtn.style.color = 'white';
+                activeBtn.style.border = 'none';
+            }
+
+            if (tab === 'features' && typeof loadFeatureToggles === 'function') {
+                loadFeatureToggles();
             }
         }
         

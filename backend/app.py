@@ -279,28 +279,249 @@ identity_center_synced_groups = []
 
 # PAM solution admins: users who can manage this PAM (Admin panel). Stored in data/pam_admins.json.
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
+FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
+
+FEATURE_FLAG_DEFAULTS = {
+    'cloud_access': True,
+    'storage_access': True,
+    'databases_access': True,
+    'workloads_access': True,
+    'terminal_access': True,
+    'request_calendar': True,
+    'database_ai_assistant': True,
+}
+
+FEATURE_KEY_ALIASES = {
+    'cloud': 'cloud_access',
+    'cloud_access': 'cloud_access',
+    'storage': 'storage_access',
+    'storage_access': 'storage_access',
+    'database': 'databases_access',
+    'database_access': 'databases_access',
+    'databases': 'databases_access',
+    'databases_access': 'databases_access',
+    'workload': 'workloads_access',
+    'workloads': 'workloads_access',
+    'workload_access': 'workloads_access',
+    'workloads_access': 'workloads_access',
+    'terminal': 'terminal_access',
+    'terminal_access': 'terminal_access',
+    'calendar': 'request_calendar',
+    'request_calendar': 'request_calendar',
+    'requestable_calendar': 'request_calendar',
+    'requestable_for_access_calendar': 'request_calendar',
+    'database_ai': 'database_ai_assistant',
+    'ai': 'database_ai_assistant',
+    'ai_assistant': 'database_ai_assistant',
+    'database_ai_assistant': 'database_ai_assistant',
+}
+
+_BREAK_GLASS_SEED_CACHE = {'loaded': False, 'email': ''}
+
+
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    raw = str(value or '').strip().lower()
+    if raw in ('1', 'true', 'yes', 'y', 'on', 'enabled'):
+        return True
+    if raw in ('0', 'false', 'no', 'n', 'off', 'disabled'):
+        return False
+    return bool(default)
+
+
+def _canonical_feature_key(key):
+    raw = str(key or '').strip().lower()
+    if not raw:
+        return ''
+    return FEATURE_KEY_ALIASES.get(raw, raw)
+
+
+def _normalize_feature_flags(raw, base=None):
+    out = dict(base or FEATURE_FLAG_DEFAULTS)
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        canonical = _canonical_feature_key(key)
+        if canonical in FEATURE_FLAG_DEFAULTS:
+            out[canonical] = _as_bool(value, out.get(canonical))
+    return out
+
+
+def _load_feature_flags():
+    try:
+        if os.path.exists(FEATURE_FLAGS_PATH):
+            with open(FEATURE_FLAGS_PATH, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                source = data.get('features') if isinstance(data.get('features'), dict) else data
+                return _normalize_feature_flags(source, FEATURE_FLAG_DEFAULTS)
+    except Exception:
+        pass
+    return dict(FEATURE_FLAG_DEFAULTS)
+
+
+def _save_feature_flags(flags):
+    normalized = _normalize_feature_flags(flags, FEATURE_FLAG_DEFAULTS)
+    os.makedirs(os.path.dirname(FEATURE_FLAGS_PATH) or '.', exist_ok=True)
+    with open(FEATURE_FLAGS_PATH, 'w') as f:
+        json.dump({
+            'features': normalized,
+            'updated_at': datetime.now().isoformat()
+        }, f, indent=2)
+    return normalized
+
+
+def _normalize_pam_role(role):
+    raw = str(role or '').strip()
+    low = raw.lower()
+    if low in ('superadmin', 'super_admin', 'super admin', 'breakglass', 'break_glass', 'root'):
+        return 'SuperAdmin'
+    if low in ('manager',):
+        return 'Manager'
+    if low in ('admin', 'administrator', 'system administrator'):
+        return 'Admin'
+    if low in ('readonly', 'readaccess', 'read_only'):
+        return 'Readaccess'
+    return 'Admin'
+
+
+def _is_super_admin_role(role):
+    return _normalize_pam_role(role) == 'SuperAdmin'
+
+
+def _is_admin_role(role):
+    r = _normalize_pam_role(role)
+    return r in ('SuperAdmin', 'Admin')
+
+
+def _break_glass_seed_email():
+    if _BREAK_GLASS_SEED_CACHE.get('loaded'):
+        return _BREAK_GLASS_SEED_CACHE.get('email') or ''
+
+    email = ''
+    candidates = [
+        os.getenv('PAM_SUPER_ADMIN_SEED_EMAIL'),
+        os.getenv('BREAK_GLASS_SUPER_ADMIN_EMAIL'),
+        os.getenv('PAM_BREAK_GLASS_EMAIL'),
+    ]
+    for c in candidates:
+        v = str(c or '').strip().lower()
+        if v and '@' in v:
+            email = v
+            break
+
+    if not email:
+        secret_arn = str(
+            os.getenv('BREAK_GLASS_SECRET_ARN')
+            or os.getenv('PAM_BREAK_GLASS_SECRET_ARN')
+            or ''
+        ).strip()
+        if secret_arn:
+            region = str(
+                os.getenv('BREAK_GLASS_SECRET_REGION')
+                or os.getenv('AWS_REGION')
+                or os.getenv('AWS_DEFAULT_REGION')
+                or 'ap-south-1'
+            ).strip()
+            try:
+                sm = boto3.client('secretsmanager', region_name=region, config=AWS_CONFIG)
+                secret_value = sm.get_secret_value(SecretId=secret_arn) or {}
+                secret_raw = str(secret_value.get('SecretString') or '').strip()
+                if secret_raw:
+                    try:
+                        payload = json.loads(secret_raw)
+                        if isinstance(payload, dict):
+                            for key in ('super_admin_email', 'break_glass_email', 'email', 'user_email', 'username'):
+                                candidate = str(payload.get(key) or '').strip().lower()
+                                if candidate and '@' in candidate:
+                                    email = candidate
+                                    break
+                    except Exception:
+                        if '@' in secret_raw:
+                            email = secret_raw.lower()
+            except Exception as e:
+                print(f"Break-glass seed lookup failed: {e}", flush=True)
+
+    _BREAK_GLASS_SEED_CACHE['loaded'] = True
+    _BREAK_GLASS_SEED_CACHE['email'] = email
+    return email
 
 def _load_pam_admins():
     """Load list of PAM admins: [{'email': str, 'role': str}, ...]. Email is lowercase. Backward-compat: old {'emails': [...]} migrated to role Admin."""
+    admins = []
     try:
         if os.path.exists(PAM_ADMINS_PATH):
             with open(PAM_ADMINS_PATH, 'r') as f:
                 data = json.load(f)
             if isinstance(data, list):
-                return [{'email': str(x.get('email') or x).strip().lower(), 'role': str(x.get('role') or 'Admin').strip() or 'Admin'} for x in data if str(x.get('email') or x).strip()]
-            admins = data.get('pam_admins')
-            if isinstance(admins, list):
-                return [{'email': str(a.get('email') or '').strip().lower(), 'role': str(a.get('role') or 'Admin').strip() or 'Admin'} for a in admins if str(a.get('email') or '').strip()]
-            emails = data.get('emails') or []
-            if emails:
-                return [{'email': str(e).strip().lower(), 'role': 'Admin'} for e in emails if str(e).strip()]
+                admins = [
+                    {
+                        'email': str((x.get('email') if isinstance(x, dict) else x) or '').strip().lower(),
+                        'role': _normalize_pam_role(x.get('role') if isinstance(x, dict) else 'Admin')
+                    }
+                    for x in data
+                    if str((x.get('email') if isinstance(x, dict) else x) or '').strip()
+                ]
+            elif isinstance(data, dict):
+                stored_admins = data.get('pam_admins')
+                if isinstance(stored_admins, list):
+                    admins = [
+                        {
+                            'email': str(a.get('email') or '').strip().lower(),
+                            'role': _normalize_pam_role(a.get('role') or 'Admin')
+                        }
+                        for a in stored_admins
+                        if isinstance(a, dict) and str(a.get('email') or '').strip()
+                    ]
+                else:
+                    emails = data.get('emails') or []
+                    if emails:
+                        admins = [{'email': str(e).strip().lower(), 'role': 'Admin'} for e in emails if str(e).strip()]
         seed = os.getenv('PAM_ADMIN_SEED_EMAIL', '').strip()
-        if seed and '@' in seed:
-            _save_pam_admins([{'email': seed.lower(), 'role': 'Admin'}])
-            return [{'email': seed.lower(), 'role': 'Admin'}]
+        if seed and '@' in seed and not admins:
+            admins = [{'email': seed.lower(), 'role': 'Admin'}]
+    except Exception:
+        admins = []
+
+    # Seed one break-glass super user (if configured) for root-style admin bootstrap.
+    super_seed = _break_glass_seed_email()
+    if super_seed:
+        found = None
+        for a in admins:
+            if str(a.get('email') or '').strip().lower() == super_seed:
+                found = a
+                break
+        if found:
+            if not _is_super_admin_role(found.get('role')):
+                found['role'] = 'SuperAdmin'
+        else:
+            admins.insert(0, {'email': super_seed, 'role': 'SuperAdmin'})
+
+    # Deduplicate by email.
+    dedup = {}
+    role_priority = {'Readaccess': 1, 'Manager': 2, 'Admin': 3, 'SuperAdmin': 4}
+    for a in admins:
+        email = str(a.get('email') or '').strip().lower()
+        if not email or '@' not in email:
+            continue
+        role = _normalize_pam_role(a.get('role') or 'Admin')
+        existing = dedup.get(email)
+        if not existing or role_priority.get(role, 0) >= role_priority.get(existing.get('role') or '', 0):
+            dedup[email] = {'email': email, 'role': role}
+
+    normalized = list(dedup.values())
+
+    # Persist normalized state (format upgrades + break-glass seed) if needed.
+    try:
+        if normalized:
+            _save_pam_admins(normalized)
     except Exception:
         pass
-    return []
+
+    return normalized
 
 
 def _pam_admin_record_for_email(email):
@@ -427,7 +648,7 @@ def _save_pam_admins(admins):
     for a in (admins or []):
         if isinstance(a, dict):
             e = str(a.get('email') or '').strip().lower()
-            r = str(a.get('role') or 'Admin').strip() or 'Admin'
+            r = _normalize_pam_role(a.get('role') or 'Admin')
         else:
             e = str(a).strip().lower()
             r = 'Admin'
@@ -4682,7 +4903,20 @@ def get_pam_admins():
     try:
         admins = _load_pam_admins()
         emails = [a['email'] for a in admins]
-        return jsonify({'emails': emails, 'pam_admins': admins})
+        ident = _current_request_identity()
+        actor = _pam_admin_record_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        ) if ident.get('nameid') else None
+        actor_role = _normalize_pam_role((actor or {}).get('role') or '')
+        return jsonify({
+            'emails': emails,
+            'pam_admins': admins,
+            'actor_role': actor_role,
+            'can_manage_admins': _is_admin_role(actor_role),
+            'is_super_admin': _is_super_admin_role(actor_role)
+        })
     except Exception as e:
         return jsonify({'error': str(e), 'emails': [], 'pam_admins': []}), 500
 
@@ -4693,13 +4927,47 @@ def add_pam_admin():
     try:
         data = request.get_json() or {}
         email = str(data.get('email') or '').strip()
-        role = str(data.get('role') or 'Admin').strip() or 'Admin'
+        role = _normalize_pam_role(data.get('role') or 'Admin')
         if not email or '@' not in email:
             return jsonify({'error': 'Valid email is required'}), 400
+
+        ident = _current_request_identity()
+        actor = _pam_admin_record_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        actor_role = _normalize_pam_role((actor or {}).get('role') or '')
+        actor_is_super = _is_super_admin_role(actor_role)
+        actor_is_admin = _is_admin_role(actor_role)
+
+        if not actor_is_admin:
+            return jsonify({'error': 'Only Admin or SuperAdmin can manage PAM admins'}), 403
+        if role == 'SuperAdmin' and not actor_is_super:
+            return jsonify({'error': 'Only SuperAdmin can assign SuperAdmin role'}), 403
+
         admins = _load_pam_admins()
+        existing_admin_count = sum(1 for a in admins if _normalize_pam_role(a.get('role')) == 'Admin')
+        if role == 'Admin' and existing_admin_count == 0 and not actor_is_super:
+            return jsonify({'error': 'Only break-glass SuperAdmin can create the first Admin user'}), 403
+
         email_lower = email.lower()
-        if any(a['email'] == email_lower for a in admins):
-            return jsonify({'status': 'already_added', 'message': 'User is already a PAM admin', 'pam_admins': admins})
+        existing = None
+        for a in admins:
+            if a.get('email') == email_lower:
+                existing = a
+                break
+
+        if existing:
+            existing_role = _normalize_pam_role(existing.get('role') or 'Admin')
+            if existing_role == role:
+                return jsonify({'status': 'already_added', 'message': 'User is already a PAM admin', 'pam_admins': admins})
+            if existing_role == 'SuperAdmin' and not actor_is_super:
+                return jsonify({'error': 'Only SuperAdmin can modify another SuperAdmin'}), 403
+            existing['role'] = role
+            _save_pam_admins(admins)
+            return jsonify({'status': 'updated', 'message': f'{email} role updated to {role}', 'pam_admins': _load_pam_admins()})
+
         admins.append({'email': email_lower, 'role': role})
         _save_pam_admins(admins)
         return jsonify({'status': 'ok', 'message': f'{email} added as PAM admin ({role})', 'pam_admins': _load_pam_admins()})
@@ -4714,8 +4982,28 @@ def remove_pam_admin(email):
         email = str(email or '').strip()
         if not email:
             return jsonify({'error': 'Email required'}), 400
+        ident = _current_request_identity()
+        actor = _pam_admin_record_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        actor_role = _normalize_pam_role((actor or {}).get('role') or '')
+        actor_is_super = _is_super_admin_role(actor_role)
+        actor_is_admin = _is_admin_role(actor_role)
+        if not actor_is_admin:
+            return jsonify({'error': 'Only Admin or SuperAdmin can remove PAM admins'}), 403
+
         admins = _load_pam_admins()
         email_lower = email.lower()
+        target = next((a for a in admins if str(a.get('email') or '').strip().lower() == email_lower), None)
+        if target and _is_super_admin_role(target.get('role')) and not actor_is_super:
+            return jsonify({'error': 'Only SuperAdmin can remove another SuperAdmin'}), 403
+
+        super_admin_count = sum(1 for a in admins if _is_super_admin_role(a.get('role')))
+        if target and _is_super_admin_role(target.get('role')) and super_admin_count <= 1:
+            return jsonify({'error': 'Cannot remove the last SuperAdmin. Configure another break-glass SuperAdmin first.'}), 400
+
         new_list = [a for a in admins if a['email'] != email_lower]
         if len(new_list) == len(admins):
             return jsonify({'status': 'not_found', 'message': 'User was not a PAM admin', 'pam_admins': admins})
@@ -4855,18 +5143,86 @@ def toggle_feature():
     """Enable or disable feature for organization"""
     try:
         data = request.get_json()
-        feature = data.get('feature')
-        enabled = data.get('enabled')
-        
-        print(f"✅ Feature {feature} {'enabled' if enabled else 'disabled'}")
-        
-        # Store in database (for now just log)
+        feature = _canonical_feature_key(data.get('feature'))
+        enabled = _as_bool(data.get('enabled'), False)
+        if feature not in FEATURE_FLAG_DEFAULTS:
+            return jsonify({'error': f'Unknown feature key: {data.get("feature")}'}), 400
+
+        flags = _load_feature_flags()
+        flags[feature] = enabled
+        flags = _save_feature_flags(flags)
+        print(f"✅ Feature {feature} {'enabled' if enabled else 'disabled'}", flush=True)
+
         return jsonify({
             'status': 'success',
             'feature': feature,
-            'enabled': enabled
+            'enabled': enabled,
+            'features': flags
         })
         
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/features', methods=['GET'])
+def get_features():
+    """Public, read-only feature toggles consumed by UI to hide/show modules."""
+    try:
+        flags = _load_feature_flags()
+        return jsonify({'features': flags})
+    except Exception as e:
+        return jsonify({'error': str(e), 'features': dict(FEATURE_FLAG_DEFAULTS)}), 200
+
+
+@app.route('/api/admin/features', methods=['GET'])
+def get_admin_features():
+    """Admin feature toggle payload."""
+    try:
+        flags = _load_feature_flags()
+        return jsonify({'status': 'success', 'features': flags})
+    except Exception as e:
+        return jsonify({'error': str(e), 'features': dict(FEATURE_FLAG_DEFAULTS)}), 500
+
+
+@app.route('/api/admin/features', methods=['POST'])
+def save_admin_features():
+    """Bulk or partial update of feature toggles."""
+    try:
+        data = request.get_json() or {}
+        incoming = data.get('features')
+        if not isinstance(incoming, dict):
+            incoming = data.get('flags')
+        if not isinstance(incoming, dict):
+            incoming = data if isinstance(data, dict) else {}
+
+        current = _load_feature_flags()
+        updated = _normalize_feature_flags(incoming, base=current)
+        updated = _save_feature_flags(updated)
+
+        return jsonify({'status': 'success', 'features': updated})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/break-glass/status', methods=['GET'])
+def get_break_glass_status():
+    """Operational visibility for break-glass and PAM admin bootstrap state."""
+    try:
+        admins = _load_pam_admins()
+        super_admins = [a for a in admins if _is_super_admin_role(a.get('role'))]
+        seed_email = _break_glass_seed_email()
+        secret_arn = str(
+            os.getenv('BREAK_GLASS_SECRET_ARN')
+            or os.getenv('PAM_BREAK_GLASS_SECRET_ARN')
+            or ''
+        ).strip()
+        return jsonify({
+            'status': 'success',
+            'super_admin_count': len(super_admins),
+            'super_admins': [a.get('email') for a in super_admins],
+            'break_glass_seed_email': seed_email,
+            'break_glass_secret_configured': bool(secret_arn)
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -46,6 +46,11 @@ window.PAM_ROLES = window.PAM_ROLES || [
         ]
     }
 ];
+window.PAM_ADMIN_CONTEXT = window.PAM_ADMIN_CONTEXT || {
+    actor_role: '',
+    can_manage_admins: false,
+    is_super_admin: false
+};
 window.USER_MGMT_USERS = window.USER_MGMT_USERS || [];
 
 function _roleForGroup(groupId) {
@@ -376,16 +381,30 @@ async function loadPamAdmins() {
     try {
         var result = await fetchAdminJson('/admin/pam-admins');
         var data = result.data || {};
+        window.PAM_ADMIN_CONTEXT = {
+            actor_role: String(data.actor_role || ''),
+            can_manage_admins: data.can_manage_admins === true,
+            is_super_admin: data.is_super_admin === true
+        };
         var list = (data && data.pam_admins) ? data.pam_admins : [];
+        var canManage = window.PAM_ADMIN_CONTEXT.can_manage_admins === true;
         if (list.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">No PAM admins yet. Search Identity Center users above and add them with a role.</td></tr>';
+            var emptyMsg = canManage
+                ? 'No PAM admins yet. Search Identity Center users above and add them with a role.'
+                : 'No PAM admins found. Your account does not have permission to manage PAM admins.';
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">' + emptyMsg + '</td></tr>';
             return;
         }
         tbody.innerHTML = list.map(function(a) {
             var email = a.email || a;
             var role = a.role || 'Admin';
             var safe = String(email).replace(/'/g, "\\'");
-            return '<tr><td>' + (email || '') + '</td><td><span class="badge">' + (role || 'Admin') + '</span></td><td><button type="button" class="btn-secondary btn-pam btn-sm" onclick="removePamAdmin(\'' + safe + '\')"><i class="fas fa-user-minus"></i> Remove</button></td></tr>';
+            var targetIsSuperAdmin = String(role || '').toLowerCase() === 'superadmin';
+            var canRemove = canManage && (!targetIsSuperAdmin || window.PAM_ADMIN_CONTEXT.is_super_admin);
+            var actionHtml = canRemove
+                ? '<button type="button" class="btn-secondary btn-pam btn-sm" onclick="removePamAdmin(\'' + safe + '\')"><i class="fas fa-user-minus"></i> Remove</button>'
+                : '<span class="text-muted">Restricted</span>';
+            return '<tr><td>' + (email || '') + '</td><td><span class="badge">' + (role || 'Admin') + '</span></td><td>' + actionHtml + '</td></tr>';
         }).join('');
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--danger);">Failed to load. ' + (e.message || '') + '</td></tr>';
@@ -396,6 +415,10 @@ async function searchIdCUsersForPamAdmin() {
     var input = document.getElementById('pamAdminSearchInput');
     var resultsEl = document.getElementById('pamAdminSearchResults');
     if (!resultsEl) return;
+    if (window.PAM_ADMIN_CONTEXT && window.PAM_ADMIN_CONTEXT.can_manage_admins !== true) {
+        resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">You do not have permission to manage PAM admins.</p>';
+        return;
+    }
     var q = (input && input.value) ? input.value.trim() : '';
     if (!q) {
         resultsEl.innerHTML = '<p class="text-muted" style="padding: 10px;">Enter a name or email and click Search.</p>';
@@ -429,7 +452,11 @@ async function searchIdCUsersForPamAdmin() {
                 var name = (u.display_name || ((u.first_name || '') + ' ' + (u.last_name || '')).trim() || u.username || '—');
                 var email = u.email || '—';
                 var emailAttr = String(email).replace(/"/g, '&quot;').replace(/</g, '&lt;');
-                return '<tr><td>' + (name || '—') + '</td><td>' + (email || '—') + '</td><td><select class="pam-admin-role-select"><option value="Admin">Admin</option><option value="Manager">Manager</option></select></td><td><button type="button" class="btn-primary btn-pam btn-sm" onclick="addPamAdminWithRole(this)" data-email="' + emailAttr + '"><i class="fas fa-plus"></i> Add as PAM admin</button></td></tr>';
+                var roleOptions = '<option value="Admin">Admin</option><option value="Manager">Manager</option>';
+                if (window.PAM_ADMIN_CONTEXT && window.PAM_ADMIN_CONTEXT.is_super_admin === true) {
+                    roleOptions += '<option value="SuperAdmin">SuperAdmin</option>';
+                }
+                return '<tr><td>' + (name || '—') + '</td><td>' + (email || '—') + '</td><td><select class="pam-admin-role-select">' + roleOptions + '</select></td><td><button type="button" class="btn-primary btn-pam btn-sm" onclick="addPamAdminWithRole(this)" data-email="' + emailAttr + '"><i class="fas fa-plus"></i> Add as PAM admin</button></td></tr>';
             }).join('') +
             '</tbody></table>';
     } catch (e) {
@@ -448,6 +475,10 @@ function addPamAdminWithRole(btn) {
 
 async function addPamAdmin(email, role) {
     if (!email || email === '—') return;
+    if (window.PAM_ADMIN_CONTEXT && window.PAM_ADMIN_CONTEXT.can_manage_admins !== true) {
+        alert('You do not have permission to manage PAM admins.');
+        return;
+    }
     role = role || 'Admin';
     try {
         var result = await fetchAdminJson('/admin/pam-admins', {
@@ -468,6 +499,10 @@ async function addPamAdmin(email, role) {
 
 async function removePamAdmin(email) {
     if (!email || !confirm('Remove this user from PAM admins?')) return;
+    if (window.PAM_ADMIN_CONTEXT && window.PAM_ADMIN_CONTEXT.can_manage_admins !== true) {
+        alert('You do not have permission to manage PAM admins.');
+        return;
+    }
     try {
         var result = await fetchAdminJson('/admin/pam-admins/' + encodeURIComponent(email), { method: 'DELETE' });
         var data = result.data || {};

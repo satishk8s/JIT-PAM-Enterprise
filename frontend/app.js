@@ -579,6 +579,16 @@ function showMainApp() {
     // Update UI based on admin status (run twice to ensure it applies after DOM ready)
     updateUIForRole();
     setTimeout(updateUIForRole, 150);
+    if (typeof loadFeatureToggles === 'function') {
+        loadFeatureToggles();
+    } else if (typeof refreshFeaturesFromServer === 'function') {
+        refreshFeaturesFromServer();
+    } else {
+        setTimeout(function() {
+            if (typeof loadFeatureToggles === 'function') loadFeatureToggles();
+            else if (typeof refreshFeaturesFromServer === 'function') refreshFeaturesFromServer();
+        }, 300);
+    }
     setTimeout(function() {
         if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
     }, 50);
@@ -593,6 +603,17 @@ function showMainApp() {
     if (isAdmin && typeof loadPolicySettings === 'function') {
         loadPolicySettings();
     }
+}
+
+function isPageEnabledByFeatureFlags(pageId) {
+    if (typeof window.isPageAllowedByFeatures === 'function') {
+        try {
+            return window.isPageAllowedByFeatures(pageId);
+        } catch (_) {
+            return true;
+        }
+    }
+    return true;
 }
 
 function updateUIForRole() {
@@ -654,6 +675,13 @@ function updateUIForRole() {
             if (b.dataset.category === 'cloud' && b.dataset.status === 'pending') b.classList.add('requests-status-glow');
         });
         if (typeof loadRequestsPage === 'function') loadRequestsPage();
+    }
+
+    if (typeof applyFeatureVisibility === 'function') {
+        try {
+            const flags = (typeof getCurrentFeatures === 'function') ? getCurrentFeatures() : null;
+            applyFeatureVisibility(flags, { syncControls: false });
+        } catch (_) {}
     }
 }
 
@@ -747,6 +775,10 @@ function showPage(pageId) {
     const adminNow = localStorage.getItem('isAdmin') === 'true';
     if (pageId === 'admin' && !adminNow) {
         alert('Admin access required.');
+        pageId = 'requests';
+    }
+    if (!isPageEnabledByFeatureFlags(pageId)) {
+        alert('This feature is currently disabled by administrator.');
         pageId = 'requests';
     }
 
@@ -890,11 +922,13 @@ function showAdminTab(tabId, event) {
     if (tabId === 'users') {
         if (typeof loadUsersManagement === 'function') loadUsersManagement();
     } else if (tabId === 'policies') {
+        if (typeof showManagementSubTab === 'function') showManagementSubTab('policies');
         if (typeof initPolicyConfig === 'function') initPolicyConfig();
         setTimeout(() => {
             if (typeof loadPolicySettings === 'function') loadPolicySettings();
         }, 100);
         if (typeof loadAccountsForTagging === 'function') loadAccountsForTagging();
+        if (typeof loadFeatureToggles === 'function') loadFeatureToggles();
     } else if (tabId === 'databaseSessions') {
         if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
     } else if (tabId === 'security') {
@@ -1317,6 +1351,15 @@ let currentRequestsCategory = 'cloud';
 let currentRequestsStatus = 'pending';
 
 function filterRequestsByCategory(category, status) {
+    const categoryFeature = {
+        cloud: 'cloud_access',
+        storage: 'storage_access',
+        databases: 'databases_access',
+        workloads: 'workloads_access'
+    };
+    if (categoryFeature[category] && typeof isFeatureEnabled === 'function' && !isFeatureEnabled(categoryFeature[category])) {
+        return;
+    }
     currentRequestsCategory = category;
     currentRequestsStatus = status;
 
