@@ -1615,6 +1615,9 @@
                         <button class="admin-tab-btn active" onclick="showAdminTab('users', event)">
                             <i class="fas fa-users"></i> Users & Groups
                         </button>
+                        <button class="admin-tab-btn" onclick="showAdminTab('identityCenter', event)">
+                            <i class="fas fa-building-shield"></i> AWS Identity Center
+                        </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('policies', event)">
                             <i class="fas fa-sliders-h"></i> Management
                         </button>
@@ -1695,12 +1698,12 @@
                             <div class="groups-list groups-list-enterprise">
                                 <div class="group-detail-card group-role-readaccess">
                                     <div class="group-detail-header">
-                                        <h4><i class="fas fa-eye"></i> readaccess</h4>
-                                        <span class="badge badge-readaccess">Read-only</span>
+                                        <h4><i class="fas fa-users"></i> employees</h4>
+                                        <span class="badge badge-readaccess">Employees</span>
                                     </div>
-                                    <p class="group-role-desc">Maps to <strong>ReadAccess</strong> role.</p>
+                                    <p class="group-role-desc">Maps to <strong>Employees</strong> role.</p>
                                     <div class="group-card-actions">
-                                        <button class="btn-secondary btn-pam btn-sm" onclick="editGroup('readaccess')"><i class="fas fa-edit"></i> Edit</button>
+                                        <button class="btn-secondary btn-pam btn-sm" onclick="editGroup('employees')"><i class="fas fa-edit"></i> Edit</button>
                                     </div>
                                 </div>
                                 <div class="group-detail-card group-role-manager">
@@ -1737,15 +1740,15 @@
                             <div class="roles-cards-pam" id="rolesCardsContainer">
                                 <div class="role-card-pam role-readaccess">
                                     <div class="role-card-header">
-                                        <span class="role-icon"><i class="fas fa-eye"></i></span>
-                                        <h4>ReadAccess</h4>
-                                        <span class="badge badge-readaccess">Readaccess</span>
+                                        <span class="role-icon"><i class="fas fa-users"></i></span>
+                                        <h4>Employees</h4>
+                                        <span class="badge badge-readaccess">Employees</span>
                                     </div>
-                                    <p class="role-desc">View-only access to PAM.</p>
+                                    <p class="role-desc">Base user access to PAM.</p>
                                     <ul class="role-actions">
-                                        <li>View requests and approvals</li>
-                                        <li>View sessions</li>
-                                        <li>View audit logs</li>
+                                        <li>View pages and options</li>
+                                        <li>Request access when category feature toggles are enabled</li>
+                                        <li>Access terminal only when terminal feature toggles are enabled</li>
                                     </ul>
                                 </div>
                                 <div class="role-card-pam role-manager">
@@ -1756,11 +1759,12 @@
                                     </div>
                                     <p class="role-desc">Operational admin access (non-superuser).</p>
                                     <ul class="role-actions">
-                                        <li>Create users / assign groups</li>
+                                        <li>All Employees capabilities</li>
+                                        <li>Add users to Manager group</li>
+                                        <li>Create groups and assign users</li>
+                                        <li>Create integrations</li>
                                         <li>Download logs</li>
-                                        <li>Create guardrails</li>
-                                        <li>Reset MFA for other users</li>
-                                        <li>Manage integrations</li>
+                                        <li>Admin panel access</li>
                                     </ul>
                                 </div>
                                 <div class="role-card-pam role-admin">
@@ -1772,6 +1776,7 @@
                                     <p class="role-desc">Full administrative access.</p>
                                     <ul class="role-actions">
                                         <li>All Manager capabilities</li>
+                                        <li>Add or remove users from Manager group</li>
                                         <li>Full PAM configuration access</li>
                                     </ul>
                                 </div>
@@ -1779,7 +1784,70 @@
                         </div>
                     </div>
                 </div>
-                
+                <!-- Admin AWS Identity Center Tab -->
+                <div id="adminIdentityCenterTab" class="admin-tab admin-tab-pam" style="display: none; font-family: 'Inter', sans-serif;">
+                    <div class="section-header" style="display:flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <h3 style="margin: 0;"><i class="fas fa-building-shield"></i> AWS Identity Center</h3>
+                        <button type="button" class="btn-primary btn-pam btn-sm" onclick="loadAwsIdentityCenterData()">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                    </div>
+                    <p class="admin-role-hint" style="margin: 10px 0 14px 0;">View users, groups, permission sets, and organization hierarchy with AWS accounts in a tree structure.</p>
+
+                    <div class="admin-subtabs">
+                        <button class="btn-secondary btn-pam admin-subtab aws-idc-subtab active" id="awsIdcUsersSubTab" onclick="showAwsIdentityCenterSubTab('users')">
+                            <i class="fas fa-users"></i> Users
+                        </button>
+                        <button class="btn-secondary btn-pam admin-subtab aws-idc-subtab" id="awsIdcGroupsSubTab" onclick="showAwsIdentityCenterSubTab('groups')">
+                            <i class="fas fa-user-friends"></i> Groups
+                        </button>
+                        <button class="btn-secondary btn-pam admin-subtab aws-idc-subtab" id="awsIdcPermissionSetsSubTab" onclick="showAwsIdentityCenterSubTab('permission-sets')">
+                            <i class="fas fa-key"></i> Permission Sets
+                        </button>
+                        <button class="btn-secondary btn-pam admin-subtab aws-idc-subtab" id="awsIdcOrgSubTab" onclick="showAwsIdentityCenterSubTab('organization')">
+                            <i class="fas fa-sitemap"></i> Organization Hierarchy
+                        </button>
+                    </div>
+
+                    <div id="awsIdcUsersPanel" class="mgmt-ic-panel" style="display: block;">
+                        <div style="overflow:auto; max-height: 520px;">
+                            <table class="users-table" style="width:100%;">
+                                <thead>
+                                    <tr><th>Username</th><th>Email</th><th>Display name</th><th>First / Last</th></tr>
+                                </thead>
+                                <tbody id="awsIdcUsersBody"><tr><td colspan="4" class="text-muted">No data yet. Click Refresh.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="awsIdcGroupsPanel" class="mgmt-ic-panel" style="display: none;">
+                        <div style="overflow:auto; max-height: 520px;">
+                            <table class="users-table" style="width:100%;">
+                                <thead>
+                                    <tr><th>Display name</th><th>Description</th><th>Group ID</th></tr>
+                                </thead>
+                                <tbody id="awsIdcGroupsBody"><tr><td colspan="3" class="text-muted">No data yet. Click Refresh.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="awsIdcPermissionSetsPanel" class="mgmt-ic-panel" style="display: none;">
+                        <div style="overflow:auto; max-height: 520px;">
+                            <table class="users-table" style="width:100%;">
+                                <thead>
+                                    <tr><th>Name</th><th>ARN</th></tr>
+                                </thead>
+                                <tbody id="awsIdcPermissionSetsBody"><tr><td colspan="2" class="text-muted">No data yet. Click Refresh.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="awsIdcOrgPanel" class="mgmt-ic-panel" style="display: none;">
+                        <div id="awsIdcOrgSummary" class="admin-role-hint" style="margin-bottom: 10px;">No organization data yet. Click Refresh.</div>
+                        <div id="awsIdcOrgTree" class="aws-idc-tree-wrap"></div>
+                    </div>
+                </div>
+
                 <!-- Admin Management Tab (PAM theme, real icons) -->
                 <div id="adminPoliciesTab" class="admin-tab admin-tab-pam" style="display: none; font-family: 'Inter', sans-serif;">
                     <div class="admin-subtabs">
@@ -1836,13 +1904,10 @@
                                     <button class="btn-primary btn-pam btn-sm" style="margin-top: 10px;">Manage Manually</button>
                                     </div>
                                 </div>
-                            <div class="notice-warning-pam" style="margin-top: 20px;">
-                                <strong>⚠️ Security Note:</strong> Only users synced from AD or Identity Center can access cloud resources. This ensures unauthorized users cannot gain access even if they're in the company.
-                            </div>
                             <!-- Identity Center: List Users, Groups, Permission Sets (reference only; PAM admins are under Admin → Users & Groups) -->
                             <div class="management-identity-center-lists" style="margin-top: 24px;">
-                                <h4 style="margin-bottom: 12px;"><i class="fas fa-list"></i> Identity Center users and groups</h4>
-                                <p class="admin-role-hint" style="margin-bottom: 12px;">These are users and groups from AWS Identity Center (for reference). To designate who can <strong>manage this PAM solution</strong>, use <strong>Admin → Users & Groups</strong> and add PAM admins from the search there.</p>
+                                <h4 style="margin-bottom: 12px;"><i class="fas fa-list"></i> AWS Identity Center (reference)</h4>
+                                <p class="admin-role-hint" style="margin-bottom: 12px;">Use the dedicated <strong>AWS Identity Center</strong> tab in Admin to view users, groups, permission sets, and organization hierarchy.</p>
                                 <div class="mgmt-ic-tabs" style="display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
                                     <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab active" data-tab="users" onclick="showManagementICTab('users')"><i class="fas fa-users"></i> List users</button>
                                     <button type="button" class="btn-secondary btn-pam btn-sm mgmt-ic-tab" data-tab="groups" onclick="showManagementICTab('groups')"><i class="fas fa-user-friends"></i> List groups</button>
@@ -2883,7 +2948,7 @@
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
     <script src="feature-management.js?v=6" defer></script>
-    <script src="admin-functions.js?v=3" defer></script>
+    <script src="admin-functions.js?v=4" defer></script>
     <script src="security-management.js" defer></script>
     <script src="guardrails.js" defer></script>
     <script src="request-drafts.js" defer></script>
@@ -2895,7 +2960,7 @@
     <script src="security-ui-helpers.js?v=2" defer></script>
     <script src="unified-assistant.js" defer></script>
     <script src="workflow-designer.js" defer></script>
-    <script src="app.js?v=25"></script>
+    <script src="app.js?v=26"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
@@ -3072,7 +3137,7 @@
                         <label>Attach to group <span class="required">*</span></label>
                         <select id="userGroup" required>
                             <option value="">Select group</option>
-                            <option value="readaccess">readaccess</option>
+                            <option value="employees">employees</option>
                             <option value="manager">manager</option>
                             <option value="admin">admin</option>
                         </select>
@@ -3094,13 +3159,13 @@
                 <form id="createNewGroupForm">
                     <div class="form-group">
                         <label>Group Name <span class="required">*</span></label>
-                        <input type="text" id="newGroupName" required placeholder="e.g. readaccess, manager, admin">
+                        <input type="text" id="newGroupName" required placeholder="e.g. employees, manager, admin">
                     </div>
                     <div class="form-group">
                         <label>Attach predefined role <span class="required">*</span></label>
                         <select id="newGroupRole" required>
                             <option value="">Select Role</option>
-                            <option value="Readaccess">Readaccess</option>
+                            <option value="Employee">Employees</option>
                             <option value="Manager">Manager</option>
                             <option value="Admin">Admin</option>
                         </select>
@@ -3123,7 +3188,7 @@
                         <label>Group (predefined role) <span class="required">*</span></label>
                         <select id="groupName" required>
                             <option value="">Select Group</option>
-                            <option value="readaccess">readaccess (Readaccess)</option>
+                            <option value="employees">employees (Employees)</option>
                             <option value="manager">manager (Manager)</option>
                             <option value="admin">admin (Admin)</option>
                         </select>

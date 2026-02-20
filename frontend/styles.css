@@ -4236,6 +4236,49 @@ td {
     color: var(--text-secondary);
 }
 
+.aws-idc-tree-wrap {
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    padding: 12px;
+    max-height: 520px;
+    overflow: auto;
+}
+
+.aws-idc-tree-node {
+    margin: 6px 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+
+.aws-idc-tree-node > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.aws-idc-tree-children {
+    padding: 0 10px 10px 14px;
+}
+
+.aws-idc-account-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    border: 1px dashed var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-top: 6px;
+    background: var(--bg-secondary);
+}
+
+.aws-idc-account-item small {
+    color: var(--text-secondary);
+}
+
 /* Toggle Switch */
 .toggle-switch {
     position: relative;

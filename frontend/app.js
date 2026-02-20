@@ -887,6 +887,7 @@ function showAdminTab(tabId, event) {
     
     const tabMap = {
         'users': 'adminUsersTab',
+        'identityCenter': 'adminIdentityCenterTab',
         'policies': 'adminPoliciesTab',
         'security': 'adminSecurityTab',
         'integrations': 'adminIntegrationsTab',
@@ -921,6 +922,9 @@ function showAdminTab(tabId, event) {
     
     if (tabId === 'users') {
         if (typeof loadUsersManagement === 'function') loadUsersManagement();
+    } else if (tabId === 'identityCenter') {
+        if (typeof showAwsIdentityCenterSubTab === 'function') showAwsIdentityCenterSubTab('users');
+        if (typeof loadAwsIdentityCenterData === 'function') loadAwsIdentityCenterData();
     } else if (tabId === 'policies') {
         if (typeof showManagementSubTab === 'function') showManagementSubTab('policies');
         if (typeof initPolicyConfig === 'function') initPolicyConfig();

@@ -7,33 +7,34 @@ window.API_BASE = window.API_BASE || (
         : (window.location.protocol + '//' + window.location.hostname + ':5000/api')
 );
 
-// Default groups and roles: readaccess, manager, admin (attach role when creating user/group)
+// Default groups and roles: employees, manager, admin (attach role when creating user/group)
 window.USER_MGMT_GROUPS = window.USER_MGMT_GROUPS || [
-    { id: 'readaccess', name: 'readaccess', role: 'Readaccess' },
-    { id: 'manager', name: 'manager', role: 'Manager' },
-    { id: 'admin', name: 'admin', role: 'Admin' }
+    { id: 'employees', name: 'Employees', role: 'Employee', aliases: ['readaccess', 'readonly', 'read_only', 'employee'] },
+    { id: 'manager', name: 'Manager', role: 'Manager' },
+    { id: 'admin', name: 'Admin', role: 'Admin' }
 ];
 window.PAM_ROLES = window.PAM_ROLES || [
     {
-        id: 'Readaccess',
-        name: 'Readaccess',
-        desc: 'Read-only access to the PAM console.',
+        id: 'Employee',
+        name: 'Employees',
+        desc: 'Base user access in PAM.',
         actions: [
-            'View requests and approvals',
-            'View sessions',
-            'View audit logs'
+            'View pages and available options',
+            'Request access when category toggles are enabled',
+            'Use terminal only when terminal toggles are enabled'
         ]
     },
     {
         id: 'Manager',
         name: 'Manager',
-        desc: 'Operational admin access (non-superuser).',
+        desc: 'Operational access with user/group management.',
         actions: [
-            'Create users / assign groups',
+            'All Employees capabilities',
+            'Add users to Manager group',
+            'Create groups and assign users',
+            'Manage integrations',
             'Download logs',
-            'Create guardrails',
-            'Reset MFA for other users',
-            'Manage integrations'
+            'Access Admin panel'
         ]
     },
     {
@@ -42,6 +43,7 @@ window.PAM_ROLES = window.PAM_ROLES || [
         desc: 'Full administrative access.',
         actions: [
             'All Manager capabilities',
+            'Add or remove users from Manager group',
             'Full PAM configuration access'
         ]
     }
@@ -54,25 +56,40 @@ window.PAM_ADMIN_CONTEXT = window.PAM_ADMIN_CONTEXT || {
 window.USER_MGMT_USERS = window.USER_MGMT_USERS || [];
 
 function _roleForGroup(groupId) {
-    var g = String(groupId || '').toLowerCase();
+    var g = _normalizeGroupId(groupId);
     var groups = window.USER_MGMT_GROUPS || [];
-    var found = groups.find(function(x) { return String(x.id || x.name || '').toLowerCase() === g; });
+    var found = groups.find(function(x) {
+        var id = _normalizeGroupId(x.id || x.name || '');
+        if (id === g) return true;
+        var aliases = Array.isArray(x.aliases) ? x.aliases : [];
+        return aliases.some(function(a) { return _normalizeGroupId(a) === g; });
+    });
     return found ? String(found.role || '').trim() : '';
 }
 
 function _groupForRole(roleId) {
-    var r = String(roleId || '').toLowerCase();
+    var r = _normalizeRole(roleId).toLowerCase();
     var groups = window.USER_MGMT_GROUPS || [];
-    var found = groups.find(function(x) { return String(x.role || '').toLowerCase() === r; });
+    var found = groups.find(function(x) { return _normalizeRole(x.role || '').toLowerCase() === r; });
     return found ? String(found.id || found.name || '').trim() : '';
+}
+
+function _normalizeGroupId(groupId) {
+    var raw = String(groupId || '').trim().toLowerCase().replace(/\s+/g, '');
+    if (!raw) return '';
+    if (raw === 'readaccess' || raw === 'readonly' || raw === 'read_only' || raw === 'employee' || raw === 'employees') return 'employees';
+    if (raw === 'manager' || raw === 'managers') return 'manager';
+    if (raw === 'admin' || raw === 'admins') return 'admin';
+    return raw;
 }
 
 function _normalizeRole(role) {
     var v = String(role || '').trim();
-    if (!v) return 'Readaccess';
+    if (!v) return 'Employee';
     var low = v.toLowerCase();
-    if (low === 'readonly' || low === 'read' || low === 'readaccess') return 'Readaccess';
+    if (low === 'readonly' || low === 'read' || low === 'readaccess' || low === 'employee' || low === 'employees' || low === 'user') return 'Employee';
     if (low === 'manager') return 'Manager';
+    if (low === 'superadmin' || low === 'super_admin') return 'SuperAdmin';
     if (low === 'admin' || low === 'administrator' || low === 'system administrator') return 'Admin';
     return v;
 }
@@ -84,7 +101,7 @@ function checkAdminAccess() {
     // Allow Manager/Admin to access the Admin panel (keep legacy isAdmin behavior too)
     var legacyAdmin = localStorage.getItem('isAdmin') === 'true';
     var role = _normalizeRole(localStorage.getItem('userRole'));
-    var canAdmin = legacyAdmin || role === 'Admin' || role === 'Manager';
+    var canAdmin = legacyAdmin || role === 'Admin' || role === 'Manager' || role === 'SuperAdmin';
     if (canAdmin) {
         adminBtn.style.setProperty('display', 'inline-flex', 'important');
     } else {
@@ -109,7 +126,7 @@ function showCreateUserModal() {
     var form = document.getElementById('createUserForm');
     if (form) form.reset();
     var groupSel = document.getElementById('userGroup');
-    if (groupSel && !groupSel.value) groupSel.value = 'readaccess';
+    if (groupSel && !groupSel.value) groupSel.value = 'employees';
 }
 
 // Show create new group modal (Group Name + Role)
@@ -127,13 +144,16 @@ function showCreateGroupModal() {
     if (form) form.reset();
 }
 
-// Populate group dropdown (readaccess, manager, admin)
+// Populate group dropdown (employees, manager, admin)
 function populateGroupDropdown() {
     var sel = document.getElementById('userGroup');
     if (sel) {
         var groups = window.USER_MGMT_GROUPS || [];
         sel.innerHTML = '<option value="">Select group</option>' +
-            groups.map(function(g) { return '<option value="' + (g.id || g.name) + '">' + (g.name || g.id) + '</option>'; }).join('');
+            groups.map(function(g) {
+                var gid = _normalizeGroupId(g.id || g.name || '');
+                return '<option value="' + gid + '">' + (g.name || g.id || gid) + '</option>';
+            }).join('');
     }
 }
 
@@ -165,7 +185,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var firstName = (document.getElementById('userFirstName') && document.getElementById('userFirstName').value || '').trim();
             var lastName = (document.getElementById('userLastName') && document.getElementById('userLastName').value || '').trim();
             var displayName = (document.getElementById('userDisplayName') && document.getElementById('userDisplayName').value || '').trim();
-            var group = (document.getElementById('userGroup') && document.getElementById('userGroup').value || '').trim();
+            var group = _normalizeGroupId((document.getElementById('userGroup') && document.getElementById('userGroup').value || '').trim());
             if (!email) {
                 alert('Email address is required.');
                 return;
@@ -178,14 +198,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 alert('Please select a group.');
                 return;
             }
-            var role = _roleForGroup(group) || _normalizeRole('');
+            var role = _roleForGroup(group) || _normalizeRole('employee');
             var userData = {
                 first_name: firstName,
                 last_name: lastName,
                 display_name: displayName || (firstName + ' ' + lastName).trim(),
                 email: email,
                 role: role,
-                group: group
+                group: group || 'employees'
             };
             fetch(getAdminApiBase() + '/admin/create-user', {
                 method: 'POST',
@@ -238,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (createGroupForm) {
         createGroupForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            var groupName = document.getElementById('groupName').value;
+            var groupName = _normalizeGroupId(document.getElementById('groupName').value);
             var userIds = Array.from(document.querySelectorAll('input[name="groupUser"]:checked')).map(function(cb) { return cb.value; });
             if (!groupName) {
                 alert('Please select a group.');
@@ -248,9 +268,23 @@ document.addEventListener('DOMContentLoaded', function() {
                 alert('Please select at least one user to assign.');
                 return;
             }
+            var actorRole = _normalizeRole(localStorage.getItem('userRole') || (localStorage.getItem('isAdmin') === 'true' ? 'Admin' : 'Employee'));
+            var selectedUsers = (window.USER_MGMT_USERS || []).filter(function(u) {
+                var key = u.email || u.id || '';
+                return userIds.indexOf(key) >= 0;
+            });
+            var isRemovingFromManager = groupName !== 'manager' && selectedUsers.some(function(u) {
+                return _normalizeGroupId(u.group || u.role || '') === 'manager';
+            });
+            if (isRemovingFromManager && actorRole === 'Manager') {
+                alert('Managers can add users to Manager group, but only Admin can remove users from Manager group.');
+                return;
+            }
+
             (window.USER_MGMT_USERS || []).forEach(function(u) {
-                if (userIds.indexOf(u.email) >= 0) {
-                    u.role = groupName;
+                var key = u.email || u.id || '';
+                if (userIds.indexOf(key) >= 0) {
+                    u.role = _roleForGroup(groupName) || _normalizeRole(groupName);
                     u.group = groupName;
                 }
             });
@@ -269,12 +303,17 @@ function addUserToStore(user) {
 
 function updateAccessGroupCounts() {
     var users = window.USER_MGMT_USERS || [];
-    var readaccess = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'readaccess' || r === 'readonly'; }).length;
+    var employees = users.filter(function(u) {
+        var r = _normalizeRole(u.role || '');
+        var g = _normalizeGroupId(u.group || '');
+        return r === 'Employee' || g === 'employees';
+    }).length;
     var manager = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'manager'; }).length;
     var admin = users.filter(function(u) { var r = (u.role || u.group || '').toLowerCase(); return r === 'admin'; }).length;
     var el;
-    if (el = document.getElementById('readaccessGroupCount')) el.textContent = readaccess;
-    if (el = document.getElementById('readonlyGroupCount')) el.textContent = readaccess;
+    if (el = document.getElementById('readaccessGroupCount')) el.textContent = employees;
+    if (el = document.getElementById('readonlyGroupCount')) el.textContent = employees;
+    if (el = document.getElementById('employeesGroupCount')) el.textContent = employees;
     if (el = document.getElementById('managerGroupCount')) el.textContent = manager;
     if (el = document.getElementById('adminGroupCount')) el.textContent = admin;
 }
@@ -293,7 +332,7 @@ function deleteUser(userId) {
     }
 }
 
-// Edit access group (ReadOnly, Manager, Admin)
+// Edit access group (Employees, Manager, Admin)
 function editAccessGroup(groupName) {
     alert('Edit Group: ' + groupName + '\n\nUse "Assign Users to Group" to add or remove users from this access group.');
 }
@@ -303,8 +342,8 @@ function deleteAccessGroup(groupName) {
     if (confirm('Remove all users from ' + groupName + ' group? Users will need to be reassigned.')) {
         (window.USER_MGMT_USERS || []).forEach(function(u) {
             if (u.role === groupName || u.group === groupName) {
-                u.role = 'ReadOnly';
-                u.group = '';
+                u.role = 'Employee';
+                u.group = 'employees';
             }
         });
         alert('All users removed from ' + groupName);
@@ -512,6 +551,233 @@ async function removePamAdmin(email) {
         alert('Failed to remove: ' + (e.message || ''));
     }
 }
+
+function _escHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function showAwsIdentityCenterSubTab(tab) {
+    var tabKey = String(tab || 'users');
+    var panels = {
+        users: 'awsIdcUsersPanel',
+        groups: 'awsIdcGroupsPanel',
+        'permission-sets': 'awsIdcPermissionSetsPanel',
+        organization: 'awsIdcOrgPanel'
+    };
+    var buttons = {
+        users: 'awsIdcUsersSubTab',
+        groups: 'awsIdcGroupsSubTab',
+        'permission-sets': 'awsIdcPermissionSetsSubTab',
+        organization: 'awsIdcOrgSubTab'
+    };
+    Object.keys(panels).forEach(function(key) {
+        var panel = document.getElementById(panels[key]);
+        if (panel) panel.style.display = key === tabKey ? 'block' : 'none';
+        var btn = document.getElementById(buttons[key]);
+        if (btn) btn.classList.toggle('active', key === tabKey);
+    });
+}
+
+function _renderAwsIdcUsers(data) {
+    var body = document.getElementById('awsIdcUsersBody');
+    if (!body) return;
+    if (data && data.error) {
+        body.innerHTML = '<tr><td colspan="4" class="text-danger">' + _escHtml(data.error) + '</td></tr>';
+        return;
+    }
+    var list = Array.isArray(data) ? data : (data && data.users) ? data.users : [];
+    if (!list.length) {
+        body.innerHTML = '<tr><td colspan="4" class="text-muted">No users returned.</td></tr>';
+        return;
+    }
+    body.innerHTML = list.map(function(u) {
+        var full = [u.first_name || '', u.last_name || ''].join(' ').trim();
+        return '<tr>'
+            + '<td>' + _escHtml(u.username || '-') + '</td>'
+            + '<td>' + _escHtml(u.email || '-') + '</td>'
+            + '<td>' + _escHtml(u.display_name || '-') + '</td>'
+            + '<td>' + _escHtml(full || '-') + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function _renderAwsIdcGroups(data) {
+    var body = document.getElementById('awsIdcGroupsBody');
+    if (!body) return;
+    if (data && data.error) {
+        body.innerHTML = '<tr><td colspan="3" class="text-danger">' + _escHtml(data.error) + '</td></tr>';
+        return;
+    }
+    var list = Array.isArray(data) ? data : (data && data.groups) ? data.groups : [];
+    if (!list.length) {
+        body.innerHTML = '<tr><td colspan="3" class="text-muted">No groups returned.</td></tr>';
+        return;
+    }
+    body.innerHTML = list.map(function(g) {
+        return '<tr>'
+            + '<td>' + _escHtml(g.display_name || '-') + '</td>'
+            + '<td>' + _escHtml(g.description || '-') + '</td>'
+            + '<td>' + _escHtml(g.group_id || '-') + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function _renderAwsIdcPermissionSets(data) {
+    var body = document.getElementById('awsIdcPermissionSetsBody');
+    if (!body) return;
+    if (data && data.error) {
+        body.innerHTML = '<tr><td colspan="2" class="text-danger">' + _escHtml(data.error) + '</td></tr>';
+        return;
+    }
+    var list = Array.isArray(data) ? data : (data && data.permission_sets) ? data.permission_sets : [];
+    if (!list.length) {
+        body.innerHTML = '<tr><td colspan="2" class="text-muted">No permission sets returned.</td></tr>';
+        return;
+    }
+    body.innerHTML = list.map(function(p) {
+        return '<tr>'
+            + '<td>' + _escHtml(p.name || '-') + '</td>'
+            + '<td style="word-break: break-all;">' + _escHtml(p.arn || '-') + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function _accountListFromPayload(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (!payload || typeof payload !== 'object') return [];
+    if (Array.isArray(payload.accounts)) return payload.accounts;
+    var keys = Object.keys(payload);
+    return keys.map(function(k) { return payload[k]; }).filter(function(v) { return v && typeof v === 'object' && (v.id || v.name); });
+}
+
+function _renderAwsIdcOrgHierarchy(payload) {
+    var summaryEl = document.getElementById('awsIdcOrgSummary');
+    var treeEl = document.getElementById('awsIdcOrgTree');
+    if (!summaryEl || !treeEl) return;
+    if (payload && payload.error) {
+        summaryEl.textContent = payload.error;
+        treeEl.innerHTML = '<p class="text-danger">' + _escHtml(payload.error) + '</p>';
+        return;
+    }
+
+    var accounts = _accountListFromPayload(payload);
+    if (!accounts.length) {
+        summaryEl.textContent = 'No organization/account data returned.';
+        treeEl.innerHTML = '<p class="text-muted">No hierarchy data found.</p>';
+        return;
+    }
+
+    var orgMap = {};
+    accounts.forEach(function(acc) {
+        var orgId = String(acc.organization_id || 'org-unscoped').trim() || 'org-unscoped';
+        var orgName = String(acc.organization_display_name || '').trim() || (orgId === 'org-unscoped' ? 'Organization (Unscoped)' : ('Organization ' + orgId));
+        if (!orgMap[orgId]) {
+            orgMap[orgId] = { id: orgId, name: orgName, roots: {} };
+        }
+        var rootId = String(acc.root_id || 'root-unassigned').trim() || 'root-unassigned';
+        var rootName = String(acc.root_name || '').trim() || (rootId === 'root-unassigned' ? 'Unassigned Root' : rootId);
+        if (!orgMap[orgId].roots[rootId]) {
+            orgMap[orgId].roots[rootId] = { id: rootId, name: rootName, ous: {}, accounts: [] };
+        }
+        var accountNode = {
+            id: String(acc.id || acc.account_id || '').trim(),
+            name: String(acc.name || '').trim() || String(acc.id || acc.account_id || '-'),
+            email: String(acc.email || '').trim(),
+            env: String(acc.environment || '').trim() || 'nonprod'
+        };
+        var ouId = String(acc.ou_id || '').trim();
+        var ouName = String(acc.ou_name || '').trim();
+        if (!ouId) {
+            orgMap[orgId].roots[rootId].accounts.push(accountNode);
+        } else {
+            if (!orgMap[orgId].roots[rootId].ous[ouId]) {
+                orgMap[orgId].roots[rootId].ous[ouId] = { id: ouId, name: ouName || ouId, accounts: [] };
+            }
+            orgMap[orgId].roots[rootId].ous[ouId].accounts.push(accountNode);
+        }
+    });
+
+    summaryEl.textContent = 'Organizations: ' + Object.keys(orgMap).length + ' | Accounts: ' + accounts.length;
+
+    var html = Object.keys(orgMap).sort().map(function(orgId) {
+        var org = orgMap[orgId];
+        var rootHtml = Object.keys(org.roots).sort().map(function(rootId) {
+            var root = org.roots[rootId];
+            var ouHtml = Object.keys(root.ous).sort().map(function(ouId) {
+                var ou = root.ous[ouId];
+                var ouAccounts = ou.accounts.map(function(a) {
+                    var left = _escHtml(a.name) + ' <small>(' + _escHtml(a.id) + ')</small>';
+                    var right = '<small>' + _escHtml(a.env) + '</small>';
+                    return '<div class="aws-idc-account-item"><span>' + left + '</span><span>' + right + '</span></div>';
+                }).join('');
+                return '<details class="aws-idc-tree-node" open>'
+                    + '<summary>OU: ' + _escHtml(ou.name) + ' <small>(' + _escHtml(ou.id) + ')</small></summary>'
+                    + '<div class="aws-idc-tree-children">' + ouAccounts + '</div>'
+                    + '</details>';
+            }).join('');
+
+            var directAccounts = root.accounts.map(function(a) {
+                var left = _escHtml(a.name) + ' <small>(' + _escHtml(a.id) + ')</small>';
+                var right = '<small>' + _escHtml(a.env) + '</small>';
+                return '<div class="aws-idc-account-item"><span>' + left + '</span><span>' + right + '</span></div>';
+            }).join('');
+
+            return '<details class="aws-idc-tree-node" open>'
+                + '<summary>Root: ' + _escHtml(root.name) + ' <small>(' + _escHtml(root.id) + ')</small></summary>'
+                + '<div class="aws-idc-tree-children">' + (ouHtml + directAccounts || '<p class="text-muted">No accounts.</p>') + '</div>'
+                + '</details>';
+        }).join('');
+
+        return '<details class="aws-idc-tree-node" open>'
+            + '<summary>' + _escHtml(org.name) + ' <small>(' + _escHtml(org.id) + ')</small></summary>'
+            + '<div class="aws-idc-tree-children">' + rootHtml + '</div>'
+            + '</details>';
+    }).join('');
+
+    treeEl.innerHTML = html || '<p class="text-muted">No organization hierarchy found.</p>';
+}
+
+async function loadAwsIdentityCenterData() {
+    _renderAwsIdcUsers({ users: [] });
+    _renderAwsIdcGroups({ groups: [] });
+    _renderAwsIdcPermissionSets({ permission_sets: [] });
+    _renderAwsIdcOrgHierarchy([]);
+    try {
+        var usersResp = await fetchAdminJson('/admin/identity-center/users');
+        _renderAwsIdcUsers(usersResp.data || {});
+    } catch (e) {
+        _renderAwsIdcUsers({ error: e.message || 'Failed to load users' });
+    }
+
+    try {
+        var groupsResp = await fetchAdminJson('/admin/identity-center/groups');
+        _renderAwsIdcGroups(groupsResp.data || {});
+    } catch (e2) {
+        _renderAwsIdcGroups({ error: e2.message || 'Failed to load groups' });
+    }
+
+    try {
+        var psResp = await fetchAdminJson('/admin/identity-center/permission-sets');
+        _renderAwsIdcPermissionSets(psResp.data || {});
+    } catch (e3) {
+        _renderAwsIdcPermissionSets({ error: e3.message || 'Failed to load permission sets' });
+    }
+
+    try {
+        var accountsResp = await fetchAdminJson('/accounts');
+        _renderAwsIdcOrgHierarchy(accountsResp.data || {});
+    } catch (e4) {
+        _renderAwsIdcOrgHierarchy({ error: e4.message || 'Failed to load organization hierarchy' });
+    }
+}
+
+window.showAwsIdentityCenterSubTab = showAwsIdentityCenterSubTab;
+window.loadAwsIdentityCenterData = loadAwsIdentityCenterData;
 
 // Load users management - also populates USER_MGMT_USERS for modals (legacy; Admin tab now uses PAM admins)
 async function loadUsersManagement() {
