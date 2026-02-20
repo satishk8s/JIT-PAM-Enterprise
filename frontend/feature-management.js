@@ -34,7 +34,16 @@
         database_ai_assistant: 'database_ai_assistant'
     };
 
-    let currentFeatures = Object.assign({}, FEATURE_DEFAULTS);
+    let currentFeatures = (function () {
+        try {
+            const raw = localStorage.getItem('npam_feature_flags');
+            if (!raw) return Object.assign({}, FEATURE_DEFAULTS);
+            const parsed = JSON.parse(raw);
+            return normalizeFeatures(parsed, FEATURE_DEFAULTS);
+        } catch (_) {
+            return Object.assign({}, FEATURE_DEFAULTS);
+        }
+    })();
     let adminFeatureLoadInFlight = false;
 
     function getApiBase() {
@@ -98,6 +107,9 @@
         const required = {
             aws: ['cloud_access'],
             gcp: ['cloud_access'],
+            accounts: ['cloud_access'],
+            newRequest: ['cloud_access'],
+            policy: ['cloud_access'],
             s3: ['storage_access'],
             gcs: ['storage_access'],
             databases: ['databases_access'],
@@ -239,6 +251,9 @@
         const opts = options || {};
         const normalized = normalizeFeatures(flags, currentFeatures);
         currentFeatures = normalized;
+        try {
+            localStorage.setItem('npam_feature_flags', JSON.stringify(normalized));
+        } catch (_) {}
         if (opts.syncControls !== false) syncFeatureToggleControls(normalized);
         updateFeatureCardStatus(normalized);
         applySidebarGating(normalized);
@@ -290,22 +305,54 @@
         }
     }
 
-    async function saveFeaturePatch(patch) {
-        const body = { features: patch || {} };
+    async function postJson(path, body) {
         const apiBase = getApiBase();
-        const res = await fetch(apiBase + '/admin/features', {
+        const res = await fetch(apiBase + path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify(body)
+            body: JSON.stringify(body || {})
         });
         const text = await res.text();
         let data = {};
         try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
-        if (!res.ok || (data && data.error)) {
-            throw new Error((data && data.error) || ('Request failed (' + res.status + ')'));
+        return { ok: res.ok, status: res.status, data: data };
+    }
+
+    async function saveFeaturePatchLegacy(patch) {
+        const merged = Object.assign({}, currentFeatures);
+        const entries = Object.entries(patch || {});
+        for (const entry of entries) {
+            const key = entry[0];
+            const value = !!entry[1];
+            const result = await postJson('/admin/toggle-feature', {
+                feature: key,
+                enabled: value
+            });
+            if (!result.ok || (result.data && result.data.error)) {
+                throw new Error((result.data && result.data.error) || ('Request failed (' + result.status + ')'));
+            }
+            if (result.data && typeof result.data.features === 'object') {
+                Object.assign(merged, normalizeFeatures(result.data.features, merged));
+            } else {
+                merged[key] = value;
+            }
         }
-        return normalizeFeatures((data && data.features) || patch || {}, currentFeatures);
+        return normalizeFeatures(merged, currentFeatures);
+    }
+
+    async function saveFeaturePatch(patch) {
+        const result = await postJson('/admin/features', { features: patch || {} });
+        if (result.ok && !(result.data && result.data.error)) {
+            return normalizeFeatures((result.data && result.data.features) || patch || {}, currentFeatures);
+        }
+
+        // Backward compatibility: older backend may only expose /api/admin/toggle-feature.
+        if (result.status === 404 || result.status === 405) {
+            return saveFeaturePatchLegacy(patch);
+        }
+
+        throw new Error((result.data && result.data.error) || ('Request failed (' + result.status + ')'));
     }
 
     async function toggleFeature(featureKey, enabled) {

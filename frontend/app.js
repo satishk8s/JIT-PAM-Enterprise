@@ -1062,6 +1062,11 @@ function startNewRequestForCloud(cloud, type) {
 }
 
 function showNewRequestPage(cloudProvider) {
+    if (cloudProvider && !isPageEnabledByFeatureFlags(cloudProvider)) {
+        alert('Cloud access is currently disabled by administrator.');
+        showPage('requests');
+        return;
+    }
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('newRequestPage').classList.add('active');
     if (cloudProvider && cloudProvider === 'aws') {
@@ -1086,6 +1091,11 @@ function showNewRequestPage(cloudProvider) {
 }
 
 function showRequestForOthersWithCloud(cloudProvider) {
+    if (cloudProvider && !isPageEnabledByFeatureFlags(cloudProvider)) {
+        alert('Cloud access is currently disabled by administrator.');
+        showPage('requests');
+        return;
+    }
     const page = document.getElementById('requestForOthersPage');
     if (!page) {
         showPage('requests');
@@ -1126,6 +1136,11 @@ function cancelNewRequest() {
 }
 
 function showRequestForOthersModal() {
+    if (typeof isFeatureEnabled === 'function' && !isFeatureEnabled('cloud_access')) {
+        alert('Cloud access is currently disabled by administrator.');
+        showPage('requests');
+        return;
+    }
     const page = document.getElementById('requestForOthersPage');
     if (!page) {
         showPage('requests');
