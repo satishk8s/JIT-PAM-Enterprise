@@ -797,6 +797,10 @@ function setTheme(theme) {
 
 // Navigation
 function showPage(pageId) {
+    const workflowRedirectToManagement = pageId === 'workflow';
+    if (workflowRedirectToManagement) {
+        pageId = 'admin';
+    }
     const adminNow = localStorage.getItem('isAdmin') === 'true';
     if (pageId === 'admin' && !adminNow) {
         alert('Admin access required.');
@@ -852,6 +856,12 @@ function showPage(pageId) {
         loadApplicationsPage();
     } else if (pageId === 'admin') {
         loadAdminPage();
+        if (workflowRedirectToManagement) {
+            setTimeout(function() {
+                if (typeof showAdminTab === 'function') showAdminTab('policies');
+                if (typeof showManagementSubTab === 'function') showManagementSubTab('approvalWorkflow');
+            }, 80);
+        }
     } else if (pageId === 'instances') {
         loadInstances();
     } else if (pageId === 'terminal') {
@@ -868,13 +878,6 @@ function showPage(pageId) {
         }
     } else if (pageId === 'dashboard') {
         updateDashboard();
-    } else if (pageId === 'workflow') {
-        // Initialize workflow designer
-        setTimeout(() => {
-            if (typeof initWorkflowDesigner === 'function') {
-                initWorkflowDesigner();
-            }
-        }, 100);
     }
     
     // Remove unified assistant if not on requests page

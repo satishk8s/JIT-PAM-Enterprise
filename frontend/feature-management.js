@@ -240,6 +240,7 @@
             featureS3Access: ['storage_access'],
             featureGcsAccess: ['storage_access'],
             featureDatabasesStructuredAccess: ['databases_access'],
+            featureDatabaseAIAssistant: ['databases_access'],
             featureInstancesAccess: ['workloads_access'],
             featureGcpVmsAccess: ['workloads_access'],
             featureDatabaseTerminalAccess: ['databases_access', 'terminal_access'],

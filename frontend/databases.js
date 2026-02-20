@@ -43,15 +43,27 @@ function applyDatabaseFeatureFlags(flags) {
         ? flags
         : ((typeof window.getCurrentFeatures === 'function') ? window.getCurrentFeatures() : null);
     const aiEnabled = f ? f.database_ai_assistant !== false : isDbFeatureEnabled('database_ai_assistant', true);
+    const structuredEnabled = f ? f.databases_structured_access !== false : isDbFeatureEnabled('databases_structured_access', true);
     const calendarEnabled = f ? f.request_calendar !== false : isDbFeatureEnabled('request_calendar', true);
 
     const aiBtn = document.getElementById('dbModeAiBtn');
+    const structuredBtn = document.getElementById('dbModeStructuredBtn');
     if (aiBtn) aiBtn.style.display = aiEnabled ? '' : 'none';
-    if (!aiEnabled && dbAccessMode !== 'structured') {
-        try { setDbAccessMode('structured'); } catch (_) {}
-    }
+    if (structuredBtn) structuredBtn.style.display = structuredEnabled ? '' : 'none';
+
     const aiPanel = document.getElementById('dbAiPanel');
+    const structuredPanel = document.getElementById('dbStructuredPanel');
     if (!aiEnabled && aiPanel) aiPanel.classList.add('db-ai-panel-hidden');
+    if (!structuredEnabled && structuredPanel) structuredPanel.classList.add('db-structured-panel-hidden');
+
+    if (dbAccessMode === 'ai' && !aiEnabled && structuredEnabled) {
+        try { setDbAccessMode('structured'); } catch (_) {}
+    } else if (dbAccessMode === 'structured' && !structuredEnabled && aiEnabled) {
+        try { setDbAccessMode('ai'); } catch (_) {}
+    } else if (!aiEnabled && !structuredEnabled) {
+        // Keep a deterministic fallback state if both toggles are turned off.
+        dbAccessMode = 'structured';
+    }
 
     const dateModeLabel = document.getElementById('dbDurationModeDaterangeLabel');
     const dateModeRadio = document.getElementById('dbDurationModeDaterange');
@@ -283,13 +295,25 @@ function closeDbStructuredPanel() {
 }
 
 function openStructuredDatabaseAccess() {
-    try { setDbAccessMode('structured'); } catch (_) {}
+    try {
+        if (isDbFeatureEnabled('databases_structured_access', true)) {
+            setDbAccessMode('structured');
+        } else {
+            setDbAccessMode('ai');
+        }
+    } catch (_) {}
     if (typeof showPage === 'function') showPage('databases');
 }
 
 function setDbAccessMode(mode) {
+    const aiEnabled = isDbFeatureEnabled('database_ai_assistant', true);
+    const structuredEnabled = isDbFeatureEnabled('databases_structured_access', true);
     let m = (mode || '').toLowerCase() === 'structured' ? 'structured' : 'ai';
-    if (m === 'ai' && !isDbFeatureEnabled('database_ai_assistant', true)) {
+    if (m === 'ai' && !aiEnabled && structuredEnabled) {
+        m = 'structured';
+    } else if (m === 'structured' && !structuredEnabled && aiEnabled) {
+        m = 'ai';
+    } else if (!aiEnabled && !structuredEnabled) {
         m = 'structured';
     }
     dbAccessMode = m;

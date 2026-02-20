@@ -243,10 +243,6 @@
                         <i class="fas fa-list-alt"></i>
                         <span>My Requests</span>
                     </div>
-                    <div class="nav-item" onclick="showPage('workflow')">
-                        <i class="fas fa-project-diagram"></i>
-                        <span>Approval Workflows</span>
-                    </div>
                     <div class="nav-item" onclick="showPage('sessions')">
                         <i class="fas fa-history"></i>
                         <span>Active Sessions</span>
@@ -1854,6 +1850,9 @@
                         <button class="btn-secondary btn-pam admin-subtab active" id="policiesSubTab" onclick="showManagementSubTab('policies')">
                             <i class="fas fa-sliders-h"></i> Policies
                         </button>
+                        <button class="btn-secondary btn-pam admin-subtab" id="approvalWorkflowSubTab" onclick="showManagementSubTab('approvalWorkflow')">
+                            <i class="fas fa-project-diagram"></i> Approval Workflow
+                        </button>
                         <button class="btn-secondary btn-pam admin-subtab" id="featuresSubTab" onclick="showManagementSubTab('features')">
                             <i class="fas fa-toggle-on"></i> Features
                         </button>
@@ -2409,10 +2408,24 @@
                                         <div class="feature-child-item">
                                             <div class="feature-child-label">
                                                 <span>Structured Access Mode</span>
-                                                <small>Keep only structured DB access workflows visible.</small>
+                                                <small>Show structured DB request mode under Databases.</small>
                                             </div>
                                             <label class="toggle-switch">
                                                 <input type="checkbox" id="featureDatabasesStructuredAccess" onchange="toggleFeature('databases_structured_access', this.checked)">
+                                                <span class="toggle-slider"></span>
+                                            </label>
+                                        </div>
+                                        <div class="feature-child-item">
+                                            <div class="feature-child-label">
+                                                <span>AI Assistant Mode</span>
+                                                <small>Show AI-guided DB request mode under Databases (not a separate module).</small>
+                                                <div style="margin-top:6px;">
+                                                    <span id="featureDbAiStatusBadge" class="badge badge-success">Enabled</span>
+                                                    <span id="featureDbAiStatusText" style="color: var(--text-secondary); font-size: 12px; margin-left: 6px;">Visible to users</span>
+                                                </div>
+                                            </div>
+                                            <label class="toggle-switch">
+                                                <input type="checkbox" id="featureDatabaseAIAssistant" onchange="toggleFeature('database_ai_assistant', this.checked)">
                                                 <span class="toggle-slider"></span>
                                             </label>
                                         </div>
@@ -2511,25 +2524,16 @@
                                         <span id="featureCalendarStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
                                     </div>
                                 </div>
-
-                                <div class="feature-card">
-                                    <div class="feature-header">
-                                        <div>
-                                            <h4><i class="fas fa-robot"></i> Database AI Assistant</h4>
-                                            <p>Enable AI-guided database request mode. If off, users see only structured mode.</p>
-                                        </div>
-                                        <label class="toggle-switch">
-                                            <input type="checkbox" id="featureDatabaseAIAssistant" onchange="toggleFeature('database_ai_assistant', this.checked)">
-                                            <span class="toggle-slider"></span>
-                                        </label>
-                                    </div>
-                                    <div class="feature-status">
-                                        <span id="featureDbAiStatusBadge" class="badge badge-success">Enabled</span>
-                                        <span id="featureDbAiStatusText" style="color: var(--text-secondary); font-size: 12px;">Visible to users</span>
-                                    </div>
-                                </div>
                             </div>
                         </div>
+                    </div>
+
+                    <div id="approvalWorkflowSection" class="admin-tab-pam-inner" style="display: none; font-family: 'Inter', sans-serif;">
+                        <div class="section-header">
+                            <h3><i class="fas fa-project-diagram"></i> Approval Workflow</h3>
+                            <p style="color: var(--text-secondary); font-size: 13px;">Build and manage access approval workflows from Admin Management.</p>
+                        </div>
+                        <div id="approvalWorkflowMount"></div>
                     </div>
 
                 </div>
@@ -2947,20 +2951,20 @@
     <script src="policy-config.js" defer></script>
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
-    <script src="feature-management.js?v=6" defer></script>
-    <script src="admin-functions.js?v=5" defer></script>
+    <script src="feature-management.js?v=7" defer></script>
+    <script src="admin-functions.js?v=6" defer></script>
     <script src="security-management.js" defer></script>
     <script src="guardrails.js" defer></script>
     <script src="request-drafts.js" defer></script>
     <script src="account-tagging.js" defer></script>
     <script src="instances.js?v=2" defer></script>
-    <script src="databases.js?v=31" defer></script>
+    <script src="databases.js?v=32" defer></script>
     <script src="terminal-page.js?v=7" defer></script>
     <script src="s3-explorer.js" defer></script>
     <script src="security-ui-helpers.js?v=2" defer></script>
     <script src="unified-assistant.js" defer></script>
     <script src="workflow-designer.js" defer></script>
-    <script src="app.js?v=27"></script>
+    <script src="app.js?v=28"></script>
     <script>
         // Initialize unified assistant when requests page loads (only when logged in)
         document.addEventListener('DOMContentLoaded', function() {
@@ -3012,15 +3016,30 @@
             if (activeBtn) activeBtn.classList.add('active');
         }
         
+        function mountApprovalWorkflowIntoManagement() {
+            var mount = document.getElementById('approvalWorkflowMount');
+            if (!mount || mount.getAttribute('data-mounted') === '1') return;
+            var workflowPage = document.getElementById('workflowPage');
+            if (!workflowPage) return;
+            var pageContent = workflowPage.querySelector('.page-content');
+            if (!pageContent) return;
+            mount.appendChild(pageContent);
+            workflowPage.remove();
+            mount.setAttribute('data-mounted', '1');
+        }
+
         function showManagementSubTab(tab) {
             var policiesSection = document.getElementById('policiesSection');
             var featuresSection = document.getElementById('featuresSection');
+            var approvalWorkflowSection = document.getElementById('approvalWorkflowSection');
             if (policiesSection) policiesSection.style.display = tab === 'policies' ? 'block' : 'none';
             if (featuresSection) featuresSection.style.display = tab === 'features' ? 'block' : 'none';
+            if (approvalWorkflowSection) approvalWorkflowSection.style.display = tab === 'approvalWorkflow' ? 'block' : 'none';
 
             var policiesBtn = document.getElementById('policiesSubTab');
             var featuresBtn = document.getElementById('featuresSubTab');
-            [policiesBtn, featuresBtn].forEach(function(btn) {
+            var approvalWorkflowBtn = document.getElementById('approvalWorkflowSubTab');
+            [policiesBtn, approvalWorkflowBtn, featuresBtn].forEach(function(btn) {
                 if (!btn) return;
                 btn.classList.remove('active');
                 btn.style.background = 'var(--bg-secondary)';
@@ -3028,7 +3047,7 @@
                 btn.style.border = '1.5px solid var(--border-color)';
             });
 
-            var activeBtn = tab === 'features' ? featuresBtn : policiesBtn;
+            var activeBtn = tab === 'features' ? featuresBtn : (tab === 'approvalWorkflow' ? approvalWorkflowBtn : policiesBtn);
             if (activeBtn) {
                 activeBtn.classList.add('active');
                 activeBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
@@ -3038,6 +3057,14 @@
 
             if (tab === 'features' && typeof loadFeatureToggles === 'function') {
                 loadFeatureToggles();
+            } else if (tab === 'approvalWorkflow') {
+                mountApprovalWorkflowIntoManagement();
+                setTimeout(function() {
+                    if (!window.__workflowDesignerInitializedInManagement && typeof initWorkflowDesigner === 'function') {
+                        initWorkflowDesigner();
+                        window.__workflowDesignerInitializedInManagement = true;
+                    }
+                }, 60);
             }
         }
         

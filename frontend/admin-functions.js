@@ -871,7 +871,6 @@ function loadAwsIdentityCenterAccountPermissionSets(accountId, targetId) {
 }
 
 function loadAwsIdentityCenterHierarchy() {
-    _renderAwsIdcOrgHierarchy({ roots: [] });
     fetchAdminJson('/admin/identity-center/org-hierarchy')
         .then(function(resp) {
             _renderAwsIdcOrgHierarchy(resp.data || {});
