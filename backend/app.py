@@ -1679,6 +1679,61 @@ def _display_name_from_identity_center(email=''):
     return ''
 
 
+def _current_request_identity():
+    """
+    Resolve identity context for the current HTTP request from SAML session.
+    Returns {'nameid': str, 'email': str, 'hints': dict}.
+    """
+    nameid = str(session.get('user') or '').strip()
+    hints = _saml_identity_hints() if nameid else {}
+    email = ''
+    if nameid:
+        email = _email_from_saml_session()
+        if not email:
+            try:
+                idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='', hints=hints)
+                email = str(idc_identity.get('email') or '').strip()
+            except Exception:
+                email = ''
+    if str(email).strip().lower() == 'email':
+        email = ''
+    return {'nameid': nameid, 'email': str(email or '').strip(), 'hints': hints}
+
+
+@app.before_request
+def enforce_admin_api_access():
+    """
+    Centralized guardrail for all admin APIs.
+    Admin APIs require:
+    - Active SAML session
+    - Current identity present in PAM admins list
+    """
+    path = str(request.path or '').strip()
+    if not path.startswith('/api/admin/'):
+        return None
+
+    # CORS preflight should pass through.
+    if request.method == 'OPTIONS':
+        return None
+
+    # This endpoint is used by frontend to determine role and should remain callable.
+    if path == '/api/admin/check-pam-admin':
+        return None
+
+    ident = _current_request_identity()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    if not admin_record:
+        return jsonify({'error': 'Admin access required'}), 403
+    return None
+
+
 @app.route('/saml/complete', methods=['GET'])
 def saml_complete():
     """After SAML login: render a page that sets localStorage and redirects to the app.
@@ -4672,23 +4727,31 @@ def remove_pam_admin(email):
 
 @app.route('/api/admin/check-pam-admin', methods=['GET'])
 def check_pam_admin():
-    """Check if the given email is a PAM solution admin (for login / UI). Returns isAdmin and role."""
+    """
+    Check PAM admin status for the current authenticated identity.
+    Security: requires SAML session and does not allow arbitrary email enumeration.
+    """
     try:
-        email = str(request.args.get('email') or '').strip()
-        nameid = str(session.get('user') or '').strip()
-        identity_hints = _saml_identity_hints()
-        idc_identity = {'email': '', 'display_name': ''}
-        if not email or '@' not in email:
-            # Fallback for SSO browser sessions where frontend storage may be stale.
-            email = _email_from_saml_session()
-            if not email:
-                idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint='', hints=identity_hints)
-                email = str(idc_identity.get('email') or '').strip()
-        else:
-            idc_identity = _resolve_identity_center_identity(nameid=nameid, email_hint=email, hints=identity_hints)
+        ident = _current_request_identity()
+        nameid = str(ident.get('nameid') or '').strip()
+        if not nameid:
+            return jsonify({'isAdmin': False, 'email': '', 'display_name': ''}), 401
 
-        admin_record = _pam_admin_record_for_identity(email=email, nameid=nameid, hints=identity_hints)
-        resolved_email = str(email or '').strip()
+        identity_hints = ident.get('hints') or {}
+        resolved_email = str(ident.get('email') or '').strip()
+        idc_identity = _resolve_identity_center_identity(
+            nameid=nameid,
+            email_hint=resolved_email,
+            hints=identity_hints
+        )
+        if not resolved_email:
+            resolved_email = str(idc_identity.get('email') or '').strip()
+
+        admin_record = _pam_admin_record_for_identity(
+            email=resolved_email,
+            nameid=nameid,
+            hints=identity_hints
+        )
         if (not resolved_email or '@' not in resolved_email) and admin_record:
             resolved_email = str(admin_record.get('email') or '').strip()
         if not resolved_email:

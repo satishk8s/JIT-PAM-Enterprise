@@ -52,6 +52,7 @@ function setPamAdminFromApi(email) {
             }
             if (typeof checkAdminAccess === 'function') checkAdminAccess();
             if (typeof updateUIForRole === 'function') updateUIForRole();
+            if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
         })
         .catch(function() {});
 }
@@ -125,6 +126,7 @@ async function syncSsoProfileFromSession() {
         setPamAdminFromApi(resolvedEmail || '');
         if (typeof updateUIForRole === 'function') updateUIForRole();
         if (typeof checkAdminAccess === 'function') checkAdminAccess();
+        if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
     } catch (_) {
         // Keep existing localStorage identity if session hydration fails.
     } finally {
@@ -139,6 +141,110 @@ const API_BASE = (typeof window !== 'undefined' && window.API_BASE)
   : ((!window.location.port || window.location.port === '80' || window.location.port === '443')
       ? '/api'
       : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
+
+const APP_ROUTE_ADMIN = '/admin';
+const APP_ROUTE_USER = '/app';
+const APP_ROUTE_ROOT = '/';
+
+function normalizeAppPath(pathname) {
+    const raw = String(pathname || '/').trim() || '/';
+    let normalized = raw.split('?')[0];
+    if (!normalized.startsWith('/')) normalized = '/' + normalized;
+    if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1);
+    return normalized || '/';
+}
+
+function canRewriteAppPath() {
+    const current = normalizeAppPath(window.location.pathname);
+    return current === '/' || current === '/index.html' || current === APP_ROUTE_USER || current === APP_ROUTE_ADMIN;
+}
+
+function pageExists(pageId) {
+    const id = String(pageId || '').trim();
+    if (!id) return false;
+    return !!document.getElementById(id + 'Page');
+}
+
+function replaceAppUrl(pathname, hashPage) {
+    if (!canRewriteAppPath()) return;
+    const base = normalizeAppPath(pathname || '/');
+    const page = String(hashPage || '').replace(/^#/, '').trim();
+    const hash = page ? ('#' + page) : '';
+    const target = base + hash;
+    const current = normalizeAppPath(window.location.pathname) + (window.location.hash || '');
+    if (target !== current && typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+        history.replaceState({}, '', target);
+    }
+}
+
+function routePageFromHash() {
+    const raw = String(window.location.hash || '').replace(/^#/, '').trim().toLowerCase();
+    if (!raw) return '';
+    return pageExists(raw) ? raw : '';
+}
+
+function applyRoleRouteLanding() {
+    if (localStorage.getItem('isLoggedIn') !== 'true') return;
+    const adminNow = localStorage.getItem('isAdmin') === 'true';
+    const path = normalizeAppPath(window.location.pathname);
+    const hashPage = routePageFromHash();
+
+    if (path === APP_ROUTE_ADMIN && !adminNow) {
+        replaceAppUrl(APP_ROUTE_USER, 'requests');
+        if (typeof showPage === 'function') showPage('requests');
+        return;
+    }
+
+    if (path === APP_ROUTE_ADMIN && adminNow) {
+        const adminPage = (hashPage && hashPage !== 'requests') ? hashPage : 'admin';
+        if (typeof showPage === 'function') showPage(adminPage);
+        return;
+    }
+
+    if (path === APP_ROUTE_USER) {
+        if (adminNow) {
+            replaceAppUrl(APP_ROUTE_ADMIN, 'admin');
+            if (typeof showPage === 'function') showPage('admin');
+        } else if (hashPage && hashPage !== 'admin') {
+            if (typeof showPage === 'function') showPage(hashPage);
+        } else if (typeof showPage === 'function') {
+            showPage('requests');
+        }
+        return;
+    }
+
+    if (path === APP_ROUTE_ROOT || path === '/index.html') {
+        if (adminNow) {
+            replaceAppUrl(APP_ROUTE_ADMIN, 'admin');
+            if (typeof showPage === 'function') showPage('admin');
+        } else {
+            replaceAppUrl(APP_ROUTE_USER, 'requests');
+            if (typeof showPage === 'function') showPage('requests');
+        }
+        return;
+    }
+
+    if (hashPage) {
+        if (hashPage === 'admin' && !adminNow) {
+            if (typeof showPage === 'function') showPage('requests');
+        } else if (typeof showPage === 'function') {
+            showPage(hashPage);
+        }
+    }
+}
+
+function syncRouteWithCurrentPage(pageId) {
+    if (localStorage.getItem('isLoggedIn') !== 'true') return;
+    if (!canRewriteAppPath()) return;
+    const adminNow = localStorage.getItem('isAdmin') === 'true';
+    const normalizedPage = String(pageId || '').trim().toLowerCase();
+    const safePage = pageExists(normalizedPage)
+        ? normalizedPage
+        : (adminNow ? 'admin' : 'requests');
+    const finalPage = (!adminNow && safePage === 'admin') ? 'requests' : safePage;
+    const base = adminNow ? APP_ROUTE_ADMIN : APP_ROUTE_USER;
+    replaceAppUrl(base, finalPage);
+}
 
 // OTP login - defined at load time so button onclick always works
 function verifyOTPAndLogin() {
@@ -199,8 +305,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 syncSsoProfileFromSession();
             }
         }
-        if (window.location.hash === '#admin' && localStorage.getItem('isAdmin') === 'true') {
-            setTimeout(function() { showPage('admin'); }, 100);
+        if (typeof applyRoleRouteLanding === 'function') {
+            setTimeout(function() { applyRoleRouteLanding(); }, 100);
         }
     }
     
@@ -425,6 +531,9 @@ function logout() {
     if (mainApp) mainApp.style.display = 'none';
     var menu = document.getElementById('profileMenu');
     if (menu) menu.classList.remove('show');
+    if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+        history.replaceState({}, '', '/');
+    }
 }
 
 function showMainApp() {
@@ -470,7 +579,10 @@ function showMainApp() {
     // Update UI based on admin status (run twice to ensure it applies after DOM ready)
     updateUIForRole();
     setTimeout(updateUIForRole, 150);
-    
+    setTimeout(function() {
+        if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
+    }, 50);
+
     // Load initial data
     loadAccounts();
     loadPermissionSets();
@@ -632,6 +744,12 @@ function setTheme(theme) {
 
 // Navigation
 function showPage(pageId) {
+    const adminNow = localStorage.getItem('isAdmin') === 'true';
+    if (pageId === 'admin' && !adminNow) {
+        alert('Admin access required.');
+        pageId = 'requests';
+    }
+
     document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
     document.querySelectorAll('.page').forEach(page => {
@@ -720,6 +838,10 @@ function showPage(pageId) {
     if (copilotPopup) {
         copilotPopup.classList.remove('show');
         copilotPopup.style.cssText = hideCopilot ? 'display: none !important; visibility: hidden !important' : '';
+    }
+
+    if (typeof syncRouteWithCurrentPage === 'function') {
+        syncRouteWithCurrentPage(pageId);
     }
 }
 
