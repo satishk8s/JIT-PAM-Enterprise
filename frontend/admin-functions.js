@@ -647,12 +647,128 @@ function _renderAwsIdcPermissionSets(data) {
     }).join('');
 }
 
-function _accountListFromPayload(payload) {
-    if (Array.isArray(payload)) return payload;
-    if (!payload || typeof payload !== 'object') return [];
-    if (Array.isArray(payload.accounts)) return payload.accounts;
-    var keys = Object.keys(payload);
-    return keys.map(function(k) { return payload[k]; }).filter(function(v) { return v && typeof v === 'object' && (v.id || v.name); });
+function _jsSingleQuote(value) {
+    return String(value == null ? '' : value)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'");
+}
+
+function _normalizeEnvOption(value) {
+    var raw = String(value || '').trim().toLowerCase();
+    if (!raw) return '';
+    if (raw === 'non prod' || raw === 'non-production' || raw === 'nonproduction') return 'nonprod';
+    if (raw === 'prod' || raw === 'nonprod' || raw === 'sandbox') return raw;
+    return '';
+}
+
+function _envTagSelectHtml(targetType, targetId, selectedEnv) {
+    var current = _normalizeEnvOption(selectedEnv);
+    var jsType = _jsSingleQuote(targetType);
+    var jsId = _jsSingleQuote(targetId);
+    function option(value, label) {
+        var sel = current === value ? ' selected' : '';
+        return '<option value="' + value + '"' + sel + '>' + label + '</option>';
+    }
+    return ''
+        + '<label class="aws-idc-env-tag">'
+        + '<span>Tag:</span>'
+        + '<select onchange="saveAwsIdentityCenterEnvTag(\'' + jsType + '\', \'' + jsId + '\', this.value)">'
+        + option('', 'inherit')
+        + option('prod', 'prod')
+        + option('nonprod', 'non prod')
+        + option('sandbox', 'sandbox')
+        + '</select>'
+        + '</label>';
+}
+
+function _countHierarchyAccounts(rootNode) {
+    function walkOu(ou) {
+        var total = Array.isArray(ou.accounts) ? ou.accounts.length : 0;
+        var childOus = Array.isArray(ou.ous) ? ou.ous : [];
+        childOus.forEach(function(ch) { total += walkOu(ch); });
+        return total;
+    }
+    var count = Array.isArray(rootNode.accounts) ? rootNode.accounts.length : 0;
+    var ous = Array.isArray(rootNode.ous) ? rootNode.ous : [];
+    ous.forEach(function(ou) { count += walkOu(ou); });
+    return count;
+}
+
+function _renderAwsIdcAccountPermissionSets(accountId, targetId) {
+    var target = document.getElementById(targetId);
+    if (!target) return;
+    target.innerHTML = '<small class="text-muted">Loading permission sets…</small>';
+    fetchAdminJson('/admin/identity-center/account-permission-sets?account_id=' + encodeURIComponent(accountId))
+        .then(function(resp) {
+            var data = resp.data || {};
+            if (data.error) {
+                target.innerHTML = '<small class="text-danger">' + _escHtml(data.error) + '</small>';
+                return;
+            }
+            var list = Array.isArray(data.permission_sets) ? data.permission_sets : [];
+            if (!list.length) {
+                target.innerHTML = '<small class="text-muted">No assigned permission sets found.</small>';
+                return;
+            }
+            var names = list.map(function(p) { return _escHtml(p.name || '-'); }).join(', ');
+            var more = Number(data.remaining || 0);
+            target.innerHTML = '<small>Permission sets: ' + names + (more > 0 ? (' <em>' + more + ' more</em>') : '') + '</small>';
+        })
+        .catch(function(e) {
+            target.innerHTML = '<small class="text-danger">' + _escHtml(e.message || 'Failed to load permission sets') + '</small>';
+        });
+}
+
+function _renderAwsIdcAccountNode(account, depth) {
+    var accountId = String(account.id || '').trim();
+    var accountName = String(account.name || accountId || 'Account').trim();
+    var accountEmail = String(account.email || '').trim();
+    var effective = _normalizeEnvOption(account.effective_environment || account.source_environment || 'nonprod') || 'nonprod';
+    var assigned = _normalizeEnvOption(account.assigned_environment);
+    var envLabel = '<small>' + _escHtml(effective) + (assigned ? ' (tagged)' : ' (inherited)') + '</small>';
+    var psTargetId = 'awsIdcPerms_' + accountId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    var jsAccountId = _jsSingleQuote(accountId);
+    var jsTarget = _jsSingleQuote(psTargetId);
+    return ''
+        + '<div class="aws-idc-account-item" style="margin-left:' + (depth * 10) + 'px;">'
+        + '<div>'
+        + '<div><strong>' + _escHtml(accountName) + '</strong> <small>(' + _escHtml(accountId) + ')</small></div>'
+        + (accountEmail ? '<div><small>' + _escHtml(accountEmail) + '</small></div>' : '')
+        + '<div id="' + _escHtml(psTargetId) + '"><small><button type="button" class="btn-secondary btn-pam btn-sm" style="padding:2px 8px; font-size:11px;" onclick="loadAwsIdentityCenterAccountPermissionSets(\'' + jsAccountId + '\', \'' + jsTarget + '\')">Load permission sets</button></small></div>'
+        + '</div>'
+        + '<div style="display:flex; align-items:center; gap:10px;">'
+        + envLabel
+        + _envTagSelectHtml('account', accountId, assigned)
+        + '</div>'
+        + '</div>';
+}
+
+function _renderAwsIdcOuNode(ou, depth) {
+    var ouId = String(ou.id || '').trim();
+    var ouName = String(ou.name || ouId || 'OU').trim();
+    var assigned = _normalizeEnvOption(ou.assigned_environment);
+    var effective = _normalizeEnvOption(ou.effective_environment || 'nonprod') || 'nonprod';
+    var childrenHtml = '';
+
+    var childOus = Array.isArray(ou.ous) ? ou.ous : [];
+    childOus.forEach(function(child) {
+        childrenHtml += _renderAwsIdcOuNode(child, depth + 1);
+    });
+    var accounts = Array.isArray(ou.accounts) ? ou.accounts : [];
+    accounts.forEach(function(acc) {
+        childrenHtml += _renderAwsIdcAccountNode(acc, depth + 1);
+    });
+    if (!childrenHtml) childrenHtml = '<p class="text-muted" style="margin-left:' + ((depth + 1) * 10) + 'px;">No accounts in this OU.</p>';
+
+    return ''
+        + '<details class="aws-idc-tree-node" open>'
+        + '<summary>'
+        + 'OU: ' + _escHtml(ouName) + ' <small>(' + _escHtml(ouId) + ')</small> '
+        + '<small>' + _escHtml(effective) + (assigned ? ' (tagged)' : ' (inherited)') + '</small> '
+        + _envTagSelectHtml('ou', ouId, assigned)
+        + '</summary>'
+        + '<div class="aws-idc-tree-children">' + childrenHtml + '</div>'
+        + '</details>';
 }
 
 function _renderAwsIdcOrgHierarchy(payload) {
@@ -665,88 +781,111 @@ function _renderAwsIdcOrgHierarchy(payload) {
         return;
     }
 
-    var accounts = _accountListFromPayload(payload);
-    if (!accounts.length) {
+    var errors = Array.isArray(payload && payload.errors) ? payload.errors : [];
+    var hasAccessDenied = errors.some(function(err) {
+        return /accessdenied/i.test(String(err || ''));
+    });
+    var warningHtml = '';
+    if (errors.length) {
+        warningHtml = '<div class="admin-role-hint" style="margin-bottom:10px; padding:10px; border:1px solid #f1c40f; background:#fff7db;">'
+            + '<strong>Hierarchy warnings:</strong><br>'
+            + errors.map(function(err) { return _escHtml(err); }).join('<br>')
+            + (hasAccessDenied
+                ? '<div style="margin-top:8px;"><strong>Required AWS Organizations permissions:</strong> organizations:ListRoots, organizations:ListOrganizationalUnitsForParent, organizations:ListAccountsForParent, organizations:DescribeOrganization.</div>'
+                : '')
+            + '</div>';
+    }
+
+    var roots = Array.isArray(payload && payload.roots) ? payload.roots : [];
+    if (!roots.length) {
         summaryEl.textContent = 'No organization/account data returned.';
-        treeEl.innerHTML = '<p class="text-muted">No hierarchy data found.</p>';
+        treeEl.innerHTML = warningHtml + '<p class="text-muted">No hierarchy data found.</p>';
         return;
     }
 
-    var orgMap = {};
-    accounts.forEach(function(acc) {
-        var orgId = String(acc.organization_id || 'org-unscoped').trim() || 'org-unscoped';
-        var orgName = String(acc.organization_display_name || '').trim() || (orgId === 'org-unscoped' ? 'Organization (Unscoped)' : ('Organization ' + orgId));
-        if (!orgMap[orgId]) {
-            orgMap[orgId] = { id: orgId, name: orgName, roots: {} };
-        }
-        var rootId = String(acc.root_id || 'root-unassigned').trim() || 'root-unassigned';
-        var rootName = String(acc.root_name || '').trim() || (rootId === 'root-unassigned' ? 'Unassigned Root' : rootId);
-        if (!orgMap[orgId].roots[rootId]) {
-            orgMap[orgId].roots[rootId] = { id: rootId, name: rootName, ous: {}, accounts: [] };
-        }
-        var accountNode = {
-            id: String(acc.id || acc.account_id || '').trim(),
-            name: String(acc.name || '').trim() || String(acc.id || acc.account_id || '-'),
-            email: String(acc.email || '').trim(),
-            env: String(acc.environment || '').trim() || 'nonprod'
-        };
-        var ouId = String(acc.ou_id || '').trim();
-        var ouName = String(acc.ou_name || '').trim();
-        if (!ouId) {
-            orgMap[orgId].roots[rootId].accounts.push(accountNode);
-        } else {
-            if (!orgMap[orgId].roots[rootId].ous[ouId]) {
-                orgMap[orgId].roots[rootId].ous[ouId] = { id: ouId, name: ouName || ouId, accounts: [] };
-            }
-            orgMap[orgId].roots[rootId].ous[ouId].accounts.push(accountNode);
-        }
-    });
+    var org = payload.organization || {};
+    var orgId = String(org.id || '').trim();
+    var orgName = String(org.display_name || '').trim() || (orgId ? ('Organization ' + orgId) : 'Organization');
+    var totalAccounts = roots.reduce(function(sum, r) { return sum + _countHierarchyAccounts(r); }, 0);
+    summaryEl.textContent = 'Organizations: ' + (orgId ? 1 : 0) + ' | Roots: ' + roots.length + ' | Accounts: ' + totalAccounts;
 
-    summaryEl.textContent = 'Organizations: ' + Object.keys(orgMap).length + ' | Accounts: ' + accounts.length;
+    var rootHtml = roots.map(function(root) {
+        var rootId = String(root.id || '').trim();
+        var rootName = String(root.name || rootId || 'Root').trim();
+        var rootAssigned = _normalizeEnvOption(root.assigned_environment);
+        var rootEffective = _normalizeEnvOption(root.effective_environment || 'nonprod') || 'nonprod';
 
-    var html = Object.keys(orgMap).sort().map(function(orgId) {
-        var org = orgMap[orgId];
-        var rootHtml = Object.keys(org.roots).sort().map(function(rootId) {
-            var root = org.roots[rootId];
-            var ouHtml = Object.keys(root.ous).sort().map(function(ouId) {
-                var ou = root.ous[ouId];
-                var ouAccounts = ou.accounts.map(function(a) {
-                    var left = _escHtml(a.name) + ' <small>(' + _escHtml(a.id) + ')</small>';
-                    var right = '<small>' + _escHtml(a.env) + '</small>';
-                    return '<div class="aws-idc-account-item"><span>' + left + '</span><span>' + right + '</span></div>';
-                }).join('');
-                return '<details class="aws-idc-tree-node" open>'
-                    + '<summary>OU: ' + _escHtml(ou.name) + ' <small>(' + _escHtml(ou.id) + ')</small></summary>'
-                    + '<div class="aws-idc-tree-children">' + ouAccounts + '</div>'
-                    + '</details>';
-            }).join('');
+        var childrenHtml = '';
+        var ous = Array.isArray(root.ous) ? root.ous : [];
+        ous.forEach(function(ou) { childrenHtml += _renderAwsIdcOuNode(ou, 1); });
+        var directAccounts = Array.isArray(root.accounts) ? root.accounts : [];
+        directAccounts.forEach(function(acc) { childrenHtml += _renderAwsIdcAccountNode(acc, 1); });
+        if (!childrenHtml) childrenHtml = '<p class="text-muted">No accounts under this root.</p>';
 
-            var directAccounts = root.accounts.map(function(a) {
-                var left = _escHtml(a.name) + ' <small>(' + _escHtml(a.id) + ')</small>';
-                var right = '<small>' + _escHtml(a.env) + '</small>';
-                return '<div class="aws-idc-account-item"><span>' + left + '</span><span>' + right + '</span></div>';
-            }).join('');
-
-            return '<details class="aws-idc-tree-node" open>'
-                + '<summary>Root: ' + _escHtml(root.name) + ' <small>(' + _escHtml(root.id) + ')</small></summary>'
-                + '<div class="aws-idc-tree-children">' + (ouHtml + directAccounts || '<p class="text-muted">No accounts.</p>') + '</div>'
-                + '</details>';
-        }).join('');
-
-        return '<details class="aws-idc-tree-node" open>'
-            + '<summary>' + _escHtml(org.name) + ' <small>(' + _escHtml(org.id) + ')</small></summary>'
-            + '<div class="aws-idc-tree-children">' + rootHtml + '</div>'
+        return ''
+            + '<details class="aws-idc-tree-node" open>'
+            + '<summary>'
+            + 'Root: ' + _escHtml(rootName) + ' <small>(' + _escHtml(rootId) + ')</small> '
+            + '<small>' + _escHtml(rootEffective) + (rootAssigned ? ' (tagged)' : ' (inherited)') + '</small> '
+            + _envTagSelectHtml('root', rootId, rootAssigned)
+            + '</summary>'
+            + '<div class="aws-idc-tree-children">' + childrenHtml + '</div>'
             + '</details>';
     }).join('');
 
-    treeEl.innerHTML = html || '<p class="text-muted">No organization hierarchy found.</p>';
+    treeEl.innerHTML = warningHtml + '<details class="aws-idc-tree-node" open>'
+        + '<summary>' + _escHtml(orgName) + (orgId ? (' <small>(' + _escHtml(orgId) + ')</small>') : '') + '</summary>'
+        + '<div class="aws-idc-tree-children">' + (rootHtml || '<p class="text-muted">No roots found.</p>') + '</div>'
+        + '</details>';
+
+    if (errors.length) {
+        summaryEl.textContent += ' | Warnings: ' + errors.length;
+    }
+}
+
+function saveAwsIdentityCenterEnvTag(targetType, targetId, environment) {
+    fetchAdminJson('/admin/identity-center/environment-tag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            target_type: targetType,
+            target_id: targetId,
+            environment: environment
+        })
+    })
+        .then(function(resp) {
+            var data = resp.data || {};
+            if (data.error) {
+                alert('Failed to save tag: ' + data.error);
+                return;
+            }
+            loadAwsIdentityCenterHierarchy();
+        })
+        .catch(function(e) {
+            alert('Failed to save tag: ' + (e.message || 'unknown error'));
+        });
+}
+
+function loadAwsIdentityCenterAccountPermissionSets(accountId, targetId) {
+    _renderAwsIdcAccountPermissionSets(accountId, targetId);
+}
+
+function loadAwsIdentityCenterHierarchy() {
+    _renderAwsIdcOrgHierarchy({ roots: [] });
+    fetchAdminJson('/admin/identity-center/org-hierarchy')
+        .then(function(resp) {
+            _renderAwsIdcOrgHierarchy(resp.data || {});
+        })
+        .catch(function(e) {
+            _renderAwsIdcOrgHierarchy({ error: e.message || 'Failed to load organization hierarchy' });
+        });
 }
 
 async function loadAwsIdentityCenterData() {
     _renderAwsIdcUsers({ users: [] });
     _renderAwsIdcGroups({ groups: [] });
     _renderAwsIdcPermissionSets({ permission_sets: [] });
-    _renderAwsIdcOrgHierarchy([]);
+    loadAwsIdentityCenterHierarchy();
     try {
         var usersResp = await fetchAdminJson('/admin/identity-center/users');
         _renderAwsIdcUsers(usersResp.data || {});
@@ -768,16 +907,13 @@ async function loadAwsIdentityCenterData() {
         _renderAwsIdcPermissionSets({ error: e3.message || 'Failed to load permission sets' });
     }
 
-    try {
-        var accountsResp = await fetchAdminJson('/accounts');
-        _renderAwsIdcOrgHierarchy(accountsResp.data || {});
-    } catch (e4) {
-        _renderAwsIdcOrgHierarchy({ error: e4.message || 'Failed to load organization hierarchy' });
-    }
+    // Hierarchy is loaded by loadAwsIdentityCenterHierarchy() to support refresh after tagging.
 }
 
 window.showAwsIdentityCenterSubTab = showAwsIdentityCenterSubTab;
 window.loadAwsIdentityCenterData = loadAwsIdentityCenterData;
+window.saveAwsIdentityCenterEnvTag = saveAwsIdentityCenterEnvTag;
+window.loadAwsIdentityCenterAccountPermissionSets = loadAwsIdentityCenterAccountPermissionSets;
 
 // Load users management - also populates USER_MGMT_USERS for modals (legacy; Admin tab now uses PAM admins)
 async function loadUsersManagement() {

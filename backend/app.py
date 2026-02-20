@@ -280,6 +280,7 @@ identity_center_synced_groups = []
 # PAM solution admins: users who can manage this PAM (Admin panel). Stored in data/pam_admins.json.
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
 FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
+ORG_HIERARCHY_TAGS_PATH = os.getenv('ORG_HIERARCHY_TAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_tags.json')
 
 FEATURE_FLAG_DEFAULTS = {
     'cloud_access': True,
@@ -695,6 +696,273 @@ def _infer_env_from_account_name(name: str) -> str:
         return 'sandbox'
     return 'nonprod'
 
+
+_ALLOWED_ENV_TAGS = {'prod', 'nonprod', 'sandbox'}
+
+
+def _normalize_env_tag(value, default=''):
+    raw = str(value or '').strip().lower()
+    if raw in ('', 'none', 'null', 'inherit'):
+        return ''
+    if raw in ('non prod', 'non-production', 'nonproduction', 'non_prod'):
+        raw = 'nonprod'
+    if raw in _ALLOWED_ENV_TAGS:
+        return raw
+    return str(default or '').strip().lower()
+
+
+def _load_org_hierarchy_tags():
+    out = {'roots': {}, 'ous': {}, 'accounts': {}, 'updated_at': ''}
+    try:
+        if os.path.exists(ORG_HIERARCHY_TAGS_PATH):
+            with open(ORG_HIERARCHY_TAGS_PATH, 'r') as f:
+                data = json.load(f) or {}
+            if isinstance(data, dict):
+                for key in ('roots', 'ous', 'accounts'):
+                    block = data.get(key)
+                    if isinstance(block, dict):
+                        cleaned = {}
+                        for k, v in block.items():
+                            tag = _normalize_env_tag(v)
+                            if tag:
+                                cleaned[str(k).strip()] = tag
+                        out[key] = cleaned
+                out['updated_at'] = str(data.get('updated_at') or '')
+    except Exception:
+        pass
+    return out
+
+
+def _save_org_hierarchy_tags(tags):
+    cleaned = {
+        'roots': {},
+        'ous': {},
+        'accounts': {},
+        'updated_at': datetime.now().isoformat()
+    }
+    for key in ('roots', 'ous', 'accounts'):
+        block = tags.get(key) if isinstance(tags, dict) else {}
+        if not isinstance(block, dict):
+            continue
+        for k, v in block.items():
+            tag = _normalize_env_tag(v)
+            if tag:
+                cleaned[key][str(k).strip()] = tag
+    os.makedirs(os.path.dirname(ORG_HIERARCHY_TAGS_PATH) or '.', exist_ok=True)
+    with open(ORG_HIERARCHY_TAGS_PATH, 'w') as f:
+        json.dump(cleaned, f, indent=2)
+    return cleaned
+
+
+def _effective_env_from_tags(account_id='', ou_chain=None, root_id='', fallback='nonprod', tags=None):
+    tags = tags or _load_org_hierarchy_tags()
+    account_id = str(account_id or '').strip()
+    if account_id:
+        account_tag = _normalize_env_tag((tags.get('accounts') or {}).get(account_id))
+        if account_tag:
+            return account_tag
+    # OU precedence is nearest-first (leaf OU overrides parent OU tag).
+    for ou_id in reversed(list(ou_chain or [])):
+        tag = _normalize_env_tag((tags.get('ous') or {}).get(str(ou_id or '').strip()))
+        if tag:
+            return tag
+    if root_id:
+        root_tag = _normalize_env_tag((tags.get('roots') or {}).get(str(root_id or '').strip()))
+        if root_tag:
+            return root_tag
+    return _normalize_env_tag(fallback, 'nonprod') or 'nonprod'
+
+
+def _safe_name(value):
+    return str(value or '').strip().lower()
+
+
+def _account_ou_chain_from_meta(account_meta):
+    if not isinstance(account_meta, dict):
+        return []
+    raw = account_meta.get('ou_path')
+    if isinstance(raw, list):
+        chain = [str(x or '').strip() for x in raw if str(x or '').strip()]
+        if chain:
+            return chain
+    ou_id = str(account_meta.get('ou_id') or '').strip()
+    return [ou_id] if ou_id else []
+
+
+def _apply_org_tag_overrides_to_accounts(accounts):
+    tags = _load_org_hierarchy_tags()
+    updated = {}
+    for key, value in (accounts or {}).items():
+        acct = dict(value or {})
+        account_id = str(acct.get('id') or key or '').strip()
+        account_name = str(acct.get('name') or '').strip()
+        fallback = (
+            _normalize_env_tag(acct.get('source_environment'))
+            or _normalize_env_tag(acct.get('environment'))
+            or _infer_env_from_account_name(account_name)
+            or 'nonprod'
+        )
+        effective = _effective_env_from_tags(
+            account_id=account_id,
+            ou_chain=_account_ou_chain_from_meta(acct),
+            root_id=str(acct.get('root_id') or '').strip(),
+            fallback=fallback,
+            tags=tags
+        )
+        acct['source_environment'] = fallback
+        acct['assigned_environment'] = _normalize_env_tag((tags.get('accounts') or {}).get(account_id))
+        acct['effective_environment'] = effective
+        acct['environment'] = effective
+        updated[str(key)] = acct
+    return updated
+
+
+def _build_org_hierarchy_tree(org_client):
+    """
+    Build full Organizations hierarchy:
+    organization -> roots -> OUs (recursive) -> accounts.
+    Returns {'organization': {...}, 'roots': [...], 'errors': [...]}
+    """
+    result = {'organization': {}, 'roots': [], 'errors': []}
+    tags = _load_org_hierarchy_tags()
+
+    try:
+        org = org_client.describe_organization().get('Organization', {})
+        org_id = str(org.get('Id') or '').strip()
+        result['organization'] = {
+            'id': org_id,
+            'arn': str(org.get('Arn') or '').strip(),
+            'master_account_id': str(org.get('MasterAccountId') or '').strip(),
+            'master_account_email': str(org.get('MasterAccountEmail') or '').strip(),
+            'feature_set': str(org.get('FeatureSet') or '').strip(),
+            'display_name': f"Organization {org_id}" if org_id else 'Organization'
+        }
+    except Exception as e:
+        result['errors'].append(f"describe_organization: {e}")
+
+    # Ensure account metadata is populated for environment fallback + account email.
+    try:
+        if not CONFIG.get('accounts') or list(CONFIG.get('accounts', {}).keys()) == ['poc']:
+            initialize_aws_config()
+    except Exception:
+        pass
+
+    account_meta = CONFIG.get('accounts') or {}
+
+    def make_account_node(acct, ou_chain, root_id):
+        account_id = str(acct.get('Id') or acct.get('id') or '').strip()
+        account_name = str(acct.get('Name') or acct.get('name') or '').strip()
+        cfg = account_meta.get(account_id) if isinstance(account_meta, dict) else {}
+        fallback_env = str((cfg or {}).get('environment') or _infer_env_from_account_name(account_name) or 'nonprod').strip().lower()
+        assigned_tag = _normalize_env_tag((tags.get('accounts') or {}).get(account_id))
+        effective_env = _effective_env_from_tags(
+            account_id=account_id,
+            ou_chain=ou_chain,
+            root_id=root_id,
+            fallback=fallback_env,
+            tags=tags
+        )
+        return {
+            'type': 'account',
+            'id': account_id,
+            'name': account_name,
+            'email': str(acct.get('Email') or (cfg or {}).get('email') or '').strip(),
+            'status': str(acct.get('Status') or (cfg or {}).get('status') or '').strip(),
+            'assigned_environment': assigned_tag,
+            'effective_environment': effective_env,
+            'source_environment': fallback_env
+        }
+
+    def build_ou_node(ou_obj, root_id, parent_ou_chain):
+        ou_id = str(ou_obj.get('Id') or '').strip()
+        ou_name = str(ou_obj.get('Name') or '').strip() or ou_id
+        ou_assigned = _normalize_env_tag((tags.get('ous') or {}).get(ou_id))
+        ou_chain = list(parent_ou_chain or []) + ([ou_id] if ou_id else [])
+
+        node = {
+            'type': 'ou',
+            'id': ou_id,
+            'name': ou_name,
+            'assigned_environment': ou_assigned,
+            'effective_environment': _effective_env_from_tags(
+                account_id='',
+                ou_chain=ou_chain,
+                root_id=root_id,
+                fallback='',
+                tags=tags
+            ) or _effective_env_from_tags(account_id='', ou_chain=list(parent_ou_chain or []), root_id=root_id, fallback='nonprod', tags=tags),
+            'ous': [],
+            'accounts': []
+        }
+
+        try:
+            acc_paginator = org_client.get_paginator('list_accounts_for_parent')
+            for page in acc_paginator.paginate(ParentId=ou_id):
+                for acct in page.get('Accounts', []) or []:
+                    node['accounts'].append(make_account_node(acct, ou_chain, root_id))
+        except Exception as e:
+            result['errors'].append(f"list_accounts_for_parent({ou_id}): {e}")
+
+        try:
+            ou_paginator = org_client.get_paginator('list_organizational_units_for_parent')
+            child_ous = []
+            for page in ou_paginator.paginate(ParentId=ou_id):
+                child_ous.extend(page.get('OrganizationalUnits', []) or [])
+            for child in sorted(child_ous, key=lambda x: _safe_name(x.get('Name'))):
+                node['ous'].append(build_ou_node(child, root_id, ou_chain))
+        except Exception as e:
+            result['errors'].append(f"list_organizational_units_for_parent({ou_id}): {e}")
+
+        node['accounts'] = sorted(node['accounts'], key=lambda x: _safe_name(x.get('name')))
+        return node
+
+    roots = []
+    try:
+        root_paginator = org_client.get_paginator('list_roots')
+        for page in root_paginator.paginate():
+            roots.extend(page.get('Roots', []) or [])
+    except Exception as e:
+        result['errors'].append(f"list_roots: {e}")
+        return result
+
+    for root in sorted(roots, key=lambda x: _safe_name(x.get('Name'))):
+        root_id = str(root.get('Id') or '').strip()
+        root_name = str(root.get('Name') or '').strip() or root_id
+        root_assigned = _normalize_env_tag((tags.get('roots') or {}).get(root_id))
+        root_node = {
+            'type': 'root',
+            'id': root_id,
+            'name': root_name,
+            'assigned_environment': root_assigned,
+            'effective_environment': root_assigned or 'nonprod',
+            'ous': [],
+            'accounts': []
+        }
+
+        try:
+            acc_paginator = org_client.get_paginator('list_accounts_for_parent')
+            for page in acc_paginator.paginate(ParentId=root_id):
+                for acct in page.get('Accounts', []) or []:
+                    root_node['accounts'].append(make_account_node(acct, [], root_id))
+        except Exception as e:
+            result['errors'].append(f"list_accounts_for_parent({root_id}): {e}")
+
+        try:
+            ou_paginator = org_client.get_paginator('list_organizational_units_for_parent')
+            ous = []
+            for page in ou_paginator.paginate(ParentId=root_id):
+                ous.extend(page.get('OrganizationalUnits', []) or [])
+            for ou in sorted(ous, key=lambda x: _safe_name(x.get('Name'))):
+                root_node['ous'].append(build_ou_node(ou, root_id, []))
+        except Exception as e:
+            result['errors'].append(f"list_organizational_units_for_parent({root_id}): {e}")
+
+        root_node['accounts'] = sorted(root_node['accounts'], key=lambda x: _safe_name(x.get('name')))
+        result['roots'].append(root_node)
+
+    return result
+
+
 def _build_org_account_parent_map(org_client):
     """
     Build account -> {root_id/root_name/ou_id/ou_name} mapping from Organizations hierarchy.
@@ -725,7 +993,8 @@ def _build_org_account_parent_map(org_client):
             'parent_id': rid,
             'parent_type': 'ROOT',
             'root_id': rid,
-            'root_name': root_name_by_id.get(rid, '')
+            'root_name': root_name_by_id.get(rid, ''),
+            'ou_path': []
         })
 
     while queue:
@@ -747,14 +1016,16 @@ def _build_org_account_parent_map(org_client):
                             'root_id': root_id,
                             'root_name': root_name,
                             'ou_id': parent_id,
-                            'ou_name': node.get('ou_name', '')
+                            'ou_name': node.get('ou_name', ''),
+                            'ou_path': list(node.get('ou_path') or [])
                         }
                     else:
                         mapping[aid] = {
                             'root_id': root_id,
                             'root_name': root_name,
                             'ou_id': '',
-                            'ou_name': ''
+                            'ou_name': '',
+                            'ou_path': []
                         }
         except Exception as e:
             print(f"Organizations list_accounts_for_parent error ({parent_id}): {e}")
@@ -771,7 +1042,8 @@ def _build_org_account_parent_map(org_client):
                         'parent_type': 'ORGANIZATIONAL_UNIT',
                         'ou_name': str(ou.get('Name') or '').strip(),
                         'root_id': root_id,
-                        'root_name': root_name
+                        'root_name': root_name,
+                        'ou_path': list(node.get('ou_path') or []) + [ou_id]
                     })
         except Exception:
             # Some parents may not contain OUs; ignore.
@@ -889,6 +1161,7 @@ def initialize_aws_config():
                     'joined_method': str(account.get('JoinedMethod') or '').strip(),
                     'joined_timestamp': str(account.get('JoinedTimestamp') or ''),
                     'environment': env,
+                    'source_environment': env,
                     'organization_id': str(org_meta.get('id') or ''),
                     'organization_arn': str(org_meta.get('arn') or ''),
                     'organization_display_name': str(org_meta.get('display_name') or ''),
@@ -896,7 +1169,8 @@ def initialize_aws_config():
                     'root_id': str(parent.get('root_id') or ''),
                     'root_name': str(parent.get('root_name') or ''),
                     'ou_id': str(parent.get('ou_id') or ''),
-                    'ou_name': str(parent.get('ou_name') or '')
+                    'ou_name': str(parent.get('ou_name') or ''),
+                    'ou_path': list(parent.get('ou_path') or [])
                 }
             CONFIG['organization'] = org_meta
         except Exception as e:
@@ -2109,6 +2383,8 @@ def get_accounts():
     if not CONFIG['accounts']:
         CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
         CONFIG['organization'] = {}
+    # Keep account environments aligned with explicit org/account environment tags.
+    CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG.get('accounts') or {})
     return jsonify(CONFIG['accounts'])
 
 @app.route('/api/permission-sets', methods=['GET'])
@@ -4919,6 +5195,128 @@ def list_identity_center_permission_sets():
             initialize_aws_config()
         sets = [{'name': ps.get('name'), 'arn': ps.get('arn')} for ps in CONFIG.get('permission_sets', [])]
         return jsonify({'permission_sets': sets})
+    except Exception as e:
+        return jsonify({'error': str(e), 'permission_sets': []}), 500
+
+
+@app.route('/api/admin/identity-center/org-hierarchy', methods=['GET'])
+def list_identity_center_org_hierarchy():
+    """Return recursive Organizations hierarchy (roots -> OUs -> accounts) with effective environment tags."""
+    try:
+        org_client = _organizations_client()
+        payload = _build_org_hierarchy_tree(org_client)
+        payload['tags'] = _load_org_hierarchy_tags()
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({
+            'error': str(e),
+            'organization': {},
+            'roots': [],
+            'errors': [str(e)],
+            'tags': _load_org_hierarchy_tags()
+        }), 500
+
+
+@app.route('/api/admin/identity-center/environment-tag', methods=['POST'])
+def set_identity_center_environment_tag():
+    """Set/clear environment tag for root/ou/account. environment: prod|nonprod|sandbox|inherit."""
+    try:
+        data = request.get_json() or {}
+        target_type = str(data.get('target_type') or '').strip().lower()
+        target_id = str(data.get('target_id') or '').strip()
+        env = _normalize_env_tag(data.get('environment'))
+        clear_tag = str(data.get('environment') or '').strip().lower() in ('', 'inherit', 'none', 'null')
+
+        key_map = {'root': 'roots', 'ou': 'ous', 'account': 'accounts'}
+        if target_type not in key_map:
+            return jsonify({'error': 'target_type must be one of: root, ou, account'}), 400
+        if not target_id:
+            return jsonify({'error': 'target_id is required'}), 400
+        if not clear_tag and env not in _ALLOWED_ENV_TAGS:
+            return jsonify({'error': 'environment must be one of: prod, nonprod, sandbox, inherit'}), 400
+
+        tags = _load_org_hierarchy_tags()
+        block = tags.get(key_map[target_type]) or {}
+        if clear_tag:
+            block.pop(target_id, None)
+        else:
+            block[target_id] = env
+        tags[key_map[target_type]] = block
+        tags = _save_org_hierarchy_tags(tags)
+
+        if isinstance(CONFIG.get('accounts'), dict):
+            CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG['accounts'])
+
+        return jsonify({
+            'status': 'success',
+            'target_type': target_type,
+            'target_id': target_id,
+            'assigned_environment': '' if clear_tag else env,
+            'tags': tags
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/admin/identity-center/account-permission-sets', methods=['GET'])
+def list_identity_center_account_permission_sets():
+    """List permission sets that have any assignment on a given account (best-effort)."""
+    try:
+        account_id = str(request.args.get('account_id') or '').strip()
+        if not account_id:
+            return jsonify({'error': 'account_id is required', 'permission_sets': []}), 400
+        limit_raw = request.args.get('limit')
+        try:
+            limit = int(limit_raw) if limit_raw is not None else 8
+        except Exception:
+            limit = 8
+        limit = max(1, min(limit, 50))
+
+        if not CONFIG.get('permission_sets'):
+            initialize_aws_config()
+        permission_sets = list(CONFIG.get('permission_sets') or [])
+        if not permission_sets:
+            return jsonify({'permission_sets': [], 'total': 0, 'shown': 0})
+
+        sso_admin = _sso_admin_client()
+        instance_arn = CONFIG.get('sso_instance_arn')
+        found = []
+
+        for ps in permission_sets:
+            ps_arn = str(ps.get('arn') or '').strip()
+            if not ps_arn:
+                continue
+            ps_name = str(ps.get('name') or ps_arn.rsplit('/', 1)[-1] or ps_arn).strip()
+            next_token = None
+            has_assignment = False
+            while True:
+                kwargs = {
+                    'InstanceArn': instance_arn,
+                    'AccountId': account_id,
+                    'PermissionSetArn': ps_arn,
+                    'MaxResults': 100,
+                }
+                if next_token:
+                    kwargs['NextToken'] = next_token
+                resp = sso_admin.list_account_assignments(**kwargs)
+                if resp.get('AccountAssignments'):
+                    has_assignment = True
+                    break
+                next_token = resp.get('NextToken')
+                if not next_token:
+                    break
+            if has_assignment:
+                found.append({'name': ps_name, 'arn': ps_arn})
+
+        found = sorted(found, key=lambda x: _safe_name(x.get('name')))
+        shown = found[:limit]
+        return jsonify({
+            'account_id': account_id,
+            'permission_sets': shown,
+            'total': len(found),
+            'shown': len(shown),
+            'remaining': max(0, len(found) - len(shown))
+        })
     except Exception as e:
         return jsonify({'error': str(e), 'permission_sets': []}), 500
 
