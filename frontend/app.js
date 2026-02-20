@@ -20,41 +20,66 @@ function deriveNameFromEmail(email) {
 function setPamAdminFromApi(email) {
     if (typeof fetch === 'undefined') return;
     const em = String(email || '').trim();
-    fetch(API_BASE_FOR_ADMIN + '/admin/check-pam-admin?email=' + encodeURIComponent(em))
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-            const responseEmail = String((d && d.email) || '').trim();
-            const storedEmail = String(localStorage.getItem('userEmail') || '').trim();
-            const finalEmail = responseEmail || em || storedEmail;
-            if (finalEmail) localStorage.setItem('userEmail', finalEmail);
+    const path = '/admin/check-pam-admin?email=' + encodeURIComponent(em);
+    const candidates = [];
+    const addCandidate = function(base) {
+        const cleaned = String(base || '').replace(/\/+$/, '');
+        if (cleaned && candidates.indexOf(cleaned) === -1) candidates.push(cleaned);
+    };
+    addCandidate('/api');
+    addCandidate(API_BASE_FOR_ADMIN);
+    if (typeof window !== 'undefined' && window.API_BASE) addCandidate(window.API_BASE);
 
-            const responseNameRaw = String((d && (d.display_name || d.displayName)) || '').trim();
-            let finalName = '';
-            if (responseNameRaw && responseNameRaw.toLowerCase() !== 'user' && responseNameRaw.toLowerCase() !== 'email') {
-                finalName = responseNameRaw;
+    (async function() {
+        let data = null;
+        for (let i = 0; i < candidates.length; i++) {
+            const base = candidates[i];
+            try {
+                const r = await fetch(base + path, { credentials: 'include' });
+                if (!r.ok) continue;
+                const contentType = String(r.headers.get('Content-Type') || '').toLowerCase();
+                if (!contentType.includes('application/json')) continue;
+                data = await r.json();
+                if (typeof window !== 'undefined' && window.API_BASE !== base) window.API_BASE = base;
+                break;
+            } catch (_) {
+                continue;
+            }
+        }
+        if (!data || typeof data.isAdmin !== 'boolean') return;
+
+        const responseEmail = String((data && data.email) || '').trim();
+        const storedEmail = String(localStorage.getItem('userEmail') || '').trim();
+        const finalEmail = responseEmail || em || storedEmail;
+        if (finalEmail) localStorage.setItem('userEmail', finalEmail);
+
+        const responseNameRaw = String((data && (data.display_name || data.displayName)) || '').trim();
+        let finalName = '';
+        if (responseNameRaw && responseNameRaw.toLowerCase() !== 'user' && responseNameRaw.toLowerCase() !== 'email') {
+            finalName = responseNameRaw;
+        } else {
+            const storedName = String(localStorage.getItem('userName') || '').trim();
+            if (storedName && storedName.toLowerCase() !== 'user' && storedName.toLowerCase() !== 'email') {
+                finalName = storedName;
             } else {
-                const storedName = String(localStorage.getItem('userName') || '').trim();
-                if (storedName && storedName.toLowerCase() !== 'user' && storedName.toLowerCase() !== 'email') {
-                    finalName = storedName;
-                } else {
-                    finalName = deriveNameFromEmail(finalEmail);
-                }
+                finalName = deriveNameFromEmail(finalEmail);
             }
-            if (finalName) localStorage.setItem('userName', finalName);
+        }
+        if (finalName) localStorage.setItem('userName', finalName);
 
-            isAdmin = d.isAdmin === true;
-            localStorage.setItem('isAdmin', String(isAdmin));
-            localStorage.setItem('userRole', isAdmin ? 'admin' : 'user');
-            if (typeof currentUser !== 'undefined' && currentUser) {
-                currentUser.isAdmin = isAdmin;
-                if (finalEmail) currentUser.email = finalEmail;
-                if (finalName) currentUser.name = finalName;
-            }
-            if (typeof checkAdminAccess === 'function') checkAdminAccess();
-            if (typeof updateUIForRole === 'function') updateUIForRole();
-            if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
-        })
-        .catch(function() {});
+        isAdmin = data.isAdmin === true;
+        const roleFromApi = String((data && data.role) || '').trim();
+        localStorage.setItem('isAdmin', String(isAdmin));
+        localStorage.setItem('userRole', isAdmin ? (roleFromApi || 'admin') : 'user');
+        if (typeof currentUser !== 'undefined' && currentUser) {
+            currentUser.isAdmin = isAdmin;
+            if (finalEmail) currentUser.email = finalEmail;
+            if (finalName) currentUser.name = finalName;
+        }
+        if (typeof checkAdminAccess === 'function') checkAdminAccess();
+        if (typeof updateUIForRole === 'function') updateUIForRole();
+        if (typeof applyRoleRouteLanding === 'function') applyRoleRouteLanding();
+    })();
 }
 
 let ssoProfileSyncInFlight = false;
