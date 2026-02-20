@@ -823,11 +823,11 @@
                 <div id="requestStep1" class="request-wizard-step">
                     <h3 style="font-family: 'Inter', sans-serif; font-size: 18px; margin-bottom: 20px; color: var(--text-primary);">What do you want to request access for?</h3>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; max-width: 800px;">
-                        <div class="cloud-choice-card" onclick="selectCloudProvider('aws')">
+                        <div class="cloud-choice-card" id="requestStepCloudAwsOption" onclick="selectCloudProvider('aws')">
                             <img src="assets/logos/aws.png" alt="AWS" class="card-logo">
                             <h4>AWS</h4>
                         </div>
-                        <div class="cloud-choice-card" onclick="selectCloudProvider('gcp')">
+                        <div class="cloud-choice-card" id="requestStepCloudGcpOption" onclick="selectCloudProvider('gcp')">
                             <img src="assets/logos/gcp.png" alt="GCP" class="card-logo">
                             <h4>GCP</h4>
                         </div>
@@ -951,7 +951,7 @@
                     <h2><img src="assets/logos/aws.png" alt="" class="page-title-logo"> Cloud Accounts</h2>
                 </div>
                 <div class="cloud-providers">
-                    <div class="cloud-provider-card">
+                    <div class="cloud-provider-card" id="accountsAwsProviderCard">
                         <button class="cloud-provider-btn" onclick="toggleCloudProvider('aws')">
                             <img src="assets/logos/aws.png" alt="" class="nav-logo">
                             <span>AWS Accounts</span>
@@ -964,7 +964,7 @@
                         </div>
                     </div>
                     
-                    <div class="cloud-provider-card">
+                    <div class="cloud-provider-card" id="accountsGcpProviderCard">
                         <button class="cloud-provider-btn" onclick="toggleCloudProvider('gcp')">
                             <img src="assets/logos/gcp.png" alt="" class="nav-logo">
                             <span>GCP Projects</span>
@@ -2882,7 +2882,7 @@
     <script src="policy-config.js" defer></script>
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
-    <script src="feature-management.js?v=5" defer></script>
+    <script src="feature-management.js?v=6" defer></script>
     <script src="admin-functions.js?v=3" defer></script>
     <script src="security-management.js" defer></script>
     <script src="guardrails.js" defer></script>

@@ -170,12 +170,13 @@
     function setVisible(el, visible, displayType) {
         if (!el) return;
         if (visible) {
-            el.style.removeProperty('display');
             if (displayType) {
-                el.style.display = displayType;
+                el.style.setProperty('display', displayType, 'important');
+            } else {
+                el.style.removeProperty('display');
             }
         } else {
-            el.style.display = 'none';
+            el.style.setProperty('display', 'none', 'important');
         }
     }
 
@@ -352,6 +353,17 @@
         }
     }
 
+    function applyFeatureOptionGating(flags) {
+        const cloudParent = !!flags.cloud_access;
+        const awsEnabled = cloudParent && !!flags.aws_access;
+        const gcpEnabled = cloudParent && !!flags.gcp_access;
+
+        setVisible(document.getElementById('requestStepCloudAwsOption'), awsEnabled, 'block');
+        setVisible(document.getElementById('requestStepCloudGcpOption'), gcpEnabled, 'block');
+        setVisible(document.getElementById('accountsAwsProviderCard'), awsEnabled, 'block');
+        setVisible(document.getElementById('accountsGcpProviderCard'), gcpEnabled, 'block');
+    }
+
     function applyRuntimePageGuard() {
         const activePage = document.querySelector('.page.active');
         if (!activePage) return;
@@ -390,6 +402,7 @@
         updateFeatureCardStatus(normalized);
         applySidebarGating(normalized);
         applyRequestsGating(normalized);
+        applyFeatureOptionGating(normalized);
         applyDatabasePageFeatureFlags(normalized);
         applyRuntimePageGuard();
         publishFeatureUpdate(normalized);
