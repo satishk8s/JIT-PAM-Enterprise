@@ -473,7 +473,8 @@
 
     async function postJson(path, body) {
         const candidates = candidateUrlsFor(path);
-        let last = { ok: false, status: 0, data: { error: 'Backend unavailable' } };
+        let sawNotFound = false;
+        let last = { ok: false, status: 0, data: { error: 'Backend unavailable' }, sawNotFound: false };
         for (const url of candidates) {
             try {
                 const res = await fetch(url, {
@@ -485,20 +486,22 @@
                 const text = await res.text();
                 let data = {};
                 try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
-                const out = { ok: res.ok, status: res.status, data: data };
+                const out = { ok: res.ok, status: res.status, data: data, sawNotFound: sawNotFound };
                 if (res.ok) {
                     rememberApiBaseFromUrl(url);
                     return out;
                 }
                 if (res.status === 404 || res.status === 405) {
-                    last = out;
+                    sawNotFound = true;
+                    last = { ok: false, status: res.status, data: data, sawNotFound: true };
                     continue;
                 }
                 return out;
             } catch (e) {
-                last = { ok: false, status: 0, data: { error: e.message || 'Request failed' } };
+                last = { ok: false, status: 0, data: { error: e.message || 'Request failed' }, sawNotFound: sawNotFound };
             }
         }
+        last.sawNotFound = last.sawNotFound || sawNotFound;
         return last;
     }
 
@@ -531,7 +534,7 @@
         }
 
         // Backward compatibility: older backend may only expose /api/admin/toggle-feature.
-        if (result.status === 404 || result.status === 405) {
+        if (result.status === 404 || result.status === 405 || !!result.sawNotFound) {
             return saveFeaturePatchLegacy(patch);
         }
 
