@@ -27,7 +27,7 @@
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="preload" href="enterprise-theme.css?v=13" as="style">
-    <link rel="preload" href="styles.css?v=13" as="style">
+    <link rel="preload" href="styles.css?v=14" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
     <link href="calendar.css" rel="stylesheet">
@@ -35,7 +35,7 @@
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
     <link href="enterprise-theme.css?v=13" rel="stylesheet">
-    <link href="styles.css?v=13" rel="stylesheet">
+    <link href="styles.css?v=14" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
     <link href="security-ui.css?v=9" rel="stylesheet">
@@ -2720,14 +2720,14 @@
 
                     <!-- Guardrails Section -->
                     <div id="guardrailsSection" style="display: none;">
-                        <div class="guardrails-management">
+                        <div class="guardrails-management guardrails-themed">
                             <div class="section-header">
                                 <h3><i class="fas fa-shield-check"></i> Access Guardrails</h3>
                                 <p style="color: var(--text-secondary); font-size: 13px; margin-top: 5px;">Define security guardrails to control what services and operations users can request</p>
                             </div>
 
                             <!-- AI Guardrail Generator -->
-                            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-bottom: 30px; color: white;">
+                            <div class="guardrails-ai-banner" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-bottom: 30px; color: white;">
                                 <h4 style="margin: 0 0 10px 0; display: flex; align-items: center; gap: 10px;">
                                     <i class="fas fa-robot" style="font-size: 24px;"></i>
                                     AI-Powered Guardrail Generator
@@ -2879,6 +2879,80 @@
                                 </div>
                             </div>
 
+                            <!-- Guardrail Type 5: Database Write Access Controls -->
+                            <div class="guardrail-card guardrail-db-write-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; gap: 12px; flex-wrap: wrap;">
+                                    <div>
+                                        <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
+                                            <i class="fas fa-database" style="color: #ef4444;"></i> Database Write Action Guardrails
+                                        </h4>
+                                        <p style="margin: 0; color: var(--text-secondary); font-size: 12px;">Block write actions (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE) by account and DB instance. Add explicit user/group exceptions where needed.</p>
+                                    </div>
+                                    <label class="toggle-switch" style="margin-top: 2px;">
+                                        <input type="checkbox" id="dbWriteGuardrailEnabled" checked>
+                                        <span class="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div class="notice-warning-pam" style="margin-bottom: 15px; font-size: 12px;">
+                                    <strong><i class="fas fa-lock"></i> Policy:</strong> When enabled, users can still request read-only access. Write requests are blocked unless the requester email or group is explicitly allowed below.
+                                </div>
+
+                                <div class="guardrail-db-grid">
+                                    <div class="form-group">
+                                        <label for="dbWriteGuardrailAccount">AWS Account</label>
+                                        <select id="dbWriteGuardrailAccount" onchange="onDbWriteGuardrailAccountChange()">
+                                            <option value="">Select AWS account</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="dbWriteGuardrailInstance">Database Instance</label>
+                                        <select id="dbWriteGuardrailInstance">
+                                            <option value="">Select DB instance</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group guardrail-db-reason">
+                                        <label for="dbWriteGuardrailReason">Reason / Message</label>
+                                        <input type="text" id="dbWriteGuardrailReason" placeholder="Example: Write actions are restricted for this instance. Contact DB Security team." />
+                                    </div>
+                                </div>
+
+                                <div class="guardrail-principal-grid">
+                                    <div class="guardrail-principal-panel">
+                                        <label>Allow Users (Exceptions)</label>
+                                        <div class="guardrail-search-row">
+                                            <input type="text" id="dbWriteUserSearchInput" placeholder="Search user by name/email">
+                                            <button type="button" class="btn-secondary btn-pam btn-sm" onclick="searchDbWriteExceptions('user')">
+                                                <i class="fas fa-search"></i> Search
+                                            </button>
+                                        </div>
+                                        <div id="dbWriteUserSearchResults" class="guardrail-search-results"></div>
+                                        <div id="dbWriteAllowedUsers" class="guardrail-chip-list"></div>
+                                    </div>
+
+                                    <div class="guardrail-principal-panel">
+                                        <label>Allow Groups (Exceptions)</label>
+                                        <div class="guardrail-search-row">
+                                            <input type="text" id="dbWriteGroupSearchInput" placeholder="Search group by name">
+                                            <button type="button" class="btn-secondary btn-pam btn-sm" onclick="searchDbWriteExceptions('group')">
+                                                <i class="fas fa-search"></i> Search
+                                            </button>
+                                        </div>
+                                        <div id="dbWriteGroupSearchResults" class="guardrail-search-results"></div>
+                                        <div id="dbWriteAllowedGroups" class="guardrail-chip-list"></div>
+                                    </div>
+                                </div>
+
+                                <div class="guardrail-db-actions">
+                                    <button type="button" onclick="addDatabaseWriteGuardrailRule()" class="btn-primary btn-pam btn-sm" style="padding: 8px 14px;">
+                                        <i class="fas fa-plus"></i> Add DB Guardrail Rule
+                                    </button>
+                                </div>
+
+                                <div id="dbWriteGuardrailRulesList" class="guardrail-db-rules-list"></div>
+                                <p id="dbWriteGuardrailRulesEmpty" class="text-muted" style="margin-top: 10px; font-size: 12px;">No database write guardrail rules added yet.</p>
+                            </div>
+
                             <!-- Save Button -->
                             <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 30px;">
                                 <button onclick="previewGuardrails()" class="btn-secondary btn-pam" style="padding: 12px 24px;">
@@ -2950,7 +3024,7 @@
     <script src="feature-management.js?v=7" defer></script>
     <script src="admin-functions.js?v=7" defer></script>
     <script src="security-management.js" defer></script>
-    <script src="guardrails.js" defer></script>
+    <script src="guardrails.js?v=8" defer></script>
     <script src="request-drafts.js" defer></script>
     <script src="account-tagging.js" defer></script>
     <script src="instances.js?v=2" defer></script>
@@ -3074,6 +3148,9 @@
             [securityBtn, guardrailsBtn, auditBtn].forEach(function(btn) { if (btn) { btn.classList.remove('active', 'tab-glow-subtab-active'); } });
             var activeBtn = tab === 'security' ? securityBtn : (tab === 'guardrails' ? guardrailsBtn : auditBtn);
             if (activeBtn) activeBtn.classList.add('active');
+            if (tab === 'guardrails' && typeof refreshGuardrailsSection === 'function') {
+                setTimeout(function() { refreshGuardrailsSection(); }, 60);
+            }
         }
         function showIntegrationsSubTab(tab) {
             var ids = ['intCloudSection', 'intTicketingSection', 'intSiemSection', 'intIgpSection'];

@@ -281,6 +281,8 @@ identity_center_synced_groups = []
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
 FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
 ORG_HIERARCHY_TAGS_PATH = os.getenv('ORG_HIERARCHY_TAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_tags.json')
+GUARDRAILS_CONFIG_PATH = os.getenv('GUARDRAILS_CONFIG_PATH') or os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
+LOCAL_USER_GROUPS_PATH = os.getenv('LOCAL_USER_GROUPS_PATH') or os.path.join(os.path.dirname(__file__), 'user_groups.json')
 
 FEATURE_FLAG_DEFAULTS = {
     'cloud_access': True,
@@ -6414,18 +6416,36 @@ def manage_org_users():
 def save_guardrails():
     """Save guardrails configuration"""
     try:
-        data = request.get_json()
-        
+        data = request.get_json() or {}
+        if not isinstance(data, dict):
+            return jsonify({'error': 'Invalid payload. JSON object expected.'}), 400
+
+        payload = _default_guardrails_config()
+        payload.update(data)
+        for key in ('serviceRestrictions', 'deleteRestrictions', 'createRestrictions', 'customGuardrails'):
+            if not isinstance(payload.get(key), list):
+                payload[key] = []
+        raw_db_rules = payload.get('databaseWriteControls')
+        if not isinstance(raw_db_rules, list):
+            raw_db_rules = []
+        payload['databaseWriteControls'] = [_normalize_db_write_rule(r) for r in raw_db_rules]
+
         # Store in file (in production, use database)
-        guardrails_path = os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
-        with open(guardrails_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        
-        print(f"✅ Guardrails saved: {len(data.get('serviceRestrictions', []))} service, {len(data.get('deleteRestrictions', []))} delete, {len(data.get('createRestrictions', []))} create rules")
+        with open(GUARDRAILS_CONFIG_PATH, 'w') as f:
+            json.dump(payload, f, indent=2)
+
+        print(
+            "✅ Guardrails saved: "
+            f"{len(payload.get('serviceRestrictions', []))} service, "
+            f"{len(payload.get('deleteRestrictions', []))} delete, "
+            f"{len(payload.get('createRestrictions', []))} create, "
+            f"{len(payload.get('databaseWriteControls', []))} db-write rules"
+        )
         
         return jsonify({
             'status': 'success',
-            'message': 'Guardrails saved successfully'
+            'message': 'Guardrails saved successfully',
+            'guardrails': payload
         })
         
     except Exception as e:
@@ -6435,16 +6455,7 @@ def save_guardrails():
 def get_guardrails():
     """Get current guardrails configuration"""
     try:
-        guardrails_path = os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
-        if os.path.exists(guardrails_path):
-            with open(guardrails_path, 'r') as f:
-                return jsonify(json.load(f))
-        return jsonify({
-            'serviceRestrictions': [],
-            'deleteRestrictions': [],
-            'createRestrictions': [],
-            'customGuardrails': []
-        })
+        return jsonify(_load_guardrails_config())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -6798,6 +6809,244 @@ def _validate_permissions_for_engine(engine, perms):
     except Exception as e:
         return str(e)
     return None
+
+_DB_WRITE_OPS = {
+    'INSERT', 'UPDATE', 'DELETE', 'MERGE',
+    'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME',
+    'CREATE INDEX', 'DROP INDEX'
+}
+
+def _default_guardrails_config():
+    return {
+        'serviceRestrictions': [],
+        'deleteRestrictions': [],
+        'createRestrictions': [],
+        'customGuardrails': [],
+        'databaseWriteControls': []
+    }
+
+def _load_guardrails_config():
+    data = _default_guardrails_config()
+    try:
+        if os.path.exists(GUARDRAILS_CONFIG_PATH):
+            with open(GUARDRAILS_CONFIG_PATH, 'r') as f:
+                raw = json.load(f) or {}
+            if isinstance(raw, dict):
+                data.update(raw)
+    except Exception:
+        pass
+    for key in ('serviceRestrictions', 'deleteRestrictions', 'createRestrictions', 'customGuardrails', 'databaseWriteControls'):
+        if not isinstance(data.get(key), list):
+            data[key] = []
+    return data
+
+def _normalize_db_write_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    enabled = bool(r.get('enabled', True))
+    block_write = bool(r.get('block_write_actions', r.get('blockWriteActions', False)))
+    account_id = str(r.get('account_id') or r.get('accountId') or '').strip()
+    db_instance_id = str(r.get('db_instance_id') or r.get('dbInstanceId') or '').strip()
+    reason = str(r.get('reason') or '').strip()
+
+    allowed_users = []
+    for u in (r.get('allowed_users') or r.get('allowedUsers') or []):
+        if isinstance(u, dict):
+            email = str(u.get('email') or u.get('value') or '').strip().lower()
+        else:
+            email = str(u or '').strip().lower()
+        if email and email not in allowed_users:
+            allowed_users.append(email)
+
+    allowed_groups = []
+    for g in (r.get('allowed_groups') or r.get('allowedGroups') or []):
+        if isinstance(g, dict):
+            gid = str(g.get('group_id') or g.get('id') or '').strip()
+            name = str(g.get('display_name') or g.get('name') or '').strip()
+            source = str(g.get('source') or 'identity_center').strip().lower() or 'identity_center'
+        else:
+            gid = str(g or '').strip()
+            name = ''
+            source = 'identity_center'
+        if not gid and not name:
+            continue
+        normalized = {
+            'id': gid,
+            'name': name,
+            'source': source
+        }
+        if normalized not in allowed_groups:
+            allowed_groups.append(normalized)
+
+    return {
+        'enabled': enabled,
+        'block_write_actions': block_write,
+        'account_id': account_id,
+        'db_instance_id': db_instance_id,
+        'reason': reason,
+        'allowed_users': allowed_users,
+        'allowed_groups': allowed_groups
+    }
+
+def _is_db_write_request(perms):
+    ops = [str(p or '').strip().upper() for p in _normalize_permissions_list(perms)]
+    return any(op in _DB_WRITE_OPS for op in ops)
+
+def _local_group_keys_for_user(email):
+    email_l = str(email or '').strip().lower()
+    if not email_l:
+        return set()
+    keys = set()
+    try:
+        if not os.path.exists(LOCAL_USER_GROUPS_PATH):
+            return keys
+        with open(LOCAL_USER_GROUPS_PATH, 'r') as f:
+            data = json.load(f) or {}
+        for g in (data.get('groups') or []):
+            if not isinstance(g, dict):
+                continue
+            members = {str(m or '').strip().lower() for m in (g.get('members') or [])}
+            if email_l in members:
+                gid = str(g.get('id') or '').strip().lower()
+                name = str(g.get('name') or '').strip().lower()
+                if gid:
+                    keys.add(gid)
+                if name:
+                    keys.add(name)
+    except Exception:
+        pass
+    return keys
+
+def _identity_center_group_keys_for_user(email):
+    email_l = str(email or '').strip().lower()
+    if not email_l:
+        return set()
+    keys = set()
+    try:
+        user = _find_identity_center_user_by_email(email_l)
+        user_id = str((user or {}).get('UserId') or '').strip()
+        identity_store_id = str(CONFIG.get('identity_store_id') or '').strip()
+        if not user_id or not identity_store_id:
+            return keys
+
+        identitystore = _identitystore_client()
+        group_ids = set()
+        try:
+            paginator = identitystore.get_paginator('list_group_memberships_for_member')
+            for page in paginator.paginate(IdentityStoreId=identity_store_id, MemberId={'UserId': user_id}):
+                for membership in page.get('GroupMemberships', []) or []:
+                    gid = str(membership.get('GroupId') or '').strip()
+                    if gid:
+                        group_ids.add(gid)
+        except Exception:
+            group_ids = set()
+
+        # Fallback: scan all groups when direct member listing isn't available.
+        if not group_ids:
+            try:
+                for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
+                    for g in page.get('Groups', []) or []:
+                        gid = str(g.get('GroupId') or '').strip()
+                        if not gid:
+                            continue
+                        members_page = identitystore.list_group_memberships(
+                            IdentityStoreId=identity_store_id,
+                            GroupId=gid
+                        )
+                        for m in members_page.get('GroupMemberships', []) or []:
+                            member_user_id = str(((m.get('MemberId') or {}).get('UserId')) or '').strip()
+                            if member_user_id == user_id:
+                                group_ids.add(gid)
+                                break
+            except Exception:
+                pass
+
+        for gid in group_ids:
+            keys.add(gid.lower())
+
+        if group_ids:
+            try:
+                for page in identitystore.get_paginator('list_groups').paginate(IdentityStoreId=identity_store_id):
+                    for g in page.get('Groups', []) or []:
+                        gid = str(g.get('GroupId') or '').strip()
+                        if gid and gid in group_ids:
+                            name = str(g.get('DisplayName') or '').strip().lower()
+                            if name:
+                                keys.add(name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return keys
+
+def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
+    """
+    Evaluate DB write guardrails for a specific account + DB instance.
+    Returns {'blocked': bool, 'reason': str, 'matched_rules': int}
+    """
+    if not _is_db_write_request(perms):
+        return {'blocked': False, 'reason': '', 'matched_rules': 0}
+
+    cfg = _load_guardrails_config()
+    rules = [_normalize_db_write_rule(r) for r in (cfg.get('databaseWriteControls') or [])]
+    account_id = str(account_id or '').strip()
+    db_instance_id = str(db_instance_id or '').strip()
+    user_email_l = str(user_email or '').strip().lower()
+
+    matched_rules = []
+    for rule in rules:
+        if not rule.get('enabled') or not rule.get('block_write_actions'):
+            continue
+        r_acc = str(rule.get('account_id') or '').strip()
+        r_db = str(rule.get('db_instance_id') or '').strip()
+        if r_acc and account_id and r_acc != account_id:
+            continue
+        if r_acc and not account_id:
+            continue
+        if r_db and db_instance_id and r_db != db_instance_id:
+            continue
+        if r_db and not db_instance_id:
+            continue
+        matched_rules.append(rule)
+
+    if not matched_rules:
+        return {'blocked': False, 'reason': '', 'matched_rules': 0}
+
+    allowed_users = set()
+    allowed_group_keys = set()
+    for rule in matched_rules:
+        for em in (rule.get('allowed_users') or []):
+            if em:
+                allowed_users.add(str(em).strip().lower())
+        for g in (rule.get('allowed_groups') or []):
+            gid = str((g or {}).get('id') or '').strip().lower()
+            gname = str((g or {}).get('name') or '').strip().lower()
+            if gid:
+                allowed_group_keys.add(gid)
+            if gname:
+                allowed_group_keys.add(gname)
+
+    if user_email_l and user_email_l in allowed_users:
+        return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
+
+    if allowed_group_keys:
+        local_keys = _local_group_keys_for_user(user_email_l)
+        if local_keys.intersection(allowed_group_keys):
+            return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
+        idc_keys = _identity_center_group_keys_for_user(user_email_l)
+        if idc_keys.intersection(allowed_group_keys):
+            return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
+
+    reason = ''
+    for rule in matched_rules:
+        reason = str(rule.get('reason') or '').strip()
+        if reason:
+            break
+    if not reason:
+        reason = (
+            'Write actions are blocked by database guardrails for this account and database instance. '
+            'Please contact an administrator if you need an exception.'
+        )
+    return {'blocked': True, 'reason': reason, 'matched_rules': len(matched_rules)}
 
 _READ_ONLY_DB_OPS = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
 _SENSITIVE_CLASSIFICATIONS = {'pii', 'sensitive', 'confidential', 'restricted', 'phi', 'pci'}
@@ -8631,6 +8880,17 @@ def request_database_access():
             return jsonify({
                 'error': f"Requested operations are not supported for {engine_label}: {permission_validation_error}"
             }), 400
+
+        # Guardrail: block DB write requests on selected account/instance unless requester is explicitly excepted.
+        target_instance_id = selected_instance_id or str(first_db.get('id') or '').strip()
+        write_guardrail = _evaluate_db_write_guardrail(
+            account_id=account_id,
+            db_instance_id=target_instance_id,
+            user_email=user_email,
+            perms=perms_upper
+        )
+        if write_guardrail.get('blocked'):
+            return jsonify({'error': str(write_guardrail.get('reason') or 'Write access request blocked by guardrail policy.')}), 403
 
         # Derive role from ops when not explicitly provided.
         known_roles = {'read_only', 'read_limited_write', 'read_full_write', 'admin'}

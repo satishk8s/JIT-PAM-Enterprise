@@ -2,5 +2,6 @@
   "serviceRestrictions": [],
   "deleteRestrictions": [],
   "createRestrictions": [],
-  "customGuardrails": []
+  "customGuardrails": [],
+  "databaseWriteControls": []
 }
