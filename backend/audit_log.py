@@ -43,3 +43,40 @@ def log_db_query(user_email, request_id, role, query, allowed, rows_returned=Non
         )
     except Exception:
         pass
+
+
+def log_pam_action(actor_email, action, request_id=None, details=None, ip=None):
+    """
+    Audit log for PAM-sensitive actions: approve, deny, revoke, admin changes.
+    actor_email: who performed the action; details: dict (no secrets).
+    """
+    _ensure_audit_dir()
+    ts = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    pam_file = os.path.join(AUDIT_DIR, 'pam_actions.log')
+    rid = str(request_id or '').replace('\t', ' ')
+    act = str(actor_email or '').replace('\t', ' ')
+    action_s = str(action or '').replace('\t', ' ')
+    ip_s = str(ip or '').replace('\t', ' ')
+    import json
+    det = json.dumps(details or {}, default=str)[:500] if details else ''
+    line = f"{ts}\t{act}\t{action_s}\t{rid}\t{ip_s}\t{det}\n"
+    try:
+        with open(pam_file, 'a', encoding='utf-8') as f:
+            f.write(line)
+    except Exception:
+        pass
+    try:
+        STORE.insert_audit_log(
+            ts=ts,
+            user_email=act,
+            request_id=rid or None,
+            role='',
+            action=action_s,
+            allowed=True,
+            rows_returned=None,
+            error=None,
+            query='',
+            payload=details if isinstance(details, dict) else {},
+        )
+    except Exception:
+        pass

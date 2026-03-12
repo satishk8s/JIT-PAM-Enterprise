@@ -20,12 +20,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# CORS: in production set CORS_ORIGINS (comma-separated). Leave unset for dev (allow all).
+# CORS: in production set CORS_ORIGINS (comma-separated). Strict allowlist only.
 _cors_origins = os.environ.get('CORS_ORIGINS', '').strip()
+if os.environ.get('FLASK_ENV', '').lower() == 'production' and not _cors_origins:
+    raise RuntimeError('In production CORS_ORIGINS must be set to your frontend domain(s). Example: CORS_ORIGINS=https://pam.example.com')
 if _cors_origins:
-    CORS(app, origins=[o.strip() for o in _cors_origins.split(',') if o.strip()])
+    CORS(app, origins=[o.strip() for o in _cors_origins.split(',') if o.strip()], supports_credentials=True)
 else:
-    CORS(app)
+    CORS(app, supports_credentials=True)
 
 _secret = os.environ.get('FLASK_SECRET_KEY', 'change-this-in-production')
 if _secret == 'change-this-in-production' and os.environ.get('FLASK_ENV', '').lower() == 'production':
@@ -35,7 +37,20 @@ if _secret == 'change-this-in-production' and os.environ.get('FLASK_ENV', '').lo
     )
 app.secret_key = _secret
 
-# ----- SAML (AWS IAM Identity Center) -----
+# Secure cookies (Security Baseline): HttpOnly, Secure in prod, SameSite
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = (os.environ.get('FLASK_ENV', '').lower() == 'production')
+
+# Security: headers, rate limiting, CSRF (production-grade)
+try:
+    from security import apply_security_headers, init_rate_limit, init_csrf, rate_limit_exempt
+    apply_security_headers(app)
+    init_rate_limit(app)
+    init_csrf(app)
+    _rate_limit_exempt = rate_limit_exempt
+except ImportError:
+    _rate_limit_exempt = lambda f: f  # no-op if security.py missing
 try:
     from onelogin.saml2.auth import OneLogin_Saml2_Auth
     from onelogin.saml2.idp_metadata_parser import OneLogin_Saml2_IdPMetadataParser
@@ -1923,6 +1938,7 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
 
 @app.route('/health')
 @app.route('/api/health')
+@_rate_limit_exempt
 def health():
     return jsonify({'status': 'ok', 'service': 'npam-backend'})
 
@@ -2286,7 +2302,7 @@ def enforce_admin_api_access():
     - Current identity present in PAM admins list
     """
     path = str(request.path or '').strip()
-    if not path.startswith('/api/admin/'):
+    if not path.startswith('/api/admin/') and not path.startswith('/api/v1/admin/'):
         return None
 
     # CORS preflight should pass through.
@@ -2294,7 +2310,7 @@ def enforce_admin_api_access():
         return None
 
     # This endpoint is used by frontend to determine role and should remain callable.
-    if path == '/api/admin/check-pam-admin':
+    if path == '/api/admin/check-pam-admin' or path == '/api/v1/admin/check-pam-admin':
         return None
 
     ident = _current_request_identity()
@@ -3371,6 +3387,12 @@ def deny_request(request_id):
     access_request['denied_at'] = datetime.now().isoformat()
     access_request['denial_reason'] = data.get('reason', 'Denied by approver')
     _save_requests()
+    try:
+        from audit_log import log_pam_action
+        actor = _email_from_saml_session() or request.headers.get('X-Forwarded-For', request.remote_addr or '')[:64]
+        log_pam_action(actor, 'request_denied', request_id=request_id, details={'reason': data.get('reason', '')}, ip=request.remote_addr)
+    except Exception:
+        pass
     return jsonify({'status': 'denied', 'message': 'Request denied'})
 
 @app.route('/api/request/<request_id>/delete', methods=['DELETE'])
@@ -3437,6 +3459,12 @@ def revoke_access(request_id):
         access_request['password'] = ''
         access_request['db_password'] = ''
         _save_requests()
+        try:
+            from audit_log import log_pam_action
+            actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+            log_pam_action(actor, 'request_revoked', request_id=request_id, details={'reason': revoke_reason, 'type': 'database_access'}, ip=request.remote_addr)
+        except Exception:
+            pass
         return jsonify({
             'status': 'revoked',
             'message': f'Database access revoked. Reason: {revoke_reason}',
@@ -3504,6 +3532,12 @@ def revoke_access(request_id):
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
         
+        try:
+            from audit_log import log_pam_action
+            actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+            log_pam_action(actor, 'request_revoked', request_id=request_id, details={'reason': revoke_reason, 'type': 'instance_access'}, ip=request.remote_addr)
+        except Exception:
+            pass
         return jsonify({
             'status': 'revoked',
             'message': f'❌ Access revoked successfully. Reason: {revoke_reason}',
@@ -3653,6 +3687,12 @@ def approve_request(request_id):
             approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
             if effective_auth == 'iam':
                 approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Login details (expires in ~15 minutes).'
+            try:
+                from audit_log import log_pam_action
+                actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+                log_pam_action(actor, 'request_approved', request_id=request_id, details={'type': 'database_access', 'approver_role': role_norm}, ip=request.remote_addr)
+            except Exception:
+                pass
             return jsonify({
                 'status': access_request.get('status', 'active'),
                 'message': approved_msg,
@@ -9686,6 +9726,13 @@ def execute_database_query():
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+# Register versioned API (v1) – delegates to existing views; legacy /api/... still works
+try:
+    from api.v1_proxies import register_v1_proxies
+    register_v1_proxies(app)
+except Exception as e:
+    print("Warning: v1 API registration skipped:", e)
 
 # Initialize on startup
 if __name__ == '__main__':
