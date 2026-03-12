@@ -1,7 +1,4 @@
-<<<<<<< HEAD
-# JIT-For-everything
-=======
-# JIT Access System
+# Nykaa PAM – JIT Access System
 
 AI-powered Just-In-Time access management for AWS SSO with approval workflows.
 
@@ -15,21 +12,19 @@ AI-powered Just-In-Time access management for AWS SSO with approval workflows.
 ## Quick Start
 ```bash
 # Backend
-pip install -r requirements.txt
-python app.py
+cd backend && pip install -r requirements.txt && python app.py
 
 # Frontend
-Open frontend/index.html in browser
+Open frontend/index.html in browser (or serve via nginx; see scripts/configure-nginx-git.sh)
 ```
 
 ## Production Deployment
-- Use `aws-infrastructure-setup.py` for AWS resources
-- Use `dynamodb_setup.py` for DynamoDB tables
-- Configure Secrets Manager with your SSO details
+- Set env from `scripts/npamx.env.example` (e.g. `/etc/npamx/npamx.env`)
+- Use `scripts/setup-auto-deploy.sh` on EC2; nginx via `scripts/configure-nginx-git.sh`
+- Use `scripts/setup-auto-deploy.sh` on EC2; nginx via `scripts/configure-nginx-git.sh`
 
 ## Configuration
 Update these in your environment:
-- SSO Instance ARN
-- Identity Store ID
-- Bedrock Cross-Account Role ARN
->>>>>>> f98743f (Initial commit: JIT Access System with AI-powered AWS permissions)
+- SSO Instance ARN, Identity Store ID
+- Vault (VAULT_ADDR, VAULT_ROLE_ID, VAULT_SECRET_ID)
+- APP_BASE_URL, CORS_ORIGINS, FLASK_SECRET_KEY for production
