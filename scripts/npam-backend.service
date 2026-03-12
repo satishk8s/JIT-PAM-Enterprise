@@ -8,9 +8,10 @@ User=root
 # WorkingDirectory and ExecStart are set by setup-auto-deploy.sh to match clone path
 WorkingDirectory=/root/JIT-PAM-Enterprise/backend
 ExecStart=/root/JIT-PAM-Enterprise/backend/run-backend-on-ec2.sh
-# Optional environment file for Vault/Proxy settings (recommended).
-# Create: /etc/npamx/npamx.env (chmod 600)
+# Optional environment file for Vault/Proxy/production settings (recommended).
+# Create: /etc/npamx/npamx.env (chmod 600). Do NOT set DB_ADMIN_PASSWORD in this file in production.
 EnvironmentFile=-/etc/npamx/npamx.env
+# Dev/default only: remove or override in npamx.env for production
 Environment="DB_ADMIN_USER=admin"
 Environment="DB_ADMIN_PASSWORD=admin123"
 Environment="USE_DB_PROXY=true"

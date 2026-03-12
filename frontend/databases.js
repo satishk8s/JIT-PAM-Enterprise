@@ -7,7 +7,7 @@ let dbConversationId = null;
 let selectedEngine = null;
 let dbRequestDraft = null;
 let dbStatusFilter = 'active';
-let dbStepState = null; // { step: 1|2, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
+let dbStepState = null; // { step: 1|2|3|4, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 let dbAccessMode = 'ai'; // 'ai' | 'structured'
 let dbStructuredPermissions = [];
 const dbCredCache = {}; // requestId -> { data, fetchedAt }
@@ -460,6 +460,28 @@ async function renderDbStepContent() {
                         <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('reporting')">reporting</button>
                     </div>
                     <small class="db-step-hint">Enter the database name inside the instance. Multiple databases: comma-separated.</small>
+                </div>
+            `;
+        } else if (step === 4 && useChatFlow) {
+            const dbNames = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
+            const dbLabel = dbNames.length ? dbNames.join(', ') : (dbRequestDraft?.db_name || 'selected database');
+            const existingTables = Array.isArray(dbRequestDraft?.requested_tables)
+                ? dbRequestDraft.requested_tables.join(', ')
+                : '';
+            content.innerHTML = `
+                <div class="db-step-field">
+                    <label>Table Name(s) in ${escapeHtml(dbLabel)}</label>
+                    <div class="db-step-dbname-shell">
+                        <i class="fas fa-layer-group"></i>
+                        <input type="text" id="dbStepTableName" placeholder="e.g. customers, orders" class="db-step-input" value="${escapeAttr(existingTables)}">
+                    </div>
+                    <div class="db-step-dbname-suggestions">
+                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('customers')">customers</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('orders')">orders</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('transactions')">transactions</button>
+                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('all')">all</button>
+                    </div>
+                    <small class="db-step-hint">Mention table name(s) to scope your request. Multiple tables: comma-separated.</small>
                 </div>
             `;
         } else if (step === 2 && !useChatFlow) {
@@ -926,6 +948,22 @@ function applyDbNameSuggestion(name) {
     input.focus();
 }
 
+function applyDbTableSuggestion(name) {
+    const input = document.getElementById('dbStepTableName');
+    if (!input || !name) return;
+    const existing = (input.value || '').trim();
+    if (!existing) {
+        input.value = name;
+    } else {
+        const values = existing.split(',').map(s => s.trim()).filter(Boolean);
+        if (!values.includes(name)) {
+            values.push(name);
+            input.value = values.join(', ');
+        }
+    }
+    input.focus();
+}
+
 function updateDbStepNextButton() {
     const btn = document.getElementById('dbStepNextBtn');
     if (!btn || !dbStepState || !selectedEngine) return;
@@ -937,6 +975,7 @@ function updateDbStepNextButton() {
     if (provider === 'aws' && useChatFlow) {
         if (step === 1) label = 'Next: Instance';
         else if (step === 2) label = 'Next: Database Name';
+        else if (step === 3) label = 'Next: Table(s)';
         else label = finalLabel;
     } else if (provider === 'aws' && !useChatFlow) {
         label = step === 1 ? 'Next: Databases' : finalLabel;
@@ -1032,6 +1071,19 @@ async function dbStepNext() {
                 alert('Please enter at least one database name.');
                 return;
             }
+            dbRequestDraft.db_name = dbNames.join(', ');
+            dbStepState.step = 4;
+            renderDbStepContent();
+            return;
+        }
+        if (step === 4 && useChatFlow) {
+            const tableInput = document.getElementById('dbStepTableName')?.value?.trim() || '';
+            const tables = tableInput.split(',').map(s => s.trim()).filter(Boolean);
+            if (tables.length === 0) {
+                alert('Please mention at least one table name (or "all").');
+                return;
+            }
+            dbRequestDraft.requested_tables = tables;
             transitionToDbFinalPanel();
             return;
         }
@@ -1242,8 +1294,13 @@ function initDbChatWithPrompts(label, engine) {
     const chat = document.getElementById('dbAiChat');
     const quickPrompts = document.getElementById('dbAiQuickPrompts');
     const dbNames = selectedDatabases?.map(d => d.name).join(', ') || 'database';
+    const tableNames = Array.isArray(dbRequestDraft.requested_tables) && dbRequestDraft.requested_tables.length
+        ? dbRequestDraft.requested_tables.join(', ')
+        : '';
     if (chat) chat.innerHTML = '';
-    const msg = `Great, ${dbNames} is selected. What do you need to do (debug errors, check schema, or fix data)?`;
+    const msg = tableNames
+        ? `Great, ${dbNames} and table(s) ${tableNames} are selected. What do you need to do (debug errors, check schema, or fix data)?`
+        : `Great, ${dbNames} is selected. What do you need to do (debug errors, check schema, or fix data)?`;
     appendDbChatMessage({ role: 'assistant', rawText: msg, htmlContent: renderDbRichText(msg), cssClass: 'db-ai-welcome' });
     if (quickPrompts) {
         quickPrompts.style.display = 'none';
@@ -1526,6 +1583,8 @@ function initDbDurationMode() {
 
 function resetStructuredDbRequest() {
     dbStructuredPermissions = [];
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.requested_tables = [];
     const dur = document.getElementById('dbStructuredDuration');
     const just = document.getElementById('dbStructuredJustification');
     const modeHours = document.getElementById('dbDurationModeHours');
@@ -1589,6 +1648,9 @@ function hydrateStructuredSummary() {
     if (!summary) return;
     const dbs = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
     const dbNames = dbs.length ? dbs.join(', ') : (dbRequestDraft?.db_name || 'default');
+    const tableNames = Array.isArray(dbRequestDraft?.requested_tables) && dbRequestDraft.requested_tables.length
+        ? dbRequestDraft.requested_tables.join(', ')
+        : '—';
     const durationDisplay = getDbStructuredDurationDisplay();
     const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
     const role = deriveStructuredRole(dbStructuredPermissions);
@@ -1598,6 +1660,7 @@ function hydrateStructuredSummary() {
         <div class="db-structured-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine?.label || 'Database')}</span>
             <span><strong>Database(s):</strong> ${escapeHtml(dbNames)}</span>
+            <span><strong>Table(s):</strong> ${escapeHtml(tableNames)}</span>
             <span><strong>Selected Queries:</strong> ${escapeHtml(ops)}</span>
             <span><strong>Role:</strong> ${escapeHtml(getDbRoleLabel(role))}</span>
             <span><strong>Duration:</strong> ${escapeHtml(durationDisplay)}</span>
@@ -1665,6 +1728,7 @@ async function submitStructuredDbRequest() {
         db_username: userEmail.split('@')[0],
         permissions: dbStructuredPermissions,
         query_types,
+        requested_tables: Array.isArray(dbRequestDraft.requested_tables) ? dbRequestDraft.requested_tables : [],
         role,
         duration_hours: duration,
         justification,
@@ -2116,6 +2180,9 @@ function showDbRequestSummaryIfReady() {
     const duration = dbRequestDraft.duration_hours || 2;
     const reason = String(dbRequestDraft.justification || '').trim();
     const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
+    const tables = Array.isArray(dbRequestDraft.requested_tables) && dbRequestDraft.requested_tables.length
+        ? dbRequestDraft.requested_tables.join(', ')
+        : '—';
     const operations = permissionsText || (dbRequestDraft.role === 'read_only'
         ? 'SELECT'
         : dbRequestDraft.role === 'read_limited_write'
@@ -2131,6 +2198,7 @@ function showDbRequestSummaryIfReady() {
         <div class="db-ai-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine.label)}</span>
             <span><strong>Databases:</strong> ${escapeHtml(databases)}</span>
+            <span><strong>Tables:</strong> ${escapeHtml(tables)}</span>
             <span><strong>Operations:</strong> ${escapeHtml(operations)}</span>
             <span><strong>Role:</strong> ${escapeHtml(role)}</span>
             <span><strong>Reason:</strong> ${escapeHtml(reason)}</span>
@@ -2214,6 +2282,7 @@ async function submitDbRequestViaAi(opts = {}) {
                 db_username: userEmail.split('@')[0],
                 permissions: dbRequestDraft.permissions || '',
                 query_types: Array.isArray(dbRequestDraft.query_types) ? dbRequestDraft.query_types : [],
+                requested_tables: Array.isArray(dbRequestDraft.requested_tables) ? dbRequestDraft.requested_tables : [],
                 role: dbRequestDraft.role || 'custom',
                 duration_hours: dbRequestDraft.duration_hours || 2,
                 justification,

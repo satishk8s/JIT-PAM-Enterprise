@@ -24,8 +24,8 @@ Type=simple
 User=root
 WorkingDirectory=$BACKEND_DIR
 ExecStart=$BACKEND_DIR/run-backend-on-ec2.sh
-# Optional environment file for Vault/Proxy settings (recommended).
-# Create: /etc/npamx/npamx.env (chmod 600)
+# Optional environment file for Vault/Proxy/production settings (recommended).
+# Create: /etc/npamx/npamx.env (chmod 600). Override DB_ADMIN_* in production.
 EnvironmentFile=-/etc/npamx/npamx.env
 Environment="DB_ADMIN_USER=admin"
 Environment="DB_ADMIN_PASSWORD=admin123"

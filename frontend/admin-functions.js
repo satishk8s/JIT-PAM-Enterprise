@@ -719,6 +719,16 @@ function _countHierarchyAccounts(rootNode) {
     return count;
 }
 
+function _sortNodesByName(nodes) {
+    var arr = Array.isArray(nodes) ? nodes.slice() : [];
+    arr.sort(function(a, b) {
+        var an = String((a && (a.name || a.id)) || '').toLowerCase();
+        var bn = String((b && (b.name || b.id)) || '').toLowerCase();
+        return an.localeCompare(bn);
+    });
+    return arr;
+}
+
 function _renderAwsIdcAccountPermissionSets(accountId, targetId) {
     var target = document.getElementById(targetId);
     if (!target) return;
@@ -776,11 +786,11 @@ function _renderAwsIdcOuNode(ou, depth, openState) {
     var effective = _normalizeEnvOption(ou.effective_environment || 'nonprod') || 'nonprod';
     var childrenHtml = '';
 
-    var childOus = Array.isArray(ou.ous) ? ou.ous : [];
+    var childOus = _sortNodesByName(Array.isArray(ou.ous) ? ou.ous : []);
     childOus.forEach(function(child) {
         childrenHtml += _renderAwsIdcOuNode(child, depth + 1, openState);
     });
-    var accounts = Array.isArray(ou.accounts) ? ou.accounts : [];
+    var accounts = _sortNodesByName(Array.isArray(ou.accounts) ? ou.accounts : []);
     accounts.forEach(function(acc) {
         childrenHtml += _renderAwsIdcAccountNode(acc, depth + 1);
     });
@@ -823,7 +833,7 @@ function _renderAwsIdcOrgHierarchy(payload) {
             + '</div>';
     }
 
-    var roots = Array.isArray(payload && payload.roots) ? payload.roots : [];
+    var roots = _sortNodesByName(Array.isArray(payload && payload.roots) ? payload.roots : []);
     if (!roots.length) {
         summaryEl.textContent = 'No organization/account data returned.';
         treeEl.innerHTML = warningHtml + '<p class="text-muted">No hierarchy data found.</p>';
@@ -836,6 +846,9 @@ function _renderAwsIdcOrgHierarchy(payload) {
     var orgKey = _treeNodeKey('org', orgId, orgName);
     var totalAccounts = roots.reduce(function(sum, r) { return sum + _countHierarchyAccounts(r); }, 0);
     summaryEl.textContent = 'Organizations: ' + (orgId ? 1 : 0) + ' | Roots: ' + roots.length + ' | Accounts: ' + totalAccounts;
+    if (payload && payload.cached) {
+        summaryEl.textContent += ' | Source: cached hierarchy';
+    }
 
     var rootHtml = roots.map(function(root) {
         var rootId = String(root.id || '').trim();
@@ -845,9 +858,9 @@ function _renderAwsIdcOrgHierarchy(payload) {
         var rootEffective = _normalizeEnvOption(root.effective_environment || 'nonprod') || 'nonprod';
 
         var childrenHtml = '';
-        var ous = Array.isArray(root.ous) ? root.ous : [];
+        var ous = _sortNodesByName(Array.isArray(root.ous) ? root.ous : []);
         ous.forEach(function(ou) { childrenHtml += _renderAwsIdcOuNode(ou, 1, openState); });
-        var directAccounts = Array.isArray(root.accounts) ? root.accounts : [];
+        var directAccounts = _sortNodesByName(Array.isArray(root.accounts) ? root.accounts : []);
         directAccounts.forEach(function(acc) { childrenHtml += _renderAwsIdcAccountNode(acc, 1); });
         if (!childrenHtml) childrenHtml = '<p class="text-muted">No accounts under this root.</p>';
 

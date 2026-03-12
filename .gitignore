@@ -39,6 +39,8 @@ credentials
 *.backup
 
 # Plans, docs, discussions (not needed for app runtime)
+# All docs/PDFs live in documents/ – folder excluded so only app code is pushed/pulled
+documents/
 docs/
 *.docx
 *.pdf

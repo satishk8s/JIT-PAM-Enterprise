@@ -27,7 +27,7 @@
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
     <link rel="preload" href="enterprise-theme.css?v=13" as="style">
-    <link rel="preload" href="styles.css?v=14" as="style">
+    <link rel="preload" href="styles.css?v=15" as="style">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet" crossorigin>
     <!-- xterm.css loaded on-demand when SSH terminal opened -->
     <link href="calendar.css" rel="stylesheet">
@@ -35,7 +35,7 @@
     <link href="toggle-switch.css" rel="stylesheet">
     <link href="s3-explorer.css" rel="stylesheet">
     <link href="enterprise-theme.css?v=13" rel="stylesheet">
-    <link href="styles.css?v=14" rel="stylesheet">
+    <link href="styles.css?v=15" rel="stylesheet">
     <link href="design-system.css" rel="stylesheet">
     <link href="dark-theme-fix.css" rel="stylesheet">
     <link href="security-ui.css?v=9" rel="stylesheet">
@@ -281,7 +281,7 @@
                     <div class="nav-category" id="navCategoryDatabasesAccess">Databases</div>
                     <div class="nav-item" id="navItemDatabasesStructured" onclick="openStructuredDatabaseAccess()">
                         <i class="fas fa-sliders"></i>
-                        <span>Database Access (Structured)</span>
+                        <span>Database Access</span>
                     </div>
                     
                     <div class="nav-category" id="navCategoryTerminalAccess">Terminal</div>
@@ -1035,8 +1035,8 @@
                         <div class="db-info-sections">
                             <div class="db-info-section">
                                 <h4>How To Place A Request</h4>
-                                <p>Select engine, account, instance, and database name.</p>
-                                <p>Then use <strong>AI Guided</strong> chat or <strong>Structured</strong> permission selection, add duration and reason, and submit for approval.</p>
+                                <p>Select engine, account, instance, database, and table.</p>
+                                <p>Then use <strong>AI Guided</strong> chat or permissions selection, add duration and reason, and submit for approval.</p>
                             </div>
                             <div class="db-info-section">
                                 <h4>Approval Matrix</h4>
@@ -1093,7 +1093,7 @@
                             </div>
                             <div id="dbStructuredPanel" class="db-structured-panel db-structured-panel-hidden">
                                 <div class="db-structured-header">
-                                    <h3>Database Access (Structured) — <span id="dbStructuredEngineLabel">Select an engine</span></h3>
+                                    <h3>Database Access — <span id="dbStructuredEngineLabel">Select an engine</span></h3>
                                     <button class="btn-icon" onclick="closeDbStructuredPanel()" title="Close"><i class="fas fa-times"></i></button>
                                 </div>
                                 <div class="db-structured-body">
@@ -2727,23 +2727,23 @@
                             </div>
 
                             <!-- AI Guardrail Generator -->
-                            <div class="guardrails-ai-banner" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 20px; margin-bottom: 30px; color: white;">
-                                <h4 style="margin: 0 0 10px 0; display: flex; align-items: center; gap: 10px;">
-                                    <i class="fas fa-robot" style="font-size: 24px;"></i>
+                            <div class="guardrails-ai-banner">
+                                <h4 class="guardrails-ai-title">
+                                    <i class="fas fa-robot"></i>
                                     AI-Powered Guardrail Generator
                                 </h4>
-                                <p style="margin: 0 0 15px 0; font-size: 13px; opacity: 0.9;">Describe your security requirements in natural language, and AI will generate appropriate guardrails</p>
-                                <div style="display: flex; gap: 10px;">
-                                    <textarea id="aiGuardrailInput" placeholder="Example: Block all delete operations on production KMS keys and Secrets Manager" rows="2" style="flex: 1; padding: 12px; border: none; border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 13px; resize: none;"></textarea>
-                                    <button onclick="generateAIGuardrail()" class="btn-primary" style="padding: 12px 24px; background: white; color: #667eea; border: none; border-radius: 8px; font-weight: 600; cursor: pointer;">
+                                <p class="guardrails-ai-subtitle">Describe your security requirements in natural language, and AI will generate appropriate guardrails</p>
+                                <div class="guardrails-ai-input-row">
+                                    <textarea id="aiGuardrailInput" class="guardrails-ai-input" placeholder="Example: Block all delete operations on production KMS keys and Secrets Manager" rows="2"></textarea>
+                                    <button onclick="generateAIGuardrail()" class="btn-primary btn-pam guardrails-ai-generate">
                                         <i class="fas fa-magic"></i> Generate
                                 </button>
                             </div>
-                                <small style="display: block; margin-top: 10px; opacity: 0.8;"><i class="fas fa-lock"></i> MFA verification required for AI-generated guardrails</small>
+                                <small class="guardrails-ai-note"><i class="fas fa-lock"></i> MFA verification required for AI-generated guardrails</small>
                             </div>
 
                             <!-- Guardrail Type 1: Service Access Control -->
-                            <div class="guardrail-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                            <div class="guardrail-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
                                     <div>
                                         <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
@@ -2779,7 +2779,7 @@
                             </div>
 
                             <!-- Guardrail Type 2: Delete Operation Restrictions -->
-                            <div class="guardrail-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                            <div class="guardrail-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
                                     <div>
                                         <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
@@ -2791,7 +2791,7 @@
                                         <i class="fas fa-plus"></i> Add Rule
                                     </button>
                                 </div>
-                                <div style="background: #ffebee; border: 1px solid #f44336; border-radius: 8px; padding: 12px; margin-bottom: 15px; font-size: 12px;">
+                                <div class="guardrail-inline-alert guardrail-inline-alert-danger">
                                     <strong><i class="fas fa-exclamation-triangle"></i> Warning:</strong> Delete operations are irreversible. Consider blocking delete permissions for production databases, S3 buckets with critical data, and KMS keys.
                                 </div>
                                 <div id="deleteRestrictionsList" style="display: flex; flex-direction: column; gap: 10px;">
@@ -2816,7 +2816,7 @@
                             </div>
 
                             <!-- Guardrail Type 3: Create Operation Restrictions -->
-                            <div class="guardrail-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                            <div class="guardrail-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
                                     <div>
                                         <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
@@ -2853,7 +2853,7 @@
                             </div>
 
                             <!-- Guardrail Type 4: Custom Guardrails -->
-                            <div class="guardrail-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                            <div class="guardrail-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
                                     <div>
                                         <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
@@ -2880,7 +2880,7 @@
                             </div>
 
                             <!-- Guardrail Type 5: Database Write Access Controls -->
-                            <div class="guardrail-card guardrail-db-write-card" style="background: var(--bg-secondary); border: 1.5px solid var(--border-color); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+                            <div class="guardrail-card guardrail-db-write-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; gap: 12px; flex-wrap: wrap;">
                                     <div>
                                         <h4 style="margin: 0 0 5px 0; color: var(--text-primary); font-size: 15px;">
@@ -3022,13 +3022,13 @@
     <script src="policy-toggles.js" defer></script>
     <script src="policy-builder.js" defer></script>
     <script src="feature-management.js?v=7" defer></script>
-    <script src="admin-functions.js?v=7" defer></script>
+    <script src="admin-functions.js?v=8" defer></script>
     <script src="security-management.js" defer></script>
-    <script src="guardrails.js?v=8" defer></script>
+    <script src="guardrails.js?v=9" defer></script>
     <script src="request-drafts.js" defer></script>
     <script src="account-tagging.js" defer></script>
     <script src="instances.js?v=2" defer></script>
-    <script src="databases.js?v=32" defer></script>
+    <script src="databases.js?v=33" defer></script>
     <script src="terminal-page.js?v=7" defer></script>
     <script src="s3-explorer.js" defer></script>
     <script src="security-ui-helpers.js?v=2" defer></script>

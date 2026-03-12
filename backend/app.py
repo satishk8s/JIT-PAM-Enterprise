@@ -19,8 +19,21 @@ from persistence import NpamxStore
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-this-in-production')
+
+# CORS: in production set CORS_ORIGINS (comma-separated). Leave unset for dev (allow all).
+_cors_origins = os.environ.get('CORS_ORIGINS', '').strip()
+if _cors_origins:
+    CORS(app, origins=[o.strip() for o in _cors_origins.split(',') if o.strip()])
+else:
+    CORS(app)
+
+_secret = os.environ.get('FLASK_SECRET_KEY', 'change-this-in-production')
+if _secret == 'change-this-in-production' and os.environ.get('FLASK_ENV', '').lower() == 'production':
+    raise RuntimeError(
+        'Refusing to start in production with default FLASK_SECRET_KEY. '
+        'Set FLASK_SECRET_KEY in the environment (e.g. in /etc/npamx/npamx.env).'
+    )
+app.secret_key = _secret
 
 # ----- SAML (AWS IAM Identity Center) -----
 try:
@@ -49,11 +62,14 @@ def init_saml_auth(req):
         idp_data = OneLogin_Saml2_IdPMetadataParser.parse(f.read())
     settings = idp_data.copy()
     settings['strict'] = False
-    settings['debug'] = True
+    settings['debug'] = os.environ.get('SAML_DEBUG', 'false').strip().lower() in ('1', 'true', 'yes')
     settings.setdefault('sp', {})
     settings['sp']['entityId'] = 'pam-flask-app'
+    # ACS URL from env for production (e.g. APP_BASE_URL=https://pam.example.com)
+    acs_base = os.environ.get('APP_BASE_URL', '').strip().rstrip('/') or 'http://52.66.172.182'
+    acs_url = f'{acs_base}/saml/acs'
     settings['sp']['assertionConsumerService'] = {
-        'url': 'http://52.66.172.182/saml/acs',
+        'url': acs_url,
         'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
     }
     return OneLogin_Saml2_Auth(req, settings)
@@ -281,6 +297,7 @@ identity_center_synced_groups = []
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
 FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
 ORG_HIERARCHY_TAGS_PATH = os.getenv('ORG_HIERARCHY_TAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_tags.json')
+ORG_HIERARCHY_CACHE_PATH = os.getenv('ORG_HIERARCHY_CACHE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_cache.json')
 GUARDRAILS_CONFIG_PATH = os.getenv('GUARDRAILS_CONFIG_PATH') or os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
 LOCAL_USER_GROUPS_PATH = os.getenv('LOCAL_USER_GROUPS_PATH') or os.path.join(os.path.dirname(__file__), 'user_groups.json')
 
@@ -754,6 +771,41 @@ def _save_org_hierarchy_tags(tags):
     with open(ORG_HIERARCHY_TAGS_PATH, 'w') as f:
         json.dump(cleaned, f, indent=2)
     return cleaned
+
+
+def _load_org_hierarchy_cache():
+    out = {'organization': {}, 'roots': [], 'errors': [], 'tags': _load_org_hierarchy_tags(), 'cached': False}
+    try:
+        if os.path.exists(ORG_HIERARCHY_CACHE_PATH):
+            with open(ORG_HIERARCHY_CACHE_PATH, 'r') as f:
+                data = json.load(f) or {}
+            if isinstance(data, dict):
+                org = data.get('organization') if isinstance(data.get('organization'), dict) else {}
+                roots = data.get('roots') if isinstance(data.get('roots'), list) else []
+                errors = data.get('errors') if isinstance(data.get('errors'), list) else []
+                out = {
+                    'organization': org,
+                    'roots': roots,
+                    'errors': errors,
+                    'tags': _load_org_hierarchy_tags(),
+                    'cached': True,
+                    'cached_at': str(data.get('cached_at') or ''),
+                }
+    except Exception:
+        pass
+    return out
+
+
+def _save_org_hierarchy_cache(payload):
+    clean = {
+        'organization': payload.get('organization') if isinstance(payload.get('organization'), dict) else {},
+        'roots': payload.get('roots') if isinstance(payload.get('roots'), list) else [],
+        'errors': payload.get('errors') if isinstance(payload.get('errors'), list) else [],
+        'cached_at': datetime.now().isoformat(),
+    }
+    os.makedirs(os.path.dirname(ORG_HIERARCHY_CACHE_PATH) or '.', exist_ok=True)
+    with open(ORG_HIERARCHY_CACHE_PATH, 'w') as f:
+        json.dump(clean, f, indent=2)
 
 
 def _effective_env_from_tags(account_id='', ou_chain=None, root_id='', fallback='nonprod', tags=None):
@@ -2397,6 +2449,8 @@ def get_permission_sets():
 
 @app.route('/api/debug/find-user/<email>', methods=['GET'])
 def debug_find_user(email):
+    if os.environ.get('FLASK_ENV', '').lower() == 'production' or os.environ.get('DISABLE_DEBUG_ROUTES', '').strip() in ('1', 'true', 'yes'):
+        return jsonify({'error': 'Not Found'}), 404
     try:
         identitystore = _identitystore_client()
         results = {}
@@ -3073,13 +3127,18 @@ def get_database_requests():
     if page_size > 100:
         page_size = 100
 
-    proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
     items = []
     for req_id, req in requests_db.items():
         if not isinstance(req, dict) or req.get('type') != 'database_access':
             continue
         if str(req.get('user_email') or '').strip().lower() != user_email.lower():
             continue
+        req_account_env = _request_account_env(req)
+        req_plane = _request_execution_plane(req)
+        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+            account_env=req_account_env,
+            execution_plane=req_plane
+        )
 
         lifecycle = str(req.get('status', '') or '').strip().lower()
         expires_at = str(req.get('expires_at', '') or '').strip()
@@ -3129,6 +3188,13 @@ def get_database_requests():
             perms_text = ",".join([str(p) for p in perms if str(p).strip()])
         else:
             perms_text = ""
+        tables = req.get('requested_tables', [])
+        if isinstance(tables, str):
+            tables_text = tables
+        elif isinstance(tables, list):
+            tables_text = ",".join([str(t) for t in tables if str(t).strip()])
+        else:
+            tables_text = ""
 
         search_hay = " ".join(
             [
@@ -3137,6 +3203,7 @@ def get_database_requests():
                 str(req.get('db_instance_id') or '').lower(),
                 str(req.get('db_resource_id') or '').lower(),
                 " ".join(db_names_for_search),
+                str(tables_text).lower(),
                 str(perms_text).lower(),
                 str(req.get('role') or '').lower(),
                 str(req.get('user_email') or '').lower(),
@@ -3159,9 +3226,12 @@ def get_database_requests():
             'databases': safe_dbs,
             'proxy_host': proxy_host,
             'proxy_port': proxy_port,
+            'execution_plane': req_plane,
+            'account_env': req_account_env,
             'role': req.get('role', 'read_only'),
             'permissions': req.get('permissions', []),
             'query_types': req.get('query_types', []),
+            'requested_tables': req.get('requested_tables', []),
             'effective_auth': req.get('effective_auth', 'password'),
             'auth_mode': req.get('auth_mode', 'password_only'),
             'duration_hours': req.get('duration_hours', 2),
@@ -3341,10 +3411,14 @@ def revoke_access(request_id):
 
     # Database access: revoke by full lease_id when present; Vault runs revocation_statements. If no lease_id, still mark revoked so UI updates.
     if access_request.get('type') == 'database_access':
+        req_account_env = _request_account_env(access_request)
+        req_plane = _request_execution_plane(access_request)
+        access_request['account_env'] = req_account_env
+        access_request['execution_plane'] = req_plane
         lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
         if lease_id:
             try:
-                VaultManager.revoke_lease(lease_id)
+                VaultManager.revoke_lease(lease_id, plane=req_plane)
             except Exception as e:
                 print(f"Vault lease revoke failed for {request_id}: {e}")
                 return jsonify({'error': f'Vault revoke failed: {e}'}), 502
@@ -3494,10 +3568,14 @@ def admin_revoke_database_sessions():
         if status not in ('active', 'approved'):
             failed.append({'request_id': req_id, 'error': 'not_active'})
             continue
+        req_account_env = _request_account_env(req)
+        req_plane = _request_execution_plane(req)
+        req['account_env'] = req_account_env
+        req['execution_plane'] = req_plane
         lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
         if lease_id:
             try:
-                VaultManager.revoke_lease(lease_id)
+                VaultManager.revoke_lease(lease_id, plane=req_plane)
             except Exception as e:
                 err_str = str(e)
                 if '403' in err_str or 'permission denied' in err_str.lower():
@@ -5024,10 +5102,14 @@ def background_cleanup():
                         # Vault handles revocation automatically via lease TTL. We only:
                         # 1) best-effort revoke the lease early (optional)
                         # 2) mark request expired in NPAMX and clear sensitive fields
+                        req_account_env = _request_account_env(access_request)
+                        req_plane = _request_execution_plane(access_request)
+                        access_request['account_env'] = req_account_env
+                        access_request['execution_plane'] = req_plane
                         lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
                         if lease_id:
                             try:
-                                VaultManager.revoke_lease(lease_id)
+                                VaultManager.revoke_lease(lease_id, plane=req_plane)
                             except Exception:
                                 pass
                         try:
@@ -5208,14 +5290,36 @@ def list_identity_center_org_hierarchy():
         org_client = _organizations_client()
         payload = _build_org_hierarchy_tree(org_client)
         payload['tags'] = _load_org_hierarchy_tags()
+        if isinstance(payload.get('roots'), list) and payload['roots']:
+            payload['cached'] = False
+            _save_org_hierarchy_cache(payload)
+            return jsonify(payload)
+
+        # If live pull returned empty roots, fall back to last successful hierarchy.
+        cached = _load_org_hierarchy_cache()
+        if isinstance(cached.get('roots'), list) and cached['roots']:
+            live_errors = payload.get('errors') if isinstance(payload.get('errors'), list) else []
+            cached_errors = cached.get('errors') if isinstance(cached.get('errors'), list) else []
+            cached['errors'] = list(cached_errors) + list(live_errors) + ['Using cached organization hierarchy due to live fetch issue.']
+            cached['tags'] = payload.get('tags') or _load_org_hierarchy_tags()
+            cached['cached'] = True
+            return jsonify(cached)
         return jsonify(payload)
     except Exception as e:
+        cached = _load_org_hierarchy_cache()
+        if isinstance(cached.get('roots'), list) and cached['roots']:
+            existing_errors = cached.get('errors') if isinstance(cached.get('errors'), list) else []
+            cached['errors'] = list(existing_errors) + [f'live_fetch_error: {e}']
+            cached['tags'] = _load_org_hierarchy_tags()
+            cached['cached'] = True
+            return jsonify(cached)
         return jsonify({
             'error': str(e),
             'organization': {},
             'roots': [],
             'errors': [str(e)],
-            'tags': _load_org_hierarchy_tags()
+            'tags': _load_org_hierarchy_tags(),
+            'cached': False
         }), 500
 
 
@@ -6705,7 +6809,12 @@ def _activation_message_for_code(code: str) -> str:
 def _sanitize_database_request_for_client(req: dict) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
     safe = dict(req or {})
-    proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+    req_account_env = _request_account_env(req)
+    req_plane = _request_execution_plane(req)
+    proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+        account_env=req_account_env,
+        execution_plane=req_plane
+    )
 
     # Remove secrets
     for k in ('db_password', 'vault_token', 'password'):
@@ -6736,6 +6845,8 @@ def _sanitize_database_request_for_client(req: dict) -> dict:
     safe['databases'] = dbs
     safe['proxy_host'] = proxy_host
     safe['proxy_port'] = proxy_port
+    safe['account_env'] = req_account_env
+    safe['execution_plane'] = req_plane
 
     # Useful masked fields for display
     safe['masked_db_username'] = _mask_secret((req or {}).get('db_username', ''), visible=2)
@@ -6743,7 +6854,7 @@ def _sanitize_database_request_for_client(req: dict) -> dict:
 
     return safe
 
-def _resolve_db_connect_proxy_endpoint():
+def _resolve_db_connect_proxy_endpoint(account_env='', execution_plane=''):
     """
     Public-facing endpoint users should use (proxy, not the real DB endpoint).
 
@@ -6753,15 +6864,19 @@ def _resolve_db_connect_proxy_endpoint():
     Fallbacks:
       DB_PROXY_HOST, DB_CONNECT_PROXY_PORT, DB_PROXY_PORT, DB_PROXY_URL
     """
-    host = str(os.getenv('DB_CONNECT_PROXY_HOST') or os.getenv('DB_PROXY_HOST') or '').strip()
-    port_raw = os.getenv('DB_CONNECT_PROXY_PORT') or os.getenv('DB_PROXY_PORT') or ''
+    plane = str(execution_plane or '').strip().lower()
+    if not plane:
+        plane = _resolve_execution_plane(account_env)
+
+    host = _plane_env('DB_CONNECT_PROXY_HOST', plane) or _plane_env('DB_PROXY_HOST', plane)
+    port_raw = _plane_env('DB_CONNECT_PROXY_PORT', plane) or _plane_env('DB_PROXY_PORT', plane)
     try:
         port = int(str(port_raw).strip()) if str(port_raw).strip() else 3306
     except Exception:
         port = 3306
 
     if not host:
-        proxy_url = str(os.getenv('DB_PROXY_URL') or '').strip()
+        proxy_url = _plane_env('DB_PROXY_URL', plane)
         # Example: http://127.0.0.1:5002
         m = re.match(r'^(?:https?://)?([^:/]+)(?::(\d+))?$', proxy_url.replace('/execute', '').rstrip('/'))
         if m:
@@ -6772,7 +6887,7 @@ def _resolve_db_connect_proxy_endpoint():
     host = host or 'proxy-not-configured'
     if port <= 0:
         port = 3306
-    return host, port
+    return host, port, plane
 
 def _normalize_permissions_list(value):
     if isinstance(value, list):
@@ -7380,18 +7495,106 @@ def _resolve_account_environment(account_id):
     except Exception:
         pass
 
-    # CONFIG entry
-    cfg_env = ((CONFIG.get('accounts') or {}).get(acct) or {}).get('environment')
-    if cfg_env:
-        return str(cfg_env).strip().lower()
+    # CONFIG entry (prefer effective environment resolved from org hierarchy tags)
+    accounts_cfg = CONFIG.get('accounts') or {}
+    account_meta = (accounts_cfg.get(acct) or {})
+    if not account_meta and isinstance(accounts_cfg, dict):
+        for _, meta in accounts_cfg.items():
+            if str((meta or {}).get('id') or '').strip() == acct:
+                account_meta = meta or {}
+                break
+
+    for key in ('effective_environment', 'environment', 'source_environment'):
+        cfg_env = _normalize_env_tag(account_meta.get(key))
+        if cfg_env:
+            return cfg_env
+
+    # Last-mile fallback from persisted hierarchy tags.
+    try:
+        env_from_tags = _effective_env_from_tags(
+            account_id=acct,
+            ou_chain=_account_ou_chain_from_meta(account_meta),
+            root_id=str(account_meta.get('root_id') or '').strip(),
+            fallback='',
+            tags=_load_org_hierarchy_tags(),
+        )
+        env_from_tags = _normalize_env_tag(env_from_tags)
+        if env_from_tags:
+            return env_from_tags
+    except Exception:
+        pass
 
     # Infer from account name as fallback
-    name = str(((CONFIG.get('accounts') or {}).get(acct) or {}).get('name') or '').lower()
+    name = str(account_meta.get('name') or '').lower()
     if 'prod' in name or 'production' in name:
         return 'prod'
     if 'sandbox' in name:
         return 'sandbox'
     return 'nonprod'
+
+
+def _env_plane_suffixes(plane):
+    p = str(plane or '').strip().lower()
+    if p == 'prod':
+        return ['PROD', 'PRODUCTION']
+    if p == 'sandbox':
+        return ['SANDBOX']
+    return ['NONPROD', 'NON_PROD', 'DEV']
+
+
+def _plane_env(base_name, plane, default=''):
+    for suffix in _env_plane_suffixes(plane):
+        v = str(os.getenv(f'{base_name}_{suffix}') or '').strip()
+        if v:
+            return v
+    v = str(os.getenv(base_name) or '').strip()
+    if v:
+        return v
+    return str(default or '').strip()
+
+
+def _has_plane_override(base_name, plane):
+    for suffix in _env_plane_suffixes(plane):
+        if str(os.getenv(f'{base_name}_{suffix}') or '').strip():
+            return True
+    return False
+
+
+def _resolve_execution_plane(account_env):
+    env = _normalize_env_tag(account_env, 'nonprod') or 'nonprod'
+    if env == 'prod':
+        return 'prod'
+    if env == 'sandbox':
+        # Sandbox uses nonprod plane by default unless explicitly configured.
+        if any(_has_plane_override(n, 'sandbox') for n in (
+            'VAULT_ADDR',
+            'DB_CONNECT_PROXY_HOST',
+            'DB_PROXY_HOST',
+            'DB_CONNECT_PROXY_PORT',
+            'DB_PROXY_PORT',
+            'DB_PROXY_URL',
+        )):
+            return 'sandbox'
+        return 'nonprod'
+    return 'nonprod'
+
+
+def _request_account_env(req):
+    if not isinstance(req, dict):
+        return 'nonprod'
+    env = _normalize_env_tag(req.get('account_env'))
+    if env:
+        return env
+    return _resolve_account_environment(req.get('account_id'))
+
+
+def _request_execution_plane(req):
+    if not isinstance(req, dict):
+        return 'nonprod'
+    plane = str(req.get('execution_plane') or '').strip().lower()
+    if plane in ('prod', 'nonprod', 'sandbox'):
+        return plane
+    return _resolve_execution_plane(_request_account_env(req))
 
 
 def _resolve_requester_for_vault(req):
@@ -7437,6 +7640,10 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
     req = requests_db[rid]
     if req.get('type') != 'database_access':
         return {'error': 'Not a database request'}
+    req_account_env = _request_account_env(req)
+    req_plane = _request_execution_plane(req)
+    req['account_env'] = req_account_env
+    req['execution_plane'] = req_plane
     _ensure_activation_progress(req)
     if force_retry:
         req['activation_error'] = ''
@@ -7559,6 +7766,7 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
                             duration_hours=duration_hours,
                             requester=requester,
                             auth_type='iam',
+                            plane=req_plane,
                         )
                         role_name = vault_creds.get('vault_role_name', '')
                         lease_id = vault_creds.get('lease_id', '')
@@ -7633,6 +7841,7 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
                 duration_hours=duration_hours,
                 requester=requester,
                 auth_type='password',
+                plane=req_plane,
             )
             role_name = vault_creds.get('vault_role_name', '')
             lease_id = vault_creds.get('lease_id', '')
@@ -8812,6 +9021,7 @@ def request_database_access():
         requested_db_username = str(data.get('db_username') or '').strip()
         permissions_raw = data.get('permissions')
         query_types = data.get('query_types', [])
+        requested_tables_raw = data.get('requested_tables', [])
         justification = str(data.get('justification') or '').strip()
         ai_generated = bool(data.get('ai_generated', False))
         conversation_id = str(data.get('conversation_id') or '').strip()
@@ -8871,6 +9081,12 @@ def request_database_access():
         perms_upper = [p.upper() for p in perms]
         if not perms_upper:
             return jsonify({'error': 'At least one permission/query operation is required'}), 400
+        if isinstance(requested_tables_raw, list):
+            requested_tables = [str(t).strip() for t in requested_tables_raw if str(t).strip()]
+        elif isinstance(requested_tables_raw, str):
+            requested_tables = [str(t).strip() for t in requested_tables_raw.split(',') if str(t).strip()]
+        else:
+            requested_tables = []
 
         first_db = databases[0] if isinstance(databases[0], dict) else {}
         selected_engine = str(first_db.get('engine') or data.get('engine') or '').strip()
@@ -8913,6 +9129,7 @@ def request_database_access():
 
         # Policy-based validation and approval routing (PROD/NONPROD/PII)
         account_env = _resolve_account_environment(account_id)
+        execution_plane = _resolve_execution_plane(account_env)
         tags_present = bool(auth_profile.get('classification_tag_present') or auth_profile.get('tags_present'))
         data_classification = str(auth_profile.get('data_classification') or '').strip()
         is_pii = bool(auth_profile.get('is_pii'))
@@ -8942,6 +9159,7 @@ def request_database_access():
             'type': 'database_access',
             'account_id': account_id,
             'account_env': account_env,
+            'execution_plane': execution_plane,
             'is_pii': is_pii,
             'data_classification': data_classification,
             'tags_present': tags_present,
@@ -8959,6 +9177,7 @@ def request_database_access():
             'db_region': auth_profile.get('region', requested_region),
             'permissions': perms,
             'query_types': query_types if isinstance(query_types, list) else [],
+            'requested_tables': requested_tables,
             'role': role,
             'duration_hours': duration_hours,
             'start_date': start_date if start_date else '',
@@ -9040,7 +9259,6 @@ def get_approved_databases():
     try:
         user_email = str(request.args.get('user_email') or '').strip().lower()
         approved_databases = []
-        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
         if not user_email:
             return jsonify({'databases': approved_databases})
         
@@ -9053,6 +9271,12 @@ def get_approved_databases():
                 # Skip expired - only show databases you can actually use
                 if _is_db_request_expired(req):
                     continue
+                req_account_env = _request_account_env(req)
+                req_plane = _request_execution_plane(req)
+                proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+                    account_env=req_account_env,
+                    execution_plane=req_plane
+                )
                 
                 for db in req.get('databases', []):
                     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
@@ -9064,6 +9288,8 @@ def get_approved_databases():
                         # Never expose the real DB endpoint to users. Always show the proxy endpoint.
                         'host': proxy_host,
                         'port': proxy_port,
+                        'account_env': req_account_env,
+                        'execution_plane': req_plane,
                         'masked_username': masked_username,
                         'role': req.get('role', 'custom'),
                         'effective_auth': effective_auth,
@@ -9144,7 +9370,12 @@ def get_database_request_credentials(request_id):
                 'activation_progress': _activation_progress_for_response(req)
             }), 400
 
-        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+        req_account_env = _request_account_env(req)
+        req_plane = _request_execution_plane(req)
+        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+            account_env=req_account_env,
+            execution_plane=req_plane
+        )
         if not proxy_host or proxy_host == 'proxy-not-configured':
             return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
         dbs = req.get('databases') or []
@@ -9169,6 +9400,8 @@ def get_database_request_credentials(request_id):
                     'effective_auth': 'iam',
                     'proxy_host': proxy_host,
                     'proxy_port': proxy_port,
+                    'account_env': req_account_env,
+                    'execution_plane': req_plane,
                     'db_username': username,
                     # Do not mint IAM tokens on server-side credentials.
                     # User must generate token using their own Identity Center session.
@@ -9196,6 +9429,8 @@ def get_database_request_credentials(request_id):
             'effective_auth': 'password',
             'proxy_host': proxy_host,
             'proxy_port': proxy_port,
+            'account_env': req_account_env,
+            'execution_plane': req_plane,
             'db_username': username,
             'password': token,
             'vault_token': token,  # backward-compat (UI may still read vault_token)
@@ -9399,7 +9634,12 @@ def execute_database_query():
             return jsonify({'error': 'No database in request'}), 400
         db_info = databases[0]
         # Users must connect only via proxy. For PAM Terminal, backend also connects via proxy when configured.
-        proxy_host, proxy_port = _resolve_db_connect_proxy_endpoint()
+        req_account_env = _request_account_env(db_request)
+        req_plane = _request_execution_plane(db_request)
+        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+            account_env=req_account_env,
+            execution_plane=req_plane
+        )
         if not proxy_host or proxy_host == 'proxy-not-configured':
             return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
         host = proxy_host

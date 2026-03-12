@@ -22,27 +22,64 @@ from datetime import datetime, timedelta
 
 
 class VaultManager:
-    _cached_token = None
-    _cached_token_exp = 0  # epoch seconds
+    _cached_tokens = {}
 
     @staticmethod
-    def _vault_addr() -> str:
-        return str(os.getenv("VAULT_ADDR", "")).rstrip("/")
+    def _normalize_plane(plane: str) -> str:
+        raw = str(plane or "").strip().lower()
+        if raw in ("prod", "production"):
+            return "prod"
+        if raw in ("sandbox",):
+            return "sandbox"
+        if raw in ("nonprod", "non-prod", "non_prod", "dev", "staging", "test"):
+            return "nonprod"
+        return ""
 
     @staticmethod
-    def _vault_namespace() -> str:
-        return str(os.getenv("VAULT_NAMESPACE", "")).strip()
+    def _plane_env_keys(name: str, plane: str) -> list[str]:
+        p = VaultManager._normalize_plane(plane)
+        if p == "prod":
+            return [f"{name}_PROD", f"{name}_PRODUCTION"]
+        if p == "sandbox":
+            return [f"{name}_SANDBOX"]
+        if p == "nonprod":
+            return [f"{name}_NONPROD", f"{name}_NON_PROD", f"{name}_DEV"]
+        return []
 
     @staticmethod
-    def _env(name: str) -> str:
+    def _env(name: str, plane: str = "") -> str:
+        for key in VaultManager._plane_env_keys(name, plane):
+            value = str(os.getenv(key, "")).strip()
+            if value:
+                return value
         return str(os.getenv(name, "")).strip()
 
     @staticmethod
-    def _http_json(method: str, url: str, token: str | None, body: dict | None = None, timeout: int = 8) -> dict:
+    def _vault_addr(plane: str = "") -> str:
+        return str(VaultManager._env("VAULT_ADDR", plane)).rstrip("/")
+
+    @staticmethod
+    def _vault_namespace(plane: str = "") -> str:
+        return str(VaultManager._env("VAULT_NAMESPACE", plane)).strip()
+
+    @staticmethod
+    def _cache_key_for_plane(plane: str = "") -> str:
+        norm = VaultManager._normalize_plane(plane)
+        return norm or "default"
+
+    @staticmethod
+    def _http_json(
+        method: str,
+        url: str,
+        token: str | None,
+        body: dict | None = None,
+        timeout: int = 8,
+        namespace: str | None = None,
+    ) -> dict:
         headers = {
             "Content-Type": "application/json",
         }
-        ns = VaultManager._vault_namespace()
+        ns = str(namespace if namespace is not None else VaultManager._vault_namespace()).strip()
         if ns:
             headers["X-Vault-Namespace"] = ns
         if token:
@@ -68,7 +105,7 @@ class VaultManager:
             raise RuntimeError(f"Vault connection failed: {e}") from e
 
     @staticmethod
-    def _get_service_token() -> str:
+    def _get_service_token(plane: str = "") -> str:
         """
         Get a Vault token for NPAMX backend.
 
@@ -78,20 +115,29 @@ class VaultManager:
         - Never use a root token.
         """
         now = time.time()
-        if VaultManager._cached_token and now < VaultManager._cached_token_exp:
-            return VaultManager._cached_token
+        cache_key = VaultManager._cache_key_for_plane(plane)
+        cached = VaultManager._cached_tokens.get(cache_key) or {}
+        if cached.get("token") and now < float(cached.get("exp_epoch") or 0):
+            return str(cached.get("token"))
 
-        addr = VaultManager._vault_addr()
+        addr = VaultManager._vault_addr(plane)
         if not addr:
             raise RuntimeError("VAULT_ADDR is not set")
+        namespace = VaultManager._vault_namespace(plane)
 
-        role_id = VaultManager._env("VAULT_ROLE_ID")
-        secret_id = VaultManager._env("VAULT_SECRET_ID")
+        role_id = VaultManager._env("VAULT_ROLE_ID", plane)
+        secret_id = VaultManager._env("VAULT_SECRET_ID", plane)
         if not (role_id and secret_id):
             raise RuntimeError("Vault AppRole auth not configured. Set VAULT_ROLE_ID and VAULT_SECRET_ID.")
 
         url = f"{addr}/v1/auth/approle/login"
-        resp = VaultManager._http_json("POST", url, token=None, body={"role_id": role_id, "secret_id": secret_id})
+        resp = VaultManager._http_json(
+            "POST",
+            url,
+            token=None,
+            body={"role_id": role_id, "secret_id": secret_id},
+            namespace=namespace,
+        )
         auth = resp.get("auth") or {}
         token = str(auth.get("client_token") or "").strip()
         lease = int(auth.get("lease_duration") or 0)
@@ -102,7 +148,13 @@ class VaultManager:
         # If lookup-self is not permitted by policy, proceed (AppRole is still required),
         # but strongly recommend removing any root policy from the AppRole.
         try:
-            lookup = VaultManager._http_json("GET", f"{addr}/v1/auth/token/lookup-self", token=token, body=None)
+            lookup = VaultManager._http_json(
+                "GET",
+                f"{addr}/v1/auth/token/lookup-self",
+                token=token,
+                body=None,
+                namespace=namespace,
+            )
             policies = (lookup.get("data") or {}).get("policies") or []
             token_policies = (lookup.get("data") or {}).get("token_policies") or []
             combined = {str(p).strip().lower() for p in (policies + token_policies) if str(p).strip()}
@@ -112,8 +164,10 @@ class VaultManager:
             pass
 
         # Cache slightly under TTL
-        VaultManager._cached_token = token
-        VaultManager._cached_token_exp = time.time() + max(30, lease - 30)
+        VaultManager._cached_tokens[cache_key] = {
+            "token": token,
+            "exp_epoch": time.time() + max(30, lease - 30),
+        }
         return token
 
     @staticmethod
@@ -289,6 +343,7 @@ class VaultManager:
         duration_hours: int,
         requester: str = "",
         auth_type: str = "password",
+        plane: str = "",
     ) -> dict:
         """
         Create a per-request Vault DB role and mint one set of dynamic DB credentials.
@@ -321,13 +376,14 @@ class VaultManager:
         if duration_hours > 72:
             duration_hours = 72
 
-        addr = VaultManager._vault_addr()
+        addr = VaultManager._vault_addr(plane)
         if not addr:
             raise RuntimeError("VAULT_ADDR is not set")
+        namespace = VaultManager._vault_namespace(plane)
 
-        mount = VaultManager._env("VAULT_DB_MOUNT") or "database"
+        mount = VaultManager._env("VAULT_DB_MOUNT", plane) or "database"
         # Vault DB connection name (configured in Vault). The manual setup typically names it "my-mysql".
-        connection = VaultManager._env("VAULT_DB_CONNECTION_NAME") or "my-mysql"
+        connection = VaultManager._env("VAULT_DB_CONNECTION_NAME", plane) or "my-mysql"
 
         # Per-request Vault role name (Vault config object).
         #
@@ -411,7 +467,7 @@ class VaultManager:
                 "FLUSH PRIVILEGES;"
             ]
 
-        token = VaultManager._get_service_token()
+        token = VaultManager._get_service_token(plane)
 
         # 1) Create/overwrite the Vault DB role (per request).
         role_url = f"{addr}/v1/{mount}/roles/{role_name}"
@@ -428,11 +484,12 @@ class VaultManager:
                 "default_ttl": f"{duration_hours}h",
                 "max_ttl": f"{duration_hours}h",
             },
+            namespace=namespace,
         )
 
         # 2) Generate one set of credentials for this session.
         creds_url = f"{addr}/v1/{mount}/creds/{role_name}"
-        creds = VaultManager._http_json("GET", creds_url, token=token, body=None)
+        creds = VaultManager._http_json("GET", creds_url, token=token, body=None, namespace=namespace)
         data = creds.get("data") or {}
         db_username = str(data.get("username") or "").strip()
         db_password = str(data.get("password") or "").strip()
@@ -454,34 +511,37 @@ class VaultManager:
             "lease_id": lease_id,
             "lease_duration": lease_duration,
             "expires_at": expires_at,
+            "vault_plane": VaultManager._normalize_plane(plane) or "default",
         }
 
     @staticmethod
-    def delete_database_role(role_name: str) -> bool:
+    def delete_database_role(role_name: str, plane: str = "") -> bool:
         """Best-effort deletion of the Vault DB role (not required for TTL cleanup)."""
         rn = str(role_name or "").strip()
         if not rn:
             return False
         try:
-            addr = VaultManager._vault_addr()
+            addr = VaultManager._vault_addr(plane)
             if not addr:
                 return False
-            mount = VaultManager._env("VAULT_DB_MOUNT") or "database"
-            token = VaultManager._get_service_token()
+            namespace = VaultManager._vault_namespace(plane)
+            mount = VaultManager._env("VAULT_DB_MOUNT", plane) or "database"
+            token = VaultManager._get_service_token(plane)
             url = f"{addr}/v1/{mount}/roles/{rn}"
-            VaultManager._http_json("DELETE", url, token=token, body=None)
+            VaultManager._http_json("DELETE", url, token=token, body=None, namespace=namespace)
             return True
         except Exception:
             return False
 
     @staticmethod
-    def revoke_lease(lease_id: str) -> bool:
+    def revoke_lease(lease_id: str, plane: str = "") -> bool:
         """Revoke a lease by full lease_id (e.g. database/creds/role/uuid). Returns True on success."""
         lid = str(lease_id or "").strip()
         if not lid:
             return False
-        addr = VaultManager._vault_addr()
-        token = VaultManager._get_service_token()
+        addr = VaultManager._vault_addr(plane)
+        namespace = VaultManager._vault_namespace(plane)
+        token = VaultManager._get_service_token(plane)
         url = f"{addr}/v1/sys/leases/revoke"
-        VaultManager._http_json("POST", url, token=token, body={"lease_id": lid})
+        VaultManager._http_json("POST", url, token=token, body={"lease_id": lid}, namespace=namespace)
         return True
