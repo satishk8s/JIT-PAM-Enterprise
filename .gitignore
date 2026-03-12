@@ -34,6 +34,12 @@ credentials
 .env.local
 *.local
 
+# Excluded from repo (not needed for PAM app)
+Dockerfile
+k8s-deployment.yaml
+sql_commands.webp
+sql_commands (1).webp
+
 # Backup files
 *.bak
 *.backup
