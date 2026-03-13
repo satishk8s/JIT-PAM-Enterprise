@@ -111,8 +111,15 @@ Then:
 1. **Edit .env** with your real values:  
    `sudo -u npamx nano /opt/npamx/app/backend/.env`  
    Set `YOUR_EC2_IP`, break-glass email, and SSO ARN / Identity Store ID / start URL.
-2. **Security group:** allow inbound HTTP (port 80) from `0.0.0.0/0` (or your IP).
-3. Open **http://YOUR_EC2_IP** — SSO for normal users, password for break-glass.
+2. **Create the break-glass user** (full-access admin; they will assign IdC users as admins/roles):  
+   `cd /opt/npamx/app/backend && sudo -u npamx python3 add_break_glass_user.py`  
+   Enter email and password when prompted. This user logs in with **Login with Password** and has full access.
+3. **Bootstrap PAM admins** (optional; for SSO users who should see Admin panel):  
+   `sudo mkdir -p /opt/npamx/app/backend/data && sudo chown npamx:npamx /opt/npamx/app/backend/data`  
+   Then: `echo '{"pam_admins":[{"email":"sso-admin@company.com","role":"SuperAdmin"}]}' | sudo -u npamx tee /opt/npamx/app/backend/data/pam_admins.json`  
+   Restart: `sudo systemctl restart npamx`.
+4. **Security group:** allow inbound HTTP (port 80) from `0.0.0.0/0` (or your IP).
+5. Open **http://YOUR_EC2_IP** — **Login with Password** = break-glass (full access). **Login with SSO** = Identity Center users. Break-glass user can add IdC users as admins/roles from Admin panel.
 
 ---
 
@@ -231,6 +238,74 @@ Set at least:
 - `APP_BASE_URL=http://YOUR_EC2_IP`
 - `PAM_SUPER_ADMIN_SEED_EMAIL` (break-glass admin email)
 - `SSO_INSTANCE_ARN`, `IDENTITY_STORE_ID`, `SSO_START_URL` (from your AWS IAM Identity Center / SSO setup)
+
+---
+
+## 5b. Bootstrap PAM admins (so Admin panel shows after login)
+
+**You do not need a separate database for admin users.** The app stores PAM admins (who see the Admin panel) in a JSON file: `backend/data/pam_admins.json`. The break-glass seed from `.env` (`PAM_SUPER_ADMIN_SEED_EMAIL`) is always treated as a SuperAdmin in memory, but creating the file with that email ensures the list persists and the Admin panel shows.
+
+- **Break-glass users** = admins who can log in with username/password (when that flow is enabled); their email is the seed in `.env`.
+- **Other users** = log in via **AWS Identity Center (SSO)**. To let an SSO user see the Admin panel, add their email to the PAM admins list (via Admin → Users & Groups after first admin is in, or by adding it to the file below).
+
+**On EC2, after editing `.env` with your real `PAM_SUPER_ADMIN_SEED_EMAIL` (e.g. `satish.korra@nykaa.com`):**
+
+```bash
+# Create data dir and initial PAM admins file (use the same email as PAM_SUPER_ADMIN_SEED_EMAIL)
+sudo mkdir -p /opt/npamx/app/backend/data
+sudo chown npamx:npamx /opt/npamx/app/backend/data
+
+# Replace YOUR_ADMIN_EMAIL with the break-glass/SSO admin email (e.g. satish.korra@nykaa.com)
+ADMIN_EMAIL="YOUR_ADMIN_EMAIL"
+echo '{"pam_admins":[{"email":"'$ADMIN_EMAIL'","role":"SuperAdmin"}]}' | sudo -u npamx tee /opt/npamx/app/backend/data/pam_admins.json
+```
+
+Then restart the app: `sudo systemctl restart npamx`.
+
+**Why the Admin panel might not show:**
+
+1. **Session** – You must complete **SSO login** (SAML) so the backend has a session. The frontend then calls `/api/admin/check-pam-admin`; if there is no session (e.g. you used a dev “quick login” that doesn’t hit the backend), the API returns 401 and the panel stays hidden.
+2. **Email match** – The email the app resolves from your SSO session (SAML/Identity Center) must match an email in the PAM admins list (file + seed). Use the **exact** email you get from Identity Center in `PAM_SUPER_ADMIN_SEED_EMAIL` and in `pam_admins.json`.
+3. **File/dir** – Ensure `backend/data/pam_admins.json` exists and is readable by the `npamx` user.
+
+**Check what the backend sees after SSO login:**  
+Open (in the same browser where you’re logged in):  
+`https://YOUR_APP_URL/api/saml/profile`  
+or  
+`https://YOUR_APP_URL/api/admin/check-pam-admin`  
+You should see JSON with `email` and `is_admin` / `isAdmin`. If `email` is wrong or empty, fix Identity Center/SAML attributes or add that resolved email to `pam_admins.json`.
+
+**Optional: add more SSO admins later** – After the first admin logs in, they can open **Admin → Users & Groups** and add other Identity Center users as PAM admins (stored in the same JSON file).
+
+---
+
+## 5c. Create break-glass user manually (on EC2)
+
+**Break-glass users** are created **manually on the EC2** and stored in a small SQLite DB under `backend/data/`. They log in with **username (email) + password** and have **full access** to the solution. They then assign **Identity Center (SSO) users** as admins and other roles from the Admin panel.
+
+**One-time setup on EC2:** create the first break-glass user (use a dedicated admin email, e.g. `pam-admin@yourcompany.com`):
+
+```bash
+cd /opt/npamx/app/backend
+sudo -u npamx python3 add_break_glass_user.py
+```
+
+When prompted, enter the break-glass **email** and **password** (min 8 characters). The user is stored in `backend/data/npamx_break_glass.db`.
+
+**Non-interactive (e.g. from env):**
+
+```bash
+cd /opt/npamx/app/backend
+sudo -u npamx EMAIL=pam-admin@yourcompany.com PASSWORD='your-secure-password' python3 add_break_glass_user.py
+```
+
+**After that:**
+
+- Users open the app → **Login with Password** → enter that **email** and **password**.
+- The break-glass user gets full access and sees the **Admin** panel.
+- From **Admin → Users & Groups** they add **Identity Center (SSO) users** as PAM admins or other roles; those users then log in via **Login with SSO** (Identity Center).
+
+No separate database beyond this SQLite file is required; break-glass users and PAM admins (IdC users you promote) are stored as described above.
 
 ---
 
@@ -356,6 +431,82 @@ Save.
 
 ---
 
+## 10b. Load balancer target group – why the instance shows unhealthy
+
+If your instance is behind an **Application Load Balancer** and the **target group** shows the instance as **Unhealthy**, check the following.
+
+### 1. Target group port must be 80
+
+Traffic from the ALB must go to **port 80** (nginx). The app (Gunicorn) listens only on `127.0.0.1:5000`, so it is not reachable from the ALB.  
+**Fix:** In the target group, set **Port** to **80** (or use "Same as load balancer" if the listener is on 80).
+
+### 2. Health check path and port
+
+Use an HTTP health check that nginx can serve:
+
+- **Protocol:** HTTP  
+- **Port:** 80 (or "Traffic port")  
+- **Path:** `/api/health` or `/`  
+  - `/api/health` hits the Flask app (via nginx) and returns 200; good to confirm both nginx and the app are up.  
+  - `/` returns the frontend (index.html); also fine.
+
+In **Target group → Health checks**: set **Path** to `/api/health` (or `/`), **Port** to 80.
+
+### 3. Instance security group must allow the ALB
+
+The ALB sends health checks and traffic to the instance on **port 80**. If the instance security group does **not** allow inbound on 80 from the ALB, the target will be **Unhealthy**.
+
+**Fix:** Add an **inbound** rule on the **instance** security group:
+
+- **Type:** HTTP (or Custom TCP)  
+- **Port:** 80  
+- **Source:** Security group of the **load balancer** (choose the ALB's SG)
+
+Alternatively you can allow **port 80** from the **VPC CIDR** (e.g. `10.0.0.0/8` or your VPC range) so the ALB (in the same VPC) can reach the instance.
+
+### 4. Quick check on the instance
+
+SSH to the instance and run:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/
+curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/health
+```
+
+Both should return **200**. If not, check `sudo systemctl status nginx` and `sudo systemctl status npamx`, and fix nginx/Flask before changing the ALB.
+
+### 5. Still unhealthy – run these on the instance
+
+**A) Confirm nginx is listening on all interfaces (port 80):**
+
+```bash
+ss -tlnp | grep :80
+# or: sudo netstat -tlnp | grep :80
+```
+
+You should see `0.0.0.0:80` or `*:80`. If you see `127.0.0.1:80` only, nginx is not accepting external traffic; fix the `listen` directive to use `80` (default is all interfaces).
+
+**B) See if health checks are reaching the instance:**
+
+In one terminal, stream the nginx access log. Then wait 1–2 minutes (health check interval) and see if any new lines appear when the ALB checks:
+
+```bash
+sudo tail -f /var/log/nginx/access.log
+```
+
+If **no new lines** appear, traffic from the ALB is **not reaching** the instance → fix **security group** (instance must allow inbound 80 from the **ALB’s** SG) or **subnet NACL** (inbound 80 from ALB subnet / VPC allowed).
+
+If **lines do appear** but the target is still unhealthy, check the **response code** in the log (e.g. 200 vs 302/403). Also in **Target group → Monitoring**, check the **UnHealthyHostCount** and **RequestCount** and the **Health check** tab for failure reason.
+
+**C) Subnet NACL (often overlooked):**
+
+- **Instance subnet:** Inbound rules must allow **port 80** from the ALB (e.g. from the ALB subnet CIDR or `0.0.0.0/0`). Outbound must allow ephemeral ports (1024–65535) so responses can go back.
+- **ALB subnet:** Outbound allows 80 to instance subnet (or 0.0.0.0/0); inbound allows ephemeral for return traffic.
+
+If the instance subnet NACL has a “deny” or no “allow 80” from the ALB’s source, health checks will fail even when the instance SG allows 80.
+
+---
+
 ## 11. Verify
 
 - Open: **http://YOUR_EC2_IP**
@@ -381,8 +532,8 @@ sudo systemctl restart npamx
 
 | User type              | Login method              | Config |
 |------------------------|---------------------------|--------|
-| Break-glass (emergency)| Username + password       | `PAM_SUPER_ADMIN_SEED_EMAIL` in `.env`; user must be in PAM admins or seed. |
-| All other users        | AWS IAM Identity Center   | `SSO_*` and `APP_BASE_URL` in `.env`; IdP metadata in `backend/saml/idp_metadata.xml`. |
+| Break-glass (full access) | Email + password      | Created **manually on EC2** with `python3 add_break_glass_user.py`; stored in `backend/data/npamx_break_glass.db`. They assign Identity Center users as admins/roles from the Admin panel. |
+| All other users        | AWS IAM Identity Center (SSO) | `SSO_*` and `APP_BASE_URL` in `.env`; IdP metadata in `backend/saml/idp_metadata.xml`. PAM admins/roles are assigned by the break-glass user (or in `backend/data/pam_admins.json`). |
 
 Ensure in **Identity Center** the application (SP) is configured with ACS URL:  
 `http://YOUR_EC2_IP/saml/acs` (or `https://...` if you add SSL).

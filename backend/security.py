@@ -114,6 +114,7 @@ CSRF_EXEMPT_PATHS = frozenset([
     "/saml/acs", "/api/v1/auth/saml/acs",
     "/login", "/api/login", "/api/v1/auth/login",
     "/api/admin/check-pam-admin",
+    "/api/auth/break-glass-login",
 ])
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_COOKIE = "XSRF-TOKEN"
@@ -128,7 +129,7 @@ def init_csrf(app):
         if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
             return None
         path = (request.path or "").rstrip("/")
-        if path in CSRF_EXEMPT_PATHS or any(path.startswith(p.rstrip("/")) for p in ("/saml/", "/api/login", "/api/v1/auth/login")):
+        if path in CSRF_EXEMPT_PATHS or any(path.startswith(p.rstrip("/")) for p in ("/saml/", "/api/login", "/api/v1/auth/login", "/api/auth/break-glass-login")):
             return None
         if request.path.startswith("/api/admin/check-pam-admin"):
             return None

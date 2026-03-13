@@ -18,6 +18,20 @@ from persistence import NpamxStore
 
 load_dotenv()
 
+# Break-glass users: SQLite on EC2; full access and assign IdC users as admins/roles
+try:
+    from break_glass_db import (
+        init_db as init_break_glass_db,
+        verify_break_glass_user,
+        get_user_by_email as get_break_glass_user_by_email,
+    )
+    init_break_glass_db()
+    _BREAK_GLASS_AVAILABLE = True
+except Exception:
+    _BREAK_GLASS_AVAILABLE = False
+    verify_break_glass_user = None
+    get_break_glass_user_by_email = None
+
 app = Flask(__name__)
 
 # CORS: in production set CORS_ORIGINS (comma-separated). Strict allowlist only.
@@ -311,6 +325,12 @@ identity_center_synced_groups = []
 
 # PAM solution admins: users who can manage this PAM (Admin panel). Stored in data/pam_admins.json.
 PAM_ADMINS_PATH = os.getenv('PAM_ADMINS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_admins.json')
+_data_dir = os.path.dirname(PAM_ADMINS_PATH)
+if _data_dir:
+    try:
+        os.makedirs(_data_dir, exist_ok=True)
+    except Exception:
+        pass
 FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
 ORG_HIERARCHY_TAGS_PATH = os.getenv('ORG_HIERARCHY_TAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_tags.json')
 ORG_HIERARCHY_CACHE_PATH = os.getenv('ORG_HIERARCHY_CACHE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_cache.json')
@@ -664,8 +684,15 @@ def _saml_identity_hints():
 def _pam_admin_record_for_identity(email='', nameid='', hints=None):
     """
     Resolve PAM admin by exact email first, then by unique local-part match.
-    This helps when SAML NameID is username-like and email claim is missing.
+    Break-glass users (password login) are always treated as PAM admins (SuperAdmin).
     """
+    if session.get('auth_type') == 'break_glass' and get_break_glass_user_by_email:
+        try:
+            bg_email = (email or nameid or '').strip().lower()
+            if bg_email and get_break_glass_user_by_email(bg_email):
+                return {'email': bg_email, 'role': 'SuperAdmin'}
+        except Exception:
+            pass
     direct = _pam_admin_record_for_email(email)
     if direct:
         return direct
@@ -2042,8 +2069,37 @@ def saml_acs():
     return jsonify({'error': errors}), 400
 
 
+@app.route('/api/auth/break-glass-login', methods=['POST'])
+def break_glass_login():
+    """
+    Break-glass login: username/password against SQLite DB on EC2.
+    User has full access and can assign Identity Center users as admins/roles.
+    """
+    if not _BREAK_GLASS_AVAILABLE or not verify_break_glass_user:
+        return jsonify({'error': 'Break-glass login not available'}), 503
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email') or data.get('username') or '').strip().lower()
+    password = str(data.get('password') or '').strip()
+    if not email or '@' not in email or not password:
+        return jsonify({'error': 'Email and password required'}), 400
+    user = verify_break_glass_user(email, password)
+    if not user:
+        return jsonify({'error': 'Invalid email or password'}), 401
+    session['user'] = user['email']
+    session['auth_type'] = 'break_glass'
+    session['attributes'] = {}
+    return jsonify({
+        'ok': True,
+        'email': user['email'],
+        'role': user.get('role') or 'SuperAdmin',
+        'display_name': email.split('@')[0].replace('.', ' ').title(),
+    })
+
+
 def _email_from_saml_session():
-    """Return the user's email from SAML session. Never return the literal 'Email' (claim name)."""
+    """Return the user's email from SAML session or break-glass session. Never return the literal 'Email' (claim name)."""
+    if session.get('auth_type') == 'break_glass':
+        return str(session.get('user') or '').strip()
     user = session.get('user')
     attrs = session.get('attributes') or {}
     email = user if isinstance(user, str) else (user.get('email') or user.get('nameid') or str(user) if user else '')
@@ -2401,6 +2457,7 @@ _SESSION_EXEMPT_PREFIXES = (
     '/api/login', '/login',
     '/api/v1/health', '/api/v1/auth/login',
     '/saml/acs', '/api/v1/auth/saml/acs',
+    '/api/auth/break-glass-login',
 )
 
 

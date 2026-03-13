@@ -355,19 +355,56 @@ document.addEventListener('DOMContentLoaded', function() {
     setupEventListeners();
 });
 
+async function handleBreakGlassLogin(email, password) {
+    const base = (typeof window !== 'undefined' && window.API_BASE) ? window.API_BASE.replace(/\/+$/, '') : '/api';
+    const url = base + '/auth/break-glass-login';
+    const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password: password }),
+        credentials: 'include'
+    });
+    const data = await res.json().catch(function() { return {}; });
+    if (!res.ok) {
+        throw new Error(data.error || 'Login failed');
+    }
+    const displayName = (data.display_name || (data.email || '').split('@')[0].replace(/\./g, ' ')) || 'Admin';
+    isAdmin = true;
+    currentUser = { email: data.email, name: displayName, isAdmin: true };
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('userEmail', data.email || email);
+    localStorage.setItem('userName', displayName);
+    localStorage.setItem('isAdmin', 'true');
+    localStorage.setItem('userRole', data.role || 'admin');
+    localStorage.setItem('loginMethod', 'break_glass');
+    if (typeof checkAdminAccess === 'function') checkAdminAccess();
+    if (typeof updateUIForRole === 'function') updateUIForRole();
+    showMainApp();
+    if (typeof setPamAdminFromApi === 'function') setPamAdminFromApi(data.email || email);
+}
+
 function setupEventListeners() {
-    // Username/Password form
+    // Username/Password form: break-glass login (full access; created manually on EC2)
     const usernamePasswordForm = document.getElementById('usernamePasswordForm');
     if (usernamePasswordForm) {
         usernamePasswordForm.addEventListener('submit', function(e) {
             e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            
-            if (username && password) {
-                // Show MFA verification
-                showMFAVerification();
+            const username = (document.getElementById('username') && document.getElementById('username').value) || '';
+            const password = (document.getElementById('password') && document.getElementById('password').value) || '';
+            if (!username || !password) return;
+            const email = username.trim();
+            if (email.indexOf('@') < 0) {
+                alert('Please enter your full email address for break-glass login.');
+                return;
             }
+            const btn = this.querySelector('button[type="submit"]');
+            if (btn) { btn.disabled = true; btn.textContent = 'Signing in...'; }
+            handleBreakGlassLogin(email, password).then(function() {
+                if (btn) { btn.disabled = false; btn.textContent = 'Continue'; }
+            }).catch(function(err) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Continue'; }
+                alert(err.message || 'Invalid email or password.');
+            });
         });
     }
     
