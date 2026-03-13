@@ -6,6 +6,18 @@ let requests = [];
 let currentTheme = 'light';
 let isAdmin = false;
 
+/** Escape for safe insertion into HTML (prevents XSS). */
+function escapeHtml(str) {
+    if (str == null) return '';
+    const s = String(str);
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // PAM admin check: isAdmin is set from API /api/admin/check-pam-admin (backend stores PAM solution admins)
 const API_BASE_FOR_ADMIN = (typeof window !== 'undefined' && window.API_BASE) ? window.API_BASE : ((!window.location.port || window.location.port === '80' || window.location.port === '443') ? '/api' : `${(window.location.protocol || 'http:')}//${window.location.hostname}:5000/api`);
 
@@ -455,8 +467,9 @@ function setupEventListeners() {
     }, 100);
 }
 
-// Quick login for testing (bypasses OTP/MFA)
+// Dev-only quick login (bypasses OTP/MFA). In production set window.ALLOW_DEV_LOGIN=false or do not set it.
 function quickLoginAsUser(email) {
+    if (typeof window !== 'undefined' && window.ALLOW_DEV_LOGIN !== true) return;
     const normalizedEmail = (email || 'user@nykaa.com').toLowerCase().trim();
     isAdmin = false;
     currentUser = { email: normalizedEmail, name: normalizedEmail.split('@')[0], isAdmin: false };
@@ -1477,48 +1490,47 @@ function loadRequestsPage() {
             return createJITRequestCard(request, account);
         }).join('');
     } else {
-        // Fallback to basic cards if helper not available
+        // Fallback to basic cards if helper not available (escape user data for XSS safety)
         grid.innerHTML = filteredRequests.map(request => {
             const account = accounts[request.account_id];
-            const statusClass = `status-${request.status}`;
-            
+            const statusClass = `status-${escapeHtml(request.status)}`;
             return `
                 <div class="jit-request-card">
                     <div class="jit-request-header">
                         <div class="jit-user-info">
-                            <div class="jit-user-email">${request.user_email || 'Unknown User'}</div>
-                            <span class="status-badge ${statusClass}">${request.status}</span>
+                            <div class="jit-user-email">${escapeHtml(request.user_email || 'Unknown User')}</div>
+                            <span class="status-badge ${statusClass}">${escapeHtml(request.status)}</span>
                         </div>
                     </div>
                     
                     <div class="jit-request-details">
                         <div class="jit-detail-item">
                             <div class="jit-detail-label">Requested Role</div>
-                            <div class="jit-detail-value">${request.ai_generated ? 'AI Generated' : request.permission_set || 'Custom'}</div>
+                            <div class="jit-detail-value">${escapeHtml(request.ai_generated ? 'AI Generated' : request.permission_set || 'Custom')}</div>
                         </div>
                         <div class="jit-detail-item">
                             <div class="jit-detail-label">Target</div>
-                            <div class="jit-detail-value">${account ? account.name : request.account_id}</div>
+                            <div class="jit-detail-value">${escapeHtml(account ? account.name : request.account_id)}</div>
                         </div>
                         <div class="jit-detail-item">
                             <div class="jit-detail-label">Duration</div>
-                            <div class="jit-detail-value">${request.duration_hours || 8}h</div>
+                            <div class="jit-detail-value">${escapeHtml(request.duration_hours || 8)}h</div>
                         </div>
                     </div>
                     
                     ${request.status === 'pending' ? `
                     <div class="jit-request-actions">
-                        <button class="btn-primary" onclick="approveRequest('${request.id}')">
+                        <button class="btn-primary" onclick="approveRequest('${escapeHtml(request.id)}')">
                             <i class="fas fa-check"></i> Approve
                         </button>
-                        <button class="btn-danger" onclick="denyRequest('${request.id}')">
+                        <button class="btn-danger" onclick="denyRequest('${escapeHtml(request.id)}')">
                             <i class="fas fa-times"></i> Deny
                         </button>
                     </div>
                     ` : ''}
                     
                     <div class="jit-request-actions" style="margin-top: 10px; border-top: 1px solid var(--border-subtle); padding-top: 10px;">
-                        <button class="btn-secondary" onclick="viewRequest('${request.id}')" style="width: 100%;">
+                        <button class="btn-secondary" onclick="viewRequest('${escapeHtml(request.id)}')" style="width: 100%;">
                             <i class="fas fa-eye"></i> View Details
                         </button>
                     </div>
@@ -2713,19 +2725,22 @@ function loadUsersTable() {
     
     tbody.innerHTML = users.map(user => `
         <tr>
-            <td>${user.email}</td>
-            <td>${user.source}</td>
-            <td><span class="status-badge status-approved">${user.status}</span></td>
+            <td>${escapeHtml(user.email)}</td>
+            <td>${escapeHtml(user.source)}</td>
+            <td><span class="status-badge status-approved">${escapeHtml(user.status)}</span></td>
             <td>${user.mfa ? '✅ Enabled' : '❌ Disabled'}</td>
-            <td>${user.lastLogin}</td>
-            <td>${user.requestCount}</td>
+            <td>${escapeHtml(user.lastLogin)}</td>
+            <td>${escapeHtml(user.requestCount)}</td>
             <td>
-                <button class="btn-secondary" onclick="editUser('${user.email}')">
+                <button class="btn-secondary" data-edit-email="${escapeHtml(user.email)}" type="button">
                     <i class="fas fa-edit"></i>
                 </button>
             </td>
         </tr>
     `).join('');
+    tbody.querySelectorAll('[data-edit-email]').forEach(btn => {
+        btn.addEventListener('click', function() { editUser(this.getAttribute('data-edit-email') || ''); });
+    });
 }
 
 function loadAuditLogsTable() {
@@ -2745,12 +2760,12 @@ function loadAuditLogsTable() {
     
     tbody.innerHTML = auditLogs.map(log => `
         <tr>
-            <td>${log.timestamp}</td>
-            <td>${log.user}</td>
-            <td>${log.event}</td>
-            <td>${log.resource}</td>
-            <td>${log.ip}</td>
-            <td><span class="status-badge status-approved">${log.status}</span></td>
+            <td>${escapeHtml(log.timestamp)}</td>
+            <td>${escapeHtml(log.user)}</td>
+            <td>${escapeHtml(log.event)}</td>
+            <td>${escapeHtml(log.resource)}</td>
+            <td>${escapeHtml(log.ip)}</td>
+            <td><span class="status-badge status-approved">${escapeHtml(log.status)}</span></td>
         </tr>
     `).join('');
 }
@@ -2767,10 +2782,19 @@ function editUser(email) {
 function generateTempPassword() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
     let password = '';
-    for (let i = 0; i < 12; i++) {
-        password += chars.charAt(Math.floor(Math.random() * chars.length));
+    const arr = new Uint32Array(12);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+        crypto.getRandomValues(arr);
+        for (let i = 0; i < 12; i++) {
+            password += chars.charAt(arr[i] % chars.length);
+        }
+    } else {
+        for (let i = 0; i < 12; i++) {
+            password += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
     }
-    document.getElementById('onboardPassword').value = password;
+    const el = document.getElementById('onboardPassword');
+    if (el) el.value = password;
 }
 
 // Integration Functions

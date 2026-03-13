@@ -365,3 +365,36 @@ class NpamxStore:
                     json.dumps(payload or {}, separators=(",", ":"), ensure_ascii=True),
                 ),
             )
+
+    def list_audit_logs(
+        self,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Return audit log rows newest first (for admin audit-logs API)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT ts, user_email, request_id, role, action, allowed, rows_returned, error, query, payload_json
+                FROM audit_logs
+                ORDER BY ts DESC
+                LIMIT ? OFFSET ?
+                """,
+                (max(1, min(limit, 5000)), max(0, offset)),
+            ).fetchall()
+        out = []
+        for row in rows:
+            out.append({
+                "timestamp": row["ts"],
+                "user": row["user_email"],
+                "request_id": row["request_id"],
+                "role": row["role"],
+                "action": row["action"],
+                "allowed": bool(row["allowed"]),
+                "rows_returned": row["rows_returned"],
+                "error": row["error"],
+                "query": (row["query"] or "")[:500],
+                "payload": json.loads(row["payload_json"] or "{}"),
+            })
+        return out

@@ -3,8 +3,14 @@
  * Functions for JIT Request Cards, AI Risk Engine, and Dashboard
  */
 
+function _escapeHtml(str) {
+    if (str == null) return '';
+    const s = String(str);
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 /**
- * Create a JIT Request Card HTML
+ * Create a JIT Request Card HTML (user data escaped to prevent XSS)
  */
 function createJITRequestCard(request, account) {
     if (request.type === 'database_access') return ''; // Show only in Databases section
@@ -13,21 +19,19 @@ function createJITRequestCard(request, account) {
     const riskColor = riskScore >= 70 ? 'danger' : riskScore >= 40 ? 'warning' : 'success';
     const aiRecommendation = riskScore >= 70 ? 'DENY' : riskScore >= 40 ? 'REVIEW' : 'APPROVE';
     
-    // Format duration
     const duration = request.duration_hours || 8;
     const durationText = duration < 24 ? `${duration}h` : `${Math.floor(duration / 24)}d ${duration % 24}h`;
-    
-    // Get approval state
     const approvalState = getApprovalState(request.status);
+    const reqId = _escapeHtml(request.id);
     
     return `
-        <div class="jit-request-card" data-request-id="${request.id}">
+        <div class="jit-request-card" data-request-id="${reqId}">
             <div class="jit-request-header">
                 <div class="jit-user-info">
-                    <div class="jit-user-email">${request.user_email || 'Unknown User'}</div>
-                    <div class="approval-state ${approvalState.class}">
-                        <i class="fas fa-${approvalState.icon}"></i>
-                        ${approvalState.text}
+                    <div class="jit-user-email">${_escapeHtml(request.user_email || 'Unknown User')}</div>
+                    <div class="approval-state ${_escapeHtml(approvalState.class)}">
+                        <i class="fas fa-${_escapeHtml(approvalState.icon)}"></i>
+                        ${_escapeHtml(approvalState.text)}
                     </div>
                 </div>
             </div>
@@ -35,19 +39,19 @@ function createJITRequestCard(request, account) {
             <div class="jit-request-details">
                 <div class="jit-detail-item">
                     <div class="jit-detail-label">Requested Role</div>
-                    <div class="jit-detail-value">${request.permission_set || 'AI-Generated'}</div>
+                    <div class="jit-detail-value">${_escapeHtml(request.permission_set || 'AI-Generated')}</div>
                 </div>
                 <div class="jit-detail-item">
                     <div class="jit-detail-label">Target</div>
-                    <div class="jit-detail-value">${account ? account.name : request.account_id}</div>
+                    <div class="jit-detail-value">${_escapeHtml(account ? account.name : request.account_id)}</div>
                 </div>
                 <div class="jit-detail-item">
                     <div class="jit-detail-label">Duration</div>
-                    <div class="jit-detail-value">${durationText}</div>
+                    <div class="jit-detail-value">${_escapeHtml(durationText)}</div>
                 </div>
                 <div class="jit-detail-item">
                     <div class="jit-detail-label">Requested</div>
-                    <div class="jit-detail-value">${formatDate(request.created_at)}</div>
+                    <div class="jit-detail-value">${_escapeHtml(formatDate(request.created_at))}</div>
                 </div>
             </div>
             
@@ -55,10 +59,10 @@ function createJITRequestCard(request, account) {
             <div class="ai-risk-section">
                 <div class="ai-risk-header">
                     <div class="ai-risk-score">${riskScore}/100</div>
-                    <div class="ai-risk-label">AI Risk Score: ${riskLevel}</div>
+                    <div class="ai-risk-label">AI Risk Score: ${_escapeHtml(riskLevel)}</div>
                 </div>
                 <div class="ai-recommendation">
-                    <strong>AI Recommendation:</strong> ${aiRecommendation}
+                    <strong>AI Recommendation:</strong> ${_escapeHtml(aiRecommendation)}
                 </div>
                 <div class="ai-signals">
                     ${generateAISignals(request)}
@@ -69,22 +73,22 @@ function createJITRequestCard(request, account) {
             ${request.status === 'pending' ? `
             <div class="jit-request-actions">
                 ${aiRecommendation === 'DENY' ? `
-                <button class="btn-secondary" onclick="approveRequestWithJustification('${request.id}')">
+                <button class="btn-secondary" onclick="typeof approveRequestWithJustification==='function'&&approveRequestWithJustification('${reqId}')">
                     <i class="fas fa-check"></i> Approve Anyway
                 </button>
                 ` : `
-                <button class="btn-primary" onclick="approveRequest('${request.id}')">
+                <button class="btn-primary" onclick="typeof approveRequest==='function'&&approveRequest('${reqId}')">
                     <i class="fas fa-check"></i> Approve
                 </button>
                 `}
-                <button class="btn-danger" onclick="denyRequest('${request.id}')">
+                <button class="btn-danger" onclick="typeof denyRequest==='function'&&denyRequest('${reqId}')">
                     <i class="fas fa-times"></i> Deny
                 </button>
             </div>
             ` : ''}
             
             <div class="jit-request-actions" style="margin-top: 10px; border-top: 1px solid var(--border-color); padding-top: 10px;">
-                <button class="btn-secondary" onclick="showRequestDetailWithFlow('${request.id}')" style="width: 100%;">
+                <button class="btn-secondary" onclick="typeof showRequestDetailWithFlow==='function'&&showRequestDetailWithFlow('${reqId}')" style="width: 100%;">
                     <i class="fas fa-route"></i> View Approval Flow
                 </button>
             </div>

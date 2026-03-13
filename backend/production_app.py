@@ -72,7 +72,13 @@ def request_access():
         if (end_date - start_date) > timedelta(days=5):
             return jsonify({'error': 'Maximum duration is 5 days'}), 400
         
-        if start_date <= datetime.now():
+        from datetime import timezone
+        now_utc = datetime.now(timezone.utc)
+        if start_date.tzinfo:
+            start_date = start_date.astimezone(timezone.utc)
+        else:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if start_date <= now_utc:
             return jsonify({'error': 'Start date must be in the future'}), 400
         
         expires_at = end_date.isoformat()
@@ -228,4 +234,6 @@ def cleanup_old_requests():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5001)  # Different port for production
+    import os
+    debug = os.environ.get('FLASK_ENV', '').lower() != 'production' and os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+    app.run(debug=debug, port=int(os.environ.get('PORT', 5001)))

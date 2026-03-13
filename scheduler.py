@@ -12,18 +12,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuration
-API_BASE = 'http://localhost:5000/api'
-CONFIG = {
-    'sso_instance_arn': 'arn:aws:sso:::instance/ssoins-65955f0870d9f06f',
-    'identity_store_id': 'd-9f677136b2'
-}
+# Configuration: use env in production so scheduler can call API with auth
+API_BASE = os.environ.get('JIT_SCHEDULER_API_BASE', 'http://localhost:5000/api').rstrip('/')
+# Optional: API key for scheduler-to-API auth (set JIT_SCHEDULER_API_KEY in env; backend must accept X-API-Key or similar)
+SCHEDULER_API_KEY = os.environ.get('JIT_SCHEDULER_API_KEY', '').strip()
 
 def get_all_requests():
-    """Get all requests from the API"""
+    """Get all requests from the API (scheduler runs server-side; use session cookie or API key if auth required)."""
     try:
-        response = requests.get(f'{API_BASE}/requests')
-        return response.json()
+        headers = {}
+        if SCHEDULER_API_KEY:
+            headers['X-API-Key'] = SCHEDULER_API_KEY
+        response = requests.get(f'{API_BASE}/requests', headers=headers, timeout=30)
+        return response.json() if response.ok else []
     except Exception as e:
         print(f"Error fetching requests: {e}")
         return []
@@ -43,10 +44,14 @@ def revoke_expired_access():
                 print(f"⏰ Revoking expired access: {request['id'][:8]}... (expired {expires_at})")
                 
                 try:
-                    # Call revoke API
+                    headers = {'Content-Type': 'application/json'}
+                    if SCHEDULER_API_KEY:
+                        headers['X-API-Key'] = SCHEDULER_API_KEY
                     response = requests.post(
                         f"{API_BASE}/request/{request['id']}/revoke",
-                        json={'reason': 'Automatic expiration - JIT access expired'}
+                        json={'reason': 'Automatic expiration - JIT access expired'},
+                        headers=headers,
+                        timeout=30
                     )
                     
                     if response.status_code == 200:
@@ -77,7 +82,10 @@ def cleanup_old_requests():
             print(f"🗑️ Deleting old inactive request: {request['id'][:8]}... (created {created_at.strftime('%Y-%m-%d')})")
             
             try:
-                response = requests.delete(f"{API_BASE}/request/{request['id']}/delete")
+                headers = {}
+                if SCHEDULER_API_KEY:
+                    headers['X-API-Key'] = SCHEDULER_API_KEY
+                response = requests.delete(f"{API_BASE}/request/{request['id']}/delete", headers=headers, timeout=30)
                 
                 if response.status_code == 200:
                     print(f"✅ Successfully deleted: {request['id'][:8]}...")

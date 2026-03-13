@@ -3,7 +3,7 @@ from flask_cors import CORS
 import boto3
 from botocore.config import Config
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 import os
 from dotenv import load_dotenv
@@ -98,14 +98,14 @@ def load_org_policies():
     except Exception:
         return {}  # Fallback to empty policies
 
-# Configuration - will be populated from AWS (fallback avoids blocking on first request)
+# Configuration - populated from env when set, else from AWS (fallback avoids blocking on first request)
 CONFIG = {
     'accounts': {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}},
     'permission_sets': [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}],
     'organization': {},
-    'sso_instance_arn': 'arn:aws:sso:::instance/ssoins-65955f0870d9f06f',
-    'identity_store_id': 'd-9f677136b2',
-    'sso_start_url': 'https://nykaa.awsapps.com/start'
+    'sso_instance_arn': os.environ.get('SSO_INSTANCE_ARN') or os.environ.get('PAM_SSO_INSTANCE_ARN') or 'arn:aws:sso:::instance/ssoins-65955f0870d9f06f',
+    'identity_store_id': os.environ.get('IDENTITY_STORE_ID') or os.environ.get('PAM_IDENTITY_STORE_ID') or 'd-9f677136b2',
+    'sso_start_url': os.environ.get('SSO_START_URL') or os.environ.get('PAM_SSO_START_URL') or 'https://nykaa.awsapps.com/start',
 }
 
 # Short timeout so expired AWS creds don't hang the app
@@ -175,7 +175,8 @@ def _get_idc_assumed_creds():
         exp = creds.get('Expiration')
         exp_epoch = now + 900
         try:
-            exp_epoch = float(exp.timestamp())  # datetime from botocore
+            if exp is not None:
+                exp_epoch = float(exp.timestamp())  # datetime from botocore
         except Exception:
             pass
         if not (access_key and secret_key and session_token):
@@ -732,6 +733,8 @@ def _infer_env_from_account_name(name: str) -> str:
 
 
 _ALLOWED_ENV_TAGS = {'prod', 'nonprod', 'sandbox'}
+MAX_JUSTIFICATION_LENGTH = 2000
+MAX_USE_CASE_LENGTH = 500
 
 
 def _normalize_env_tag(value, default=''):
@@ -1337,8 +1340,20 @@ def build_resource_arns(selected_resources, account_id, services):
     print(f"=== build_resource_arns done ===\n")
     return final_arns
 
+def _sanitize_use_case_for_prompt(raw: str, max_len: int = 500) -> str:
+    """Limit length and strip control chars to reduce prompt injection risk."""
+    if not raw or not isinstance(raw, str):
+        return ''
+    s = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', raw)
+    s = s.replace('\r', ' ').replace('\n', ' ').strip()
+    return s[:max_len]
+
+
 def generate_ai_permissions(use_case_description, account_env='nonprod'):
     """Generate AWS permissions using Bedrock AI or fallback to rules"""
+    use_case_description = _sanitize_use_case_for_prompt(str(use_case_description or ''))
+    if not use_case_description:
+        return {'error': 'Use case description is required.'}
     # CRITICAL: Always load fresh config (admin may have changed toggles)
     policy_config = StrictPolicies.get_config()
     print(f"🔄 [generate_ai_permissions] Fresh config: delete_nonprod={policy_config.get('allow_delete_nonprod')}, delete_prod={policy_config.get('allow_delete_prod')}")
@@ -1385,7 +1400,8 @@ def generate_ai_permissions(use_case_description, account_env='nonprod'):
         # Use direct credentials (no role assumption)
         bedrock = boto3.client(
             'bedrock-runtime',
-            region_name='ap-south-1'
+            region_name='ap-south-1',
+            config=Config(connect_timeout=10, read_timeout=60),
         )
         
         prompt = f"""Convert this AWS use case to specific AWS IAM actions and resources:
@@ -1419,10 +1435,53 @@ Return ONLY a JSON object with this exact format:
         result = json.loads(response['body'].read())
         ai_response = result['content'][0]['text']
         
-        # Extract JSON from response
-        json_match = re.search(r'\{[^}]*\}', ai_response, re.DOTALL)
-        if json_match:
-            ai_permissions = json.loads(json_match.group())
+        # Extract JSON: prefer object that has both "actions" and "resources" (security: avoid wrong block)
+        ai_permissions = None
+        idx = 0
+        while True:
+            pos = ai_response.find('"actions"', idx)
+            if pos < 0:
+                break
+            start = ai_response.rfind('{', 0, pos)
+            if start < 0:
+                idx = pos + 1
+                continue
+            depth = 0
+            end = -1
+            for i in range(start, len(ai_response)):
+                if ai_response[i] == '{':
+                    depth += 1
+                elif ai_response[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end > start:
+                try:
+                    candidate = json.loads(ai_response[start:end + 1])
+                    if isinstance(candidate.get('actions'), list) and isinstance(candidate.get('resources'), (list, str)):
+                        ai_permissions = candidate
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            idx = pos + 1
+        if not ai_permissions:
+            # Fallback: find first balanced {...} to avoid greedy regex truncating nested JSON
+            start = ai_response.find('{')
+            if start >= 0:
+                depth = 0
+                for i in range(start, len(ai_response)):
+                    if ai_response[i] == '{':
+                        depth += 1
+                    elif ai_response[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                ai_permissions = json.loads(ai_response[start:i + 1])
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                            break
+        if ai_permissions:
             
             # CRITICAL: Check delete actions against toggle settings FIRST
             delete_actions = [action for action in ai_permissions.get('actions', []) if any(word in action.lower() for word in ['delete', 'terminate', 'remove'])]
@@ -1542,7 +1601,7 @@ def generate_fallback_permissions(use_case, account_env='nonprod'):
     aws_services = {
         'ec2': {'keywords': ['ec2', 'instance', 'server', 'vm'], 'read': ['ec2:Describe*', 'ssm:StartSession', 'ssm:DescribeInstanceInformation'], 'write': ['ec2:ModifyInstanceAttribute', 'ec2:AssociateIamInstanceProfile', 'ec2:ReplaceIamInstanceProfileAssociation', 'ec2:StartInstances', 'ec2:StopInstances', 'ec2:RebootInstances', 'iam:PassRole'], 'delete': ['ec2:TerminateInstances']},
         's3': {'keywords': ['s3', 'bucket'], 'read': ['s3:ListBucket', 's3:GetObject', 's3:GetObjectVersion'], 'write': ['s3:PutObject'], 'delete': ['s3:DeleteObject', 's3:DeleteObjectVersion']},
-        'lambda': {'keywords': ['lambda', 'function'], 'read': ['lambda:List*', 'lambda:Get*', 'lambda:InvokeFunction'], 'delete': ['lambda:DeleteFunction']},
+        'lambda': {'keywords': ['lambda', 'function'], 'read': ['lambda:List*', 'lambda:Get*'], 'delete': ['lambda:DeleteFunction']},
         'dynamodb': {'keywords': ['dynamodb', 'dynamo', 'table'], 'read': ['dynamodb:List*', 'dynamodb:Describe*', 'dynamodb:Scan', 'dynamodb:Query'], 'delete': ['dynamodb:DeleteItem', 'dynamodb:DeleteTable']},
         'rds': {'keywords': ['rds', 'database', 'db'], 'read': ['rds:Describe*'], 'delete': ['rds:DeleteDBInstance']},
         'cloudwatch': {'keywords': ['logs', 'cloudwatch', 'monitoring'], 'read': ['logs:Describe*', 'logs:Get*'], 'delete': ['logs:DeleteLogGroup']},
@@ -1636,11 +1695,10 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
                 'ec2:DescribeInstanceStatus'
             ])
             
-            # Add SSM for tag-based access
+            # Add SSM for read-only: StartSession + describe/get only (no SendCommand)
             enhanced_actions.extend([
                 'ssm:StartSession',
                 'ssm:DescribeInstanceInformation',
-                'ssm:SendCommand',
                 'ssm:GetCommandInvocation'
             ])
             if config.get('tags'):
@@ -1649,8 +1707,10 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
                 description_parts.append("EC2: All instances (no tag filter)")
         
         elif service == 's3':
-            bucket_name = config.get('bucket')
+            bucket_name = str(config.get('bucket') or '').strip()
             if bucket_name:
+                if '*' in bucket_name or not re.match(r'^[a-zA-Z0-9._-]{1,255}$', bucket_name):
+                    continue  # Reject wildcards and invalid bucket names
                 enhanced_actions.extend([
                     's3:ListBucket',
                     's3:GetObject',
@@ -1658,8 +1718,9 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
                 ])
                 
                 bucket_arn = f"arn:aws:s3:::{bucket_name}"
-                if config.get('prefix'):
-                    object_arn = f"arn:aws:s3:::{bucket_name}/{config['prefix']}*"
+                prefix = str(config.get('prefix') or '').strip()
+                if prefix and '*' not in prefix and re.match(r'^[a-zA-Z0-9._\-/]*$', prefix):
+                    object_arn = f"arn:aws:s3:::{bucket_name}/{prefix}*"
                     description_parts.append(f"S3: {bucket_name}/{config['prefix']}")
                 else:
                     object_arn = f"arn:aws:s3:::{bucket_name}/*"
@@ -1668,8 +1729,8 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
                 resources.extend([bucket_arn, object_arn])
         
         elif service == 'secretsmanager':
-            secret_name = config.get('secret_name')
-            if secret_name:
+            secret_name = str(config.get('secret_name') or '').strip()
+            if secret_name and '*' not in secret_name and re.match(r'^[a-zA-Z0-9/_+=.@-]{1,512}$', secret_name):
                 enhanced_actions.extend([
                     'secretsmanager:DescribeSecret',
                     'secretsmanager:GetSecretValue'
@@ -1683,7 +1744,8 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
             if function_name:
                 enhanced_actions.extend([
                     'lambda:GetFunction',
-                    'lambda:InvokeFunction'
+                    'lambda:ListFunctions',
+                    'lambda:GetFunctionUrlConfig'
                 ])
                 function_arn = f"arn:aws:lambda:ap-south-1:*:function:{function_name}"
                 resources.append(function_arn)
@@ -1746,17 +1808,23 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
     
     return result
 
-def create_custom_permission_set(name, permissions_data):
-    """Create a new permission set with AI-generated permissions"""
+def create_custom_permission_set(name, permissions_data, duration_hours=None):
+    """Create a new permission set with AI-generated permissions. SessionDuration from duration_hours (1–12, default 8)."""
     try:
         sso_admin = _sso_admin_client()
+        hours = 8
+        if duration_hours is not None:
+            try:
+                hours = max(1, min(12, int(duration_hours)))
+            except (TypeError, ValueError):
+                pass
+        session_duration = f'PT{hours}H'
         
-        # Create permission set
         response = sso_admin.create_permission_set(
             InstanceArn=CONFIG['sso_instance_arn'],
             Name=name,
             Description=permissions_data.get('description', 'AI-generated permission set'),
-            SessionDuration='PT8H'
+            SessionDuration=session_duration
         )
         
         permission_set_arn = response['PermissionSet']['PermissionSetArn']
@@ -2308,8 +2376,7 @@ def enforce_admin_api_access():
     # CORS preflight should pass through.
     if request.method == 'OPTIONS':
         return None
-
-    # This endpoint is used by frontend to determine role and should remain callable.
+    # check-pam-admin: any authenticated user can call to get own admin status (no PAM admin required)
     if path == '/api/admin/check-pam-admin' or path == '/api/v1/admin/check-pam-admin':
         return None
 
@@ -2325,6 +2392,52 @@ def enforce_admin_api_access():
     if not admin_record:
         return jsonify({'error': 'Admin access required'}), 403
     return None
+
+
+# Paths that do NOT require an authenticated session (login, health, SAML ACS callback)
+# check-pam-admin requires session to prevent unauthenticated user enumeration
+_SESSION_EXEMPT_PREFIXES = (
+    '/api/health', '/health',
+    '/api/login', '/login',
+    '/api/v1/health', '/api/v1/auth/login',
+    '/saml/acs', '/api/v1/auth/saml/acs',
+)
+
+
+@app.before_request
+def require_session_for_api():
+    """Require authenticated session for all /api/* except login, health, and check-pam-admin."""
+    path = (request.path or '').strip()
+    if request.method == 'OPTIONS':
+        return None
+    if not path.startswith('/api/') and not path.startswith('/saml/complete'):
+        return None
+    if any(path.startswith(p) for p in _SESSION_EXEMPT_PREFIXES):
+        return None
+    if path == '/saml/complete':
+        return None  # has its own session check inside the view
+    if not session.get('user'):
+        return jsonify({'error': 'Authentication required', 'code': 'UNAUTHENTICATED'}), 401
+    return None
+
+
+def _safe_error_response(e, default_status=500):
+    """Log full error server-side; return generic message to client (no info disclosure)."""
+    try:
+        import traceback
+        traceback.print_exc()
+    except Exception:
+        pass
+    return jsonify({'error': 'An error occurred. Please try again or contact support.'}), default_status
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught_exception(e):
+    """Production: do not expose exception details to client."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e.get_response()
+    return _safe_error_response(e)
 
 
 @app.route('/saml/complete', methods=['GET'])
@@ -2465,46 +2578,8 @@ def get_permission_sets():
 
 @app.route('/api/debug/find-user/<email>', methods=['GET'])
 def debug_find_user(email):
-    if os.environ.get('FLASK_ENV', '').lower() == 'production' or os.environ.get('DISABLE_DEBUG_ROUTES', '').strip() in ('1', 'true', 'yes'):
-        return jsonify({'error': 'Not Found'}), 404
-    try:
-        identitystore = _identitystore_client()
-        results = {}
-        
-        # Try email search
-        try:
-            response = identitystore.list_users(
-                IdentityStoreId=CONFIG['identity_store_id'],
-                Filters=[{'AttributePath': 'Emails.Value', 'AttributeValue': email}]
-            )
-            results['email_search'] = {'count': len(response['Users']), 'users': response['Users']}
-        except Exception as e:
-            results['email_search'] = {'error': str(e)}
-        
-        # Try username variations
-        username_variations = [email, email.lower(), email.title()]
-        if '@' in email:
-            base = email.split('@')[0]
-            username_variations.extend([
-                f"{base}@Nykaa.local",
-                f"{base.lower()}@Nykaa.local",
-                f"{base.title()}@Nykaa.local"
-            ])
-        
-        for username in username_variations:
-            try:
-                response = identitystore.list_users(
-                    IdentityStoreId=CONFIG['identity_store_id'],
-                    Filters=[{'AttributePath': 'UserName', 'AttributeValue': username}]
-                )
-                if response['Users']:
-                    results[f'username_{username}'] = {'count': len(response['Users']), 'users': response['Users']}
-            except Exception as e:
-                results[f'username_{username}'] = {'error': str(e)}
-        
-        return jsonify(results)
-    except Exception as e:
-        return jsonify({'error': str(e)})
+    # Removed: user-enumeration endpoint. Return 404 always (security: SEC-5).
+    return jsonify({'error': 'Not Found'}), 404
 
 from intent_classifier import IntentClassifier
 from conversation_manager import ConversationManager
@@ -2954,8 +3029,17 @@ def generate_permissions():
 
 @app.route('/api/request-access', methods=['POST'])
 def request_access():
-    data = request.json
-    user_email = data.get('user_email')
+    data = request.json or {}
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    user_email = (data.get('user_email') or '').strip()
+    if not user_email:
+        data['user_email'] = caller_email or ''
+        user_email = caller_email
+    elif user_email.lower() != caller_email:
+        if not _pam_admin_record_for_identity(
+            email=caller_email, nameid=_current_request_identity().get('nameid') or '', hints=_current_request_identity().get('hints') or {}
+        ):
+            return jsonify({'error': 'You can only request access for yourself unless you are a PAM admin'}), 403
     
     # CHECK ACCESS RULES: Enforce group-based restrictions
     rules = AccessRules.get_rules()
@@ -3003,32 +3087,49 @@ def request_access():
     if 'custom_start_date' in data and 'custom_end_date' in data:
         start_date = datetime.fromisoformat(data['custom_start_date'].replace('Z', '+00:00'))
         end_date = datetime.fromisoformat(data['custom_end_date'].replace('Z', '+00:00'))
+        # Ensure timezone-aware for comparison (avoid TypeError: naive vs aware)
+        now_utc = datetime.now(timezone.utc)
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        else:
+            start_date = start_date.astimezone(timezone.utc)
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+        else:
+            end_date = end_date.astimezone(timezone.utc)
         
         # Validate 5-day maximum
         max_duration = timedelta(days=5)
         if (end_date - start_date) > max_duration:
             return jsonify({'error': 'Maximum duration is 5 days'}), 400
         
-        # Validate start date is in future
-        if start_date <= datetime.now():
+        if start_date <= now_utc:
             return jsonify({'error': 'Start date must be in the future'}), 400
         
         expires_at = end_date.isoformat()
         created_at = start_date.isoformat()
     else:
-        # Standard duration
-        if data['duration_hours'] > 120:  # 5 days = 120 hours
-            return jsonify({'error': 'Maximum duration is 5 days (120 hours)'}), 400
-        
+        # Standard duration: validate type and range
+        try:
+            dh = int(data.get('duration_hours', 0))
+        except (TypeError, ValueError):
+            return jsonify({'error': 'duration_hours must be a number'}), 400
+        if dh < 1 or dh > 120:
+            return jsonify({'error': 'duration_hours must be between 1 and 120 (5 days)'}), 400
+        data['duration_hours'] = dh
         created_at = datetime.now().isoformat()
-        expires_at = (datetime.now() + timedelta(hours=data['duration_hours'])).isoformat()
+        expires_at = (datetime.now() + timedelta(hours=dh)).isoformat()
+    
+    justification = str(data.get('justification') or '').strip()[:MAX_JUSTIFICATION_LENGTH]
+    if not justification or len(justification) < 3:
+        return jsonify({'error': 'Justification is required (3–{} characters)'.format(MAX_JUSTIFICATION_LENGTH)}), 400
     
     access_request = {
         'id': request_id,
         'user_email': data['user_email'],
         'account_id': data['account_id'],
         'duration_hours': data['duration_hours'],
-        'justification': data['justification'],
+        'justification': justification,
         'status': 'pending',
         'created_at': created_at,
         'expires_at': expires_at
@@ -3059,8 +3160,13 @@ def request_access():
         access_request['ai_permissions'] = permissions
         access_request['permission_set'] = 'AI_GENERATED'
     else:
-        # Existing permission set
-        access_request['permission_set'] = data['permission_set']
+        # Existing permission set: validate ARN against allowed list (prevent privilege escalation)
+        submitted_arn = str(data.get('permission_set') or '').strip()
+        allowed_arns = {str(ps.get('arn') or '').strip() for ps in (CONFIG.get('permission_sets') or []) if isinstance(ps, dict) and ps.get('arn')}
+        allowed_arns.update(str(ps) for ps in (CONFIG.get('permission_sets') or []) if isinstance(ps, str))
+        if not submitted_arn or (allowed_arns and submitted_arn not in allowed_arns):
+            return jsonify({'error': 'Invalid or disallowed permission set. Choose from the list.'}), 400
+        access_request['permission_set'] = submitted_arn
         access_request['ai_generated'] = False
     
     # Store enforcement metadata
@@ -3086,8 +3192,9 @@ def request_access():
             access_request['approval_required'] = ['manager']
             access_request['approval_note'] = 'Non-production read-only access requires manager approval'
     else:
-        # For write/custom permissions, require self-approval for now (can be enhanced)
-        access_request['approval_required'] = ['self']
+        # For write/custom permissions require manager approval (no self-approval for security)
+        access_request['approval_required'] = ['manager']
+        access_request['approval_note'] = 'Write/custom access requires manager approval'
     
     requests_db[request_id] = access_request
     _save_requests()
@@ -3095,9 +3202,22 @@ def request_access():
 
 @app.route('/api/requests', methods=['GET'])
 def get_requests():
+    """List requests: non-admins see only their own; PAM admins see all."""
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    is_admin = bool(_pam_admin_record_for_identity(
+        email=caller_email,
+        nameid=(_current_request_identity().get('nameid') or ''),
+        hints=(_current_request_identity().get('hints') or [])
+    ))
     out = []
     for r in requests_db.values():
-        if isinstance(r, dict) and r.get('type') == 'database_access':
+        if not isinstance(r, dict):
+            continue
+        if not is_admin:
+            req_email = (r.get('user_email') or '').strip().lower()
+            if req_email != caller_email:
+                continue
+        if r.get('type') == 'database_access':
             out.append(_sanitize_database_request_for_client(r))
         else:
             out.append(r)
@@ -3503,7 +3623,11 @@ def revoke_access(request_id):
             return jsonify({'error': 'User not found for revocation'}), 400
         
         user_id = user_response['Users'][0]['UserId']
-        account_id = CONFIG['accounts'][access_request['account_id']]['id']
+        account_key = _ensure_account_config_key(access_request.get('account_id'))
+        account_meta = (CONFIG.get('accounts') or {}).get(account_key)
+        if not account_meta:
+            return jsonify({'error': 'Account not found or not configured for revocation'}), 400
+        account_id = str(account_meta.get('id') or account_key).strip()
         permission_set_arn = access_request['permission_set']
         
         # Delete account assignment
@@ -3641,17 +3765,35 @@ def admin_revoke_database_sessions():
 
 @app.route('/api/approve/<request_id>', methods=['POST'])
 def approve_request(request_id):
-    data = request.json
-    approver_role = data.get('approver_role', 'self')  # Default to self for testing
-    
+    data = request.json or {}
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
     
     access_request = requests_db[request_id]
+    # Derive approver from session; do not trust body for authorization (security: approval bypass fix)
+    caller_ident = _current_request_identity()
+    caller_email = (caller_ident.get('email') or _email_from_saml_session() or '').strip().lower()
+    request_user = (access_request.get('user_email') or '').strip().lower()
+    required_roles = set(str(r).strip().lower() for r in (access_request.get('approval_required') or ['self']))
+    is_self = bool(caller_email and request_user and caller_email == request_user)
+    is_pam_admin = bool(_pam_admin_record_for_identity(
+        email=caller_ident.get('email') or '',
+        nameid=caller_ident.get('nameid') or '',
+        hints=caller_ident.get('hints') or {}
+    ))
+    if 'self' in required_roles and is_self:
+        role_norm = 'self'
+    elif is_pam_admin:
+        # PAM admin can satisfy any non-self role
+        role_norm = next((r for r in required_roles if r != 'self'), 'admin')
+    else:
+        return jsonify({'error': 'Not authorized to approve this request'}), 403
+    
+    # Keep body value for backward-compat response only; authorization uses role_norm above
+    approver_role = data.get('approver_role') or role_norm
     
     # Handle database_access requests
     if access_request.get('type') == 'database_access':
-        role_norm = str(approver_role or 'self').strip().lower()
 
         # Track approvals per request
         if request_id not in approvals_db:
@@ -3736,7 +3878,7 @@ def approve_request(request_id):
         approvals_db[request_id] = []
     
     approvals_db[request_id].append({
-        'approver_role': approver_role,
+        'approver_role': role_norm,
         'approved_at': datetime.now().isoformat()
     })
     
@@ -3745,12 +3887,14 @@ def approve_request(request_id):
     received_approvals = set([a['approver_role'] for a in approvals_db[request_id]])
     
     if required_approvals.issubset(received_approvals):
+        ps_name = access_request.get('permission_set_name') or access_request.get('permission_set') or ''
         # Create AI permission set if needed
         if access_request.get('ai_generated'):
             account_id = access_request['account_id'][-6:]  # Last 6 digits of account
             user_email = access_request['user_email'].split('@')[0].replace('.', '')[:8]  # First 8 chars of username
             ps_name = f"JIT_{account_id}_{user_email}_{request_id[:6]}"
-            ps_result = create_custom_permission_set(ps_name, access_request['ai_permissions'])
+            dur = access_request.get('duration_hours', 8)
+            ps_result = create_custom_permission_set(ps_name, access_request['ai_permissions'], duration_hours=dur)
             
             if 'error' in ps_result:
                 access_request['status'] = 'failed'
@@ -3859,7 +4003,10 @@ def grant_access(access_request):
         
         # Create account assignment
         account_key = _ensure_account_config_key(access_request.get('account_id'))
-        account_id = CONFIG['accounts'][account_key]['id']
+        account_meta = (CONFIG.get('accounts') or {}).get(account_key)
+        if not account_meta:
+            return jsonify({'error': 'Account not found or not configured. Refresh accounts and try again.'}), 400
+        account_id = str(account_meta.get('id') or account_key).strip()
         permission_set_arn = access_request['permission_set']
         
         print(f"Creating assignment: Account={account_id}, PermissionSet={permission_set_arn}")
@@ -4368,8 +4515,17 @@ def manual_onboard_user():
 
 @app.route('/api/request-for-others', methods=['POST'])
 def request_for_others():
-    """Submit access request on behalf of another user"""
+    """Submit access request on behalf of another user. Only PAM admins are allowed."""
     try:
+        ident = _current_request_identity()
+        admin_record = _pam_admin_record_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        if not admin_record:
+            return jsonify({'error': 'Only PAM admins can submit requests on behalf of others'}), 403
+        
         data = request.get_json()
         
         required_fields = ['requester_email', 'account_id', 'duration_hours', 'justification', 'requested_by']
@@ -4390,7 +4546,8 @@ def request_for_others():
             'created_at': datetime.now().isoformat(),
             'expires_at': (datetime.now() + timedelta(hours=data['duration_hours'])).isoformat(),
             'permission_set': 'ReadOnlyAccess',
-            'ai_generated': False
+            'ai_generated': False,
+            'approval_required': ['manager'],
         }
         
         requests_db[request_id] = new_request
@@ -4406,23 +4563,26 @@ def request_for_others():
 
 @app.route('/api/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
-    """Get audit logs for admin panel"""
+    """Get audit logs from persistence (SQLite audit_logs table)."""
     try:
-        audit_logs = [
-            {
-                'timestamp': '2024-01-15 10:30:15',
-                'user': 'satish.korra@nykaa.com',
-                'event': 'Access Request',
-                'resource': 'AWS Account 332463837037',
-                'ip_address': '192.168.1.100',
-                'status': 'Success'
-            }
-        ]
-        
+        limit = min(500, max(1, int(request.args.get('limit', 100))))
+        offset = max(0, int(request.args.get('offset', 0)))
+        rows = STORE.list_audit_logs(limit=limit, offset=offset)
+        # Shape for UI: event, resource, status
+        audit_logs = []
+        for r in rows:
+            audit_logs.append({
+                'timestamp': r.get('timestamp', ''),
+                'user': r.get('user', ''),
+                'event': r.get('action', ''),
+                'request_id': r.get('request_id', ''),
+                'role': r.get('role', ''),
+                'status': 'Success' if r.get('allowed') else 'Denied',
+                'error': r.get('error') or '',
+            })
         return jsonify(audit_logs)
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/analytics', methods=['GET'])
 def get_admin_analytics():
@@ -4480,49 +4640,54 @@ def sync_users():
 
 @app.route('/api/security/anomaly', methods=['POST'])
 def log_security_anomaly():
-    """Log security anomalies for admin notification"""
+    """Log security anomalies to audit store (persisted). Real alerts to be wired separately."""
     try:
-        anomaly_data = request.get_json()
-        
-        # In production, this would:
-        # 1. Store in security database
-        # 2. Send real-time alerts to admins
-        # 3. Integrate with SIEM systems
-        
-        print(f"🚨 SECURITY ANOMALY DETECTED: {anomaly_data}")
-        
-        # Simulate admin notification
-        admin_alert = {
+        anomaly_data = request.get_json() or {}
+        ts = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+        user = str(anomaly_data.get('user') or _email_from_saml_session() or '')[:256]
+        payload = {
             'alert_type': 'ANOMALOUS_ACCESS_REQUEST',
             'severity': anomaly_data.get('risk_level', 'MEDIUM'),
-            'user': anomaly_data.get('user'),
-            'anomalies': anomaly_data.get('anomalies', []),
-            'timestamp': anomaly_data.get('timestamp'),
-            'requires_investigation': True
+            'anomalies': anomaly_data.get('anomalies', [])[:50],
+            'requires_investigation': True,
         }
-        
+        try:
+            STORE.insert_audit_log(
+                ts=ts, user_email=user, request_id='', role='', action='security_anomaly',
+                allowed=False, payload=payload
+            )
+        except Exception:
+            pass
+        print(f"🚨 SECURITY ANOMALY DETECTED: {user}")
         return jsonify({
             'status': 'logged',
             'alert_id': str(uuid.uuid4()),
-            'admin_notified': True
+            'admin_notified': False,
         })
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/security/ai-usage', methods=['POST'])
 def log_ai_usage():
-    """Log AI usage for security monitoring"""
+    """Log AI usage to audit store (persisted)."""
     try:
-        usage_data = request.get_json()
-        
-        # In production, this would store in audit database
-        print(f"🤖 AI USAGE: {usage_data['user_email']} - Risk: {usage_data.get('risk_score', 0)}")
-        
+        usage_data = request.get_json() or {}
+        ts = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+        user = str(usage_data.get('user_email') or _email_from_saml_session() or '')[:256]
+        payload = {
+            'risk_score': usage_data.get('risk_score'),
+            'endpoint': usage_data.get('endpoint', '')[:128],
+        }
+        try:
+            STORE.insert_audit_log(
+                ts=ts, user_email=user, request_id='', role='', action='ai_usage',
+                allowed=True, payload=payload
+            )
+        except Exception:
+            pass
         return jsonify({'status': 'logged'})
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/siem/events', methods=['POST'])
 def send_to_siem():
@@ -9055,8 +9220,17 @@ def get_databases():
 def request_database_access():
     try:
         data = request.get_json() or {}
-        databases = data.get('databases', [])
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
         user_email = str(data.get('user_email') or '').strip()
+        if not user_email:
+            user_email = caller_email
+            data['user_email'] = caller_email
+        elif user_email.lower() != caller_email:
+            if not _pam_admin_record_for_identity(
+                email=caller_email, nameid=_current_request_identity().get('nameid') or '', hints=_current_request_identity().get('hints') or {}
+            ):
+                return jsonify({'error': 'You can only request database access for yourself unless you are a PAM admin'}), 403
+        databases = data.get('databases', [])
         user_full_name = str(data.get('user_full_name') or '').strip()
         requested_db_username = str(data.get('db_username') or '').strip()
         permissions_raw = data.get('permissions')
@@ -9116,6 +9290,9 @@ def request_database_access():
             return jsonify({'error': 'user_email is required'}), 400
         if not justification or len(justification) < 3:
             return jsonify({'error': 'Please provide a short business justification.'}), 400
+        if len(justification) > MAX_JUSTIFICATION_LENGTH:
+            return jsonify({'error': 'Justification must be at most {} characters.'.format(MAX_JUSTIFICATION_LENGTH)}), 400
+        justification = justification[:MAX_JUSTIFICATION_LENGTH]
 
         perms = _normalize_permissions_list(permissions_raw)
         perms_upper = [p.upper() for p in perms]
@@ -9750,4 +9927,6 @@ if __name__ == '__main__':
     cleanup_thread.start()
     print("✅ Background cleanup thread started")
     
-    app.run(host='0.0.0.0', debug=False, port=5000)
+    # Security: never run with debug=True in production
+    _debug = os.environ.get('FLASK_ENV', '').lower() != 'production' and os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+    app.run(host='0.0.0.0', debug=_debug, port=int(os.environ.get('PORT', 5000)))
