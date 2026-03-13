@@ -307,6 +307,23 @@ sudo -u npamx EMAIL=pam-admin@yourcompany.com PASSWORD='your-secure-password' py
 
 No separate database beyond this SQLite file is required; break-glass users and PAM admins (IdC users you promote) are stored as described above.
 
+**EC2 troubleshooting (git pull, permission, ModuleNotFoundError):**
+
+- **"dubious ownership" when running `git pull`:**  
+  `sudo git config --global --add safe.directory /opt/npamx/app`  
+  Then: `cd /opt/npamx/app && sudo git pull origin main && sudo chown -R npamx:npamx /opt/npamx/app`
+
+- **App was not a git repo / you cloned into a subdir by mistake:**  
+  If you have `/opt/npamx/app/JIT-PAM-Enterprise` with the new code and the running app is `/opt/npamx/app`, copy the repo over the app (keep .env and backend/data):  
+  `sudo cp -a /opt/npamx/app/.env /opt/npamx/app/backend/.env.bak 2>/dev/null; sudo rsync -a /opt/npamx/app/JIT-PAM-Enterprise/ /opt/npamx/app/; sudo chown -R npamx:npamx /opt/npamx/app; [ -f /opt/npamx/app/backend/.env.bak ] && sudo -u npamx mv /opt/npamx/app/backend/.env.bak /opt/npamx/app/backend/.env`
+
+- **"Permission denied" opening add_break_glass_user.py:**  
+  Ensure npamx can read the backend dir: `sudo chown -R npamx:npamx /opt/npamx/app`
+
+- **"ModuleNotFoundError: No module named 'break_glass_db'"**  
+  Run from backend with PYTHONPATH set:  
+  `cd /opt/npamx/app/backend && sudo -u npamx PYTHONPATH=/opt/npamx/app/backend python3 add_break_glass_user.py`
+
 ---
 
 ## 6. SAML metadata (Identity Center)

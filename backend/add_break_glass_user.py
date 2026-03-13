@@ -13,10 +13,12 @@ Then enter email and password when prompted. To non-interactively set (e.g. from
 import os
 import sys
 
-# Run from backend/
+# Ensure backend dir is on path so break_glass_db can be imported (run from anywhere)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+if _script_dir not in sys.path:
+    sys.path.insert(0, _script_dir)
 if __name__ == '__main__':
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    os.chdir(_script_dir)
 
 from break_glass_db import init_db, add_user, get_user_by_email
 
