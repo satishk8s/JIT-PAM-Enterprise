@@ -310,6 +310,7 @@ No separate database beyond this SQLite file is required; break-glass users and 
 **EC2 troubleshooting (git pull, permission, ModuleNotFoundError):**
 
 - **"dubious ownership" when running `git pull`:**  
+  Run this **first**, then pull (otherwise pull fails and you won't get new files like `break_glass_db.py`):  
   `sudo git config --global --add safe.directory /opt/npamx/app`  
   Then: `cd /opt/npamx/app && sudo git pull origin main && sudo chown -R npamx:npamx /opt/npamx/app`
 
@@ -521,6 +522,14 @@ If **lines do appear** but the target is still unhealthy, check the **response c
 - **ALB subnet:** Outbound allows 80 to instance subnet (or 0.0.0.0/0); inbound allows ephemeral for return traffic.
 
 If the instance subnet NACL has a “deny” or no “allow 80” from the ALB’s source, health checks will fail even when the instance SG allows 80.
+
+---
+
+**D) Host firewall on the instance (ufw / iptables)**  
+Even if the AWS security group allows port 80, a host firewall on the EC2 can drop traffic. On the instance run: `sudo ufw status` and `sudo iptables -L -n`. If ufw is active and port 80 is not allowed, run: `sudo ufw allow 80/tcp && sudo ufw reload`.
+
+**E) Test from another host in the same VPC**  
+From another EC2 or bastion in the same VPC run: `curl -s -o /dev/null -w "%{http_code}" http://<INSTANCE_PRIVATE_IP>/`. If it returns 200, the block is between ALB and instance (e.g. ALB SG or NACL). If it times out, the block is on the instance (SG, NACL, or host firewall).
 
 ---
 

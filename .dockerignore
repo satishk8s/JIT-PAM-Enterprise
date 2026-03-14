@@ -1,0 +1,24 @@
+# Don't copy these into the image (keeps image smaller and avoids secrets)
+.git
+.gitignore
+*.md
+.env
+.env.*
+backend/venv
+backend/.env
+backend/__pycache__
+backend/**/__pycache__
+backend/data
+*.pyc
+*.pyo
+node_modules
+frontend/node_modules
+.idea
+.vscode
+*.log
+deploy
+documents
+docs
+scripts
+apply_security_fixes.py
+SECURITY_FIXES_README.md
