@@ -2,10 +2,29 @@
  * Access Rules Management
  */
 
+function getAccessRulesApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
+function escapeAccessRulesHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function accessRulesJsString(value) {
+    return JSON.stringify(String(value == null ? '' : value));
+}
+
 async function loadAccessRules() {
     console.log('🔄 Loading access rules...');
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/access-rules');
+        const response = await fetch(`${getAccessRulesApiBase()}/admin/access-rules`, { credentials: 'include' });
         const data = await response.json();
         console.log('✅ Access rules loaded:', data);
         
@@ -32,25 +51,25 @@ function displayAccessRules(rules) {
         <div class="rule-card" style="padding: 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 12px;">
             <div style="display: flex; justify-content: space-between; align-items: start;">
                 <div style="flex: 1;">
-                    <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 14px;">${rule.name}</h4>
-                    <p style="margin: 0 0 8px 0; font-size: 12px; color: var(--text-secondary);">${rule.description}</p>
+                    <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 14px;">${escapeAccessRulesHtml(rule.name)}</h4>
+                    <p style="margin: 0 0 8px 0; font-size: 12px; color: var(--text-secondary);">${escapeAccessRulesHtml(rule.description)}</p>
                     <div style="font-size: 11px;">
                         <span style="background: #1976d2; color: #fff; padding: 2px 8px; border-radius: 4px; margin-right: 8px;">
-                            <i class="fas fa-users"></i> ${rule.groups.length} group(s)
+                            <i class="fas fa-users"></i> ${Array.isArray(rule.groups) ? rule.groups.length : 0} group(s)
                         </span>
                         <span style="background: #d32f2f; color: #fff; padding: 2px 8px; border-radius: 4px; margin-right: 8px;">
-                            <i class="fas fa-ban"></i> ${rule.denied_services.length} denied
+                            <i class="fas fa-ban"></i> ${Array.isArray(rule.denied_services) ? rule.denied_services.length : 0} denied
                         </span>
                         <span style="background: #7b1fa2; color: #fff; padding: 2px 8px; border-radius: 4px;">
-                            <i class="fas fa-${rule.method === 'AI' ? 'robot' : 'code'}"></i> ${rule.method || 'AI'}
+                            <i class="fas fa-${rule.method === 'AI' ? 'robot' : 'code'}"></i> ${escapeAccessRulesHtml(rule.method || 'AI')}
                         </span>
                     </div>
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button onclick="viewAccessRule('${rule.id}')" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
+                    <button onclick="viewAccessRule(${accessRulesJsString(rule.id)})" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
                         <i class="fas fa-eye"></i> View
                     </button>
-                    <button onclick="deleteAccessRule('${rule.id}')" class="btn-secondary" style="padding: 6px 12px; font-size: 12px; color: #f44336;">
+                    <button onclick="deleteAccessRule(${accessRulesJsString(rule.id)})" class="btn-secondary" style="padding: 6px 12px; font-size: 12px; color: #f44336;">
                         <i class="fas fa-trash"></i>
                     </button>
                 </div>
@@ -65,15 +84,16 @@ function displayAccessRules(rules) {
 
 async function viewAccessRule(ruleId) {
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/admin/access-rules/${ruleId}`);
+        const response = await fetch(`${getAccessRulesApiBase()}/admin/access-rules/${encodeURIComponent(ruleId)}`, { credentials: 'include' });
         const rule = await response.json();
         
         // Get group names
-        const groupsResponse = await fetch('http://127.0.0.1:5000/api/admin/groups');
+        const groupsResponse = await fetch(`${getAccessRulesApiBase()}/admin/groups`, { credentials: 'include' });
         const groupsData = await groupsResponse.json();
         const allGroups = groupsData.groups || [];
         
-        const groupNames = rule.groups.map(gid => {
+        const groupIds = Array.isArray(rule.groups) ? rule.groups : [];
+        const groupNames = groupIds.map(gid => {
             const group = allGroups.find(g => g.id === gid);
             return group ? group.name : gid;
         });
@@ -92,16 +112,16 @@ function showAccessRuleModal(rule, groupNames) {
     modal.innerHTML = `
         <div style="background: var(--bg-primary); border-radius: 12px; padding: 20px; max-width: 600px; width: 90%; max-height: 85vh; overflow: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 15px;">
-                <h3 style="margin: 0; color: var(--text-primary);"><i class="fas fa-shield-alt"></i> ${rule.name}</h3>
+                <h3 style="margin: 0; color: var(--text-primary);"><i class="fas fa-shield-alt"></i> ${escapeAccessRulesHtml(rule.name)}</h3>
                 <button onclick="this.closest('div[style*=fixed]').remove()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-secondary);">&times;</button>
             </div>
             
             <div style="margin-bottom: 20px;">
-                <p style="color: var(--text-secondary); font-size: 13px; line-height: 1.6;">${rule.description}</p>
+                <p style="color: var(--text-secondary); font-size: 13px; line-height: 1.6;">${escapeAccessRulesHtml(rule.description)}</p>
                 <div style="margin-top: 10px; padding: 10px; background: var(--bg-secondary); border-radius: 6px; font-size: 12px;">
-                    <div style="color: var(--text-secondary);"><i class="fas fa-user"></i> Created by: <strong style="color: var(--text-primary);">${rule.created_by || 'System'}</strong></div>
-                    <div style="color: var(--text-secondary); margin-top: 4px;"><i class="fas fa-${rule.method === 'AI' ? 'robot' : 'code'}"></i> Method: <strong style="color: var(--text-primary);">${rule.method || 'AI'}</strong></div>
-                    ${rule.created_at ? `<div style="color: var(--text-secondary); margin-top: 4px;"><i class="fas fa-clock"></i> Created: <strong style="color: var(--text-primary);">${new Date(rule.created_at).toLocaleString()}</strong></div>` : ''}
+                    <div style="color: var(--text-secondary);"><i class="fas fa-user"></i> Created by: <strong style="color: var(--text-primary);">${escapeAccessRulesHtml(rule.created_by || 'System')}</strong></div>
+                    <div style="color: var(--text-secondary); margin-top: 4px;"><i class="fas fa-${rule.method === 'AI' ? 'robot' : 'code'}"></i> Method: <strong style="color: var(--text-primary);">${escapeAccessRulesHtml(rule.method || 'AI')}</strong></div>
+                    ${rule.created_at ? `<div style="color: var(--text-secondary); margin-top: 4px;"><i class="fas fa-clock"></i> Created: <strong style="color: var(--text-primary);">${escapeAccessRulesHtml(new Date(rule.created_at).toLocaleString())}</strong></div>` : ''}
                 </div>
             </div>
             
@@ -110,7 +130,7 @@ function showAccessRuleModal(rule, groupNames) {
                 <div style="display: flex; flex-wrap: wrap; gap: 8px;">
                     ${groupNames.map(name => `
                         <span style="background: #1976d2; color: #fff; padding: 6px 12px; border-radius: 6px; font-size: 12px;">
-                            <i class="fas fa-users"></i> ${name}
+                            <i class="fas fa-users"></i> ${escapeAccessRulesHtml(name)}
                         </span>
                     `).join('')}
                 </div>
@@ -119,9 +139,9 @@ function showAccessRuleModal(rule, groupNames) {
             <div style="margin-bottom: 20px;">
                 <h4 style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-primary);">Allowed Services</h4>
                 <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                    ${rule.allowed_services.map(service => `
+                    ${(Array.isArray(rule.allowed_services) ? rule.allowed_services : []).map(service => `
                         <span style="background: #2e7d32; color: #fff; padding: 6px 12px; border-radius: 6px; font-size: 12px;">
-                            <i class="fas fa-check"></i> ${service.toUpperCase()}
+                            <i class="fas fa-check"></i> ${escapeAccessRulesHtml(String(service).toUpperCase())}
                         </span>
                     `).join('')}
                 </div>
@@ -130,9 +150,9 @@ function showAccessRuleModal(rule, groupNames) {
             <div style="margin-bottom: 20px;">
                 <h4 style="margin: 0 0 10px 0; font-size: 13px; color: var(--text-primary);">Denied Services</h4>
                 <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-                    ${rule.denied_services.map(service => `
+                    ${(Array.isArray(rule.denied_services) ? rule.denied_services : []).map(service => `
                         <span style="background: #d32f2f; color: #fff; padding: 6px 12px; border-radius: 6px; font-size: 12px;">
-                            <i class="fas fa-ban"></i> ${service.toUpperCase()}
+                            <i class="fas fa-ban"></i> ${escapeAccessRulesHtml(String(service).toUpperCase())}
                         </span>
                     `).join('')}
                 </div>
@@ -151,8 +171,9 @@ async function deleteAccessRule(ruleId) {
     if (!confirm('Delete this access rule?')) return;
     
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/admin/access-rules/${ruleId}`, {
-            method: 'DELETE'
+        const response = await fetch(`${getAccessRulesApiBase()}/admin/access-rules/${encodeURIComponent(ruleId)}`, {
+            method: 'DELETE',
+            credentials: 'include'
         });
         
         const data = await response.json();

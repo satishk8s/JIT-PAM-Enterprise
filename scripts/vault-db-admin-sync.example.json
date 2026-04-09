@@ -1,0 +1,25 @@
+{
+  "database_mount": "database",
+  "auto_discovery": {
+    "enabled": true,
+    "secret_prefix": "kv/npamx/db-admin/connections",
+    "kv_version": 2,
+    "create_if_missing": false,
+    "skip_missing_secret": true,
+    "defaults": {
+      "allowed_roles": "*",
+      "max_open_connections": 4,
+      "max_idle_connections": 0,
+      "max_connection_lifetime": "0s",
+      "verify_connection": true
+    }
+  },
+  "entries": [
+    {
+      "connection_name": "nonprod-redshift-dev",
+      "secret_ref": "kv/npamx/db-admin/shared/redshift-admin",
+      "kv_version": 2,
+      "create_if_missing": false
+    }
+  ]
+}

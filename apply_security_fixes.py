@@ -216,7 +216,7 @@ def _ensure_account_config_key(account_id):
 
     # --- frontend/app.js: remove ADMIN_USERS and use backend for admin ---
     patch('frontend/app.js',
-          ("const ADMIN_USERS = [\n    'satish.korra@nykaa.com',\n    'admin@nykaa.com',\n    'security@nykaa.com'\n];\nconst DEV_DUMMY_OTP = '123456';",
+          ("const ADMIN_USERS = [\n    'admin@example.com',\n    'security@example.com'\n];\nconst DEV_DUMMY_OTP = '123456';",
            "// Admin status from backend /api/admin/check-pam-admin only; no hardcoded list"))
     patch('frontend/app.js',
           ('        isAdmin = ADMIN_USERS.includes(email.toLowerCase());',

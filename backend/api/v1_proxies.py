@@ -9,7 +9,7 @@ def register_v1_proxies(app):
     """Add versioned API routes that call existing handlers. Call after all views are registered."""
     # Auth / Profile
     _add(app, "/api/v1/auth/login", ["GET"], "saml_login")
-    _add(app, "/api/v1/auth/saml/acs", ["GET", "POST"], "saml_acs")
+    _add(app, "/api/v1/auth/saml/acs", ["POST"], "saml_acs")
     _add(app, "/api/v1/auth/saml/complete", ["GET"], "saml_complete")
     _add(app, "/api/v1/profile/me", ["GET"], "saml_profile")
 
@@ -45,6 +45,11 @@ def register_v1_proxies(app):
     _add(app, "/api/v1/admin/identity-center/org-hierarchy", ["GET"], "list_identity_center_org_hierarchy")
     _add(app, "/api/v1/admin/pam-admins", ["GET"], "get_pam_admins")
     _add(app, "/api/v1/admin/pam-admins", ["POST"], "add_pam_admin")
+    _add(app, "/api/v1/admin/db-governance/summary", ["GET"], "get_admin_db_governance_summary")
+    _add(app, "/api/v1/admin/db-governance/accounts", ["GET"], "get_admin_db_governance_accounts")
+    _add(app, "/api/v1/admin/db-governance/databases", ["GET"], "get_admin_db_governance_databases")
+    _add(app, "/api/v1/admin/db-governance/findings", ["GET"], "get_admin_db_governance_findings")
+    _add(app, "/api/v1/admin/db-governance/scan-status", ["GET"], "get_admin_db_governance_scan_status")
 
     # Admin features & guardrails
     _add(app, "/api/v1/admin/features", ["GET"], "get_admin_features")

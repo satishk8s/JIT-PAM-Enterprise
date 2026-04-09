@@ -2,9 +2,28 @@
  * Service Control Policy (SCP) Manager
  */
 
+function getScpManagerApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
+function escapeScpHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function scpJsString(value) {
+    return JSON.stringify(String(value == null ? '' : value));
+}
+
 async function loadSCPs() {
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/scps');
+        const response = await fetch(`${getScpManagerApiBase()}/admin/scps`, { credentials: 'include' });
         const data = await response.json();
         
         if (data.error) {
@@ -32,19 +51,19 @@ function displaySCPs(policies) {
         <div class="scp-card" style="padding: 15px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 10px;">
             <div style="display: flex; justify-content: space-between; align-items: start;">
                 <div style="flex: 1;">
-                    <h4 style="margin: 0 0 5px 0; color: var(--text-primary);">${policy.name}</h4>
-                    <p style="margin: 0; font-size: 12px; color: var(--text-secondary);">${policy.description || 'No description'}</p>
+                    <h4 style="margin: 0 0 5px 0; color: var(--text-primary);">${escapeScpHtml(policy.name)}</h4>
+                    <p style="margin: 0; font-size: 12px; color: var(--text-secondary);">${escapeScpHtml(policy.description || 'No description')}</p>
                     ${policy.aws_managed ? '<span style="font-size: 11px; color: #4A90E2;">AWS Managed</span>' : ''}
                 </div>
                 <div style="display: flex; gap: 8px;">
-                    <button onclick="viewSCP('${policy.id}')" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
+                    <button onclick="viewSCP(${scpJsString(policy.id)})" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
                         <i class="fas fa-eye"></i> View
                     </button>
                     ${!policy.aws_managed ? `
-                        <button onclick="editSCP('${policy.id}')" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
+                        <button onclick="editSCP(${scpJsString(policy.id)})" class="btn-secondary" style="padding: 6px 12px; font-size: 12px;">
                             <i class="fas fa-edit"></i> Edit
                         </button>
-                        <button onclick="deleteSCP('${policy.id}')" class="btn-secondary" style="padding: 6px 12px; font-size: 12px; color: #f44336;">
+                        <button onclick="deleteSCP(${scpJsString(policy.id)})" class="btn-secondary" style="padding: 6px 12px; font-size: 12px; color: #f44336;">
                             <i class="fas fa-trash"></i>
                         </button>
                     ` : ''}
@@ -56,7 +75,7 @@ function displaySCPs(policies) {
 
 async function viewSCP(policyId) {
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/admin/scps/${policyId}`);
+        const response = await fetch(`${getScpManagerApiBase()}/admin/scps/${encodeURIComponent(policyId)}`, { credentials: 'include' });
         const data = await response.json();
         
         if (data.error) {
@@ -80,26 +99,26 @@ function showSCPModal(policy, mode) {
     modal.innerHTML = `
         <div style="background: var(--bg-primary); border-radius: 12px; padding: 20px; max-width: 800px; width: 90%; max-height: 85vh; overflow: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 15px;">
-                <h3 style="margin: 0; color: var(--text-primary);"><i class="fas fa-shield-alt"></i> ${policy.name}</h3>
+                <h3 style="margin: 0; color: var(--text-primary);"><i class="fas fa-shield-alt"></i> ${escapeScpHtml(policy.name)}</h3>
                 <button onclick="this.closest('div[style*=fixed]').remove()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: var(--text-secondary);">&times;</button>
             </div>
             
             <div style="margin-bottom: 15px;">
                 <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 5px;">Policy Content (JSON)</label>
-                <textarea id="scpContent" ${readonly ? 'readonly' : ''} style="width: 100%; height: 300px; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; font-family: monospace; font-size: 12px; background: var(--bg-secondary); color: var(--text-primary);">${JSON.stringify(policy.content, null, 2)}</textarea>
+                <textarea id="scpContent" ${readonly ? 'readonly' : ''} style="width: 100%; height: 300px; padding: 12px; border: 1px solid var(--border-color); border-radius: 8px; font-family: monospace; font-size: 12px; background: var(--bg-secondary); color: var(--text-primary);">${escapeScpHtml(JSON.stringify(policy.content, null, 2))}</textarea>
             </div>
             
             ${policy.targets && policy.targets.length > 0 ? `
                 <div style="margin-bottom: 15px;">
                     <label style="display: block; font-size: 13px; color: var(--text-secondary); margin-bottom: 5px;">Attached To</label>
                     <div style="padding: 10px; background: var(--bg-secondary); border-radius: 8px;">
-                        ${policy.targets.map(t => `<div style="font-size: 12px; color: var(--text-primary); margin-bottom: 4px;"><i class="fas fa-link"></i> ${t.name} (${t.type})</div>`).join('')}
+                        ${policy.targets.map(t => `<div style="font-size: 12px; color: var(--text-primary); margin-bottom: 4px;"><i class="fas fa-link"></i> ${escapeScpHtml(t.name)} (${escapeScpHtml(t.type)})</div>`).join('')}
                     </div>
                 </div>
             ` : ''}
             
             <div style="display: flex; gap: 10px; justify-content: flex-end;">
-                ${!readonly ? `<button onclick="saveSCP('${policy.id}')" class="btn-primary">Save Changes</button>` : ''}
+                ${!readonly ? `<button onclick="saveSCP(${scpJsString(policy.id)})" class="btn-primary">Save Changes</button>` : ''}
                 <button onclick="this.closest('div[style*=fixed]').remove()" class="btn-secondary">Close</button>
             </div>
         </div>
@@ -164,9 +183,10 @@ async function createNewSCP() {
     try {
         const contentJson = JSON.parse(content);
         
-        const response = await fetch('http://127.0.0.1:5000/api/admin/scps', {
+        const response = await fetch(`${getScpManagerApiBase()}/admin/scps`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify({
                 name: name,
                 description: description,
@@ -193,8 +213,9 @@ async function deleteSCP(policyId) {
     if (!confirm('Delete this SCP? This action cannot be undone.')) return;
     
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/admin/scps/${policyId}`, {
-            method: 'DELETE'
+        const response = await fetch(`${getScpManagerApiBase()}/admin/scps/${encodeURIComponent(policyId)}`, {
+            method: 'DELETE',
+            credentials: 'include'
         });
         
         const data = await response.json();

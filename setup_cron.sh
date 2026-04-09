@@ -4,7 +4,7 @@
 echo "🚀 Setting up JIT Access automation..."
 
 # Create cron job for every 15 minutes
-CRON_JOB="*/15 * * * * cd /Users/satish.korra/Desktop/sso && python scheduler.py >> /tmp/jit_scheduler.log 2>&1"
+CRON_JOB="*/15 * * * * cd $HOME/Documents/sso && python scheduler.py >> /tmp/jit_scheduler.log 2>&1"
 
 # Add to crontab
 (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -

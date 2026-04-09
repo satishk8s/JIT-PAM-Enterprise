@@ -1,12 +1,22 @@
 // Database Management - Tree + AI + JIT Access
 
-const DB_API_BASE = (typeof API_BASE !== 'undefined') ? API_BASE.replace('/api', '') : 'http://localhost:5000';
+const DB_API_BASE = (function() {
+    const configured = String(
+        (typeof window !== 'undefined' && window.API_BASE)
+            ? window.API_BASE
+            : ((typeof API_BASE !== 'undefined') ? API_BASE : '')
+    ).replace(/\/+$/, '');
+    if (configured) {
+        return configured.endsWith('/api') ? configured.slice(0, -4) : configured;
+    }
+    return window.location.origin;
+})();
 let selectedDatabases = [];
 let currentDbAccount = '';
 let dbConversationId = null;
 let selectedEngine = null;
 let dbRequestDraft = null;
-let dbStatusFilter = 'active';
+let dbStatusFilter = 'pending';
 let dbStepState = null; // { step: 1|2|3|4, provider: 'aws'|'managed'|'gcp'|'azure'|'oracle'|'atlas' }
 let dbAccessMode = 'ai'; // 'ai' | 'structured'
 let dbStructuredPermissions = [];
@@ -16,6 +26,9 @@ let dbRequestsPageSize = 20;
 let dbRequestsSearch = '';
 let dbBulkDeleteSelection = new Set();
 let dbVisibleBulkDeleteIds = [];
+let databaseRequestsCache = [];
+let dbRequestsLoadSeq = 0;
+let dbRequestsRefreshPollId = null;
 let dbInstancePolicy = {
     account_env: '',
     data_classification: '',
@@ -25,6 +38,1106 @@ let dbInstancePolicy = {
     request_allowed: true,
     request_block_reason: ''
 };
+let dbWorkflowPreview = null;
+let dbWorkflowPreviewKey = '';
+let dbWorkflowPreviewPending = false;
+let dbWorkflowPreviewSeq = 0;
+let dbLastPolicyPopupKey = '';
+let dbLastGuardrailPopupKey = '';
+let dbRequestRecipients = [];
+let dbVisiblePermissionOps = ['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE'];
+let dbEffectiveIamRoles = [];
+let dbSelectedIamRoleId = '';
+let dbProfileLoadPromise = null;
+let dbApproverEmailManuallyEdited = false;
+let dbOwnerEmailManuallyEdited = false;
+let dbSelectedOwner = null;
+const DEFAULT_DB_POLICY_BLOCK_REASON = 'Required classification tags are missing on the selected database target. Please contact your PAM administrator.';
+const DB_WRITE_APPROVAL_GUIDANCE = 'You are not allowed to request write actions here. Please connect with DevOps and SecOps team for approvals to perform any kind of write actions. Once you have approval, connect with NPAMx admin to allow you to place the request.';
+const DB_REQUEST_DISCLAIMER = 'Access will be granted exactly as requested. Incorrect details may result in failed or unusable access.';
+const DB_DISPLAY_TIMEZONE = 'Asia/Kolkata';
+
+function parseDbDate(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return null;
+    let normalized = raw;
+    const looksIso = /^\d{4}-\d{2}-\d{2}t/i.test(normalized);
+    const hasTz = /(?:z|[+-]\d{2}:\d{2})$/i.test(normalized);
+    // Backend often stores ISO timestamps without TZ; treat them as UTC.
+    if (looksIso && !hasTz) normalized += 'Z';
+    const parsed = new Date(normalized);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed;
+}
+
+function formatDbDateTime(value) {
+    const parsed = parseDbDate(value);
+    if (!parsed) return '—';
+    try {
+        const formatted = new Intl.DateTimeFormat('en-IN', {
+            timeZone: DB_DISPLAY_TIMEZONE,
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        }).format(parsed);
+        return `${formatted} IST`;
+    } catch (_) {
+        return parsed.toLocaleString('en-IN', { timeZone: DB_DISPLAY_TIMEZONE });
+    }
+}
+
+function getDbEndpointLabel(mode) {
+    return String(mode || '').trim().toLowerCase() === 'direct' ? 'Direct Endpoint' : 'Proxy Endpoint';
+}
+
+async function confirmDbRequestSubmission() {
+    if (typeof confirmAppAction !== 'function') return true;
+    return await confirmAppAction(DB_REQUEST_DISCLAIMER, {
+        title: 'Confirm database request',
+        confirmLabel: 'Submit request',
+        cancelLabel: 'Cancel',
+        variant: 'warning'
+    });
+}
+
+function setDbSubmitStatus(elementId, message, variant) {
+    if (typeof setInlineStatus === 'function') {
+        setInlineStatus(elementId, message, variant || 'info');
+        return;
+    }
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    const text = String(message || '').trim();
+    if (!text) {
+        el.hidden = true;
+        el.textContent = '';
+        el.removeAttribute('data-variant');
+        return;
+    }
+    el.hidden = false;
+    el.textContent = text;
+    el.setAttribute('data-variant', String(variant || 'info'));
+}
+
+function setDbSubmitBusy(buttonId, busy, busyLabel) {
+    const btn = document.getElementById(buttonId);
+    if (!btn) return;
+    if (!btn.dataset.defaultHtml) {
+        btn.dataset.defaultHtml = btn.innerHTML;
+    }
+    btn.disabled = !!busy;
+    if (busy) {
+        btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${busyLabel || 'Submitting...'}`;
+    } else {
+        btn.innerHTML = btn.dataset.defaultHtml || btn.innerHTML;
+    }
+}
+
+function setDbRequestsLoadingState(message) {
+    const list = document.getElementById('dbRequestsList');
+    if (list) {
+        list.innerHTML = `<div class="db-requests-empty"><i class="fas fa-spinner fa-spin"></i> ${escapeHtml(String(message || 'Loading database requests...'))}</div>`;
+    }
+    const pager = document.getElementById('dbRequestsPager');
+    if (pager) {
+        pager.innerHTML = '';
+    }
+}
+
+function clearDbRequestsRefreshPoll() {
+    if (dbRequestsRefreshPollId) {
+        window.clearTimeout(dbRequestsRefreshPollId);
+        dbRequestsRefreshPollId = null;
+    }
+}
+
+function isDbRetryableActivation(req) {
+    if (!req || typeof req !== 'object') return false;
+    if (req.activation_retryable === true) return true;
+    const code = String(req.activation_error_code || '').trim().toUpperCase();
+    if (['ACTIVATION_IN_PROGRESS', 'IDC_ASSIGNMENT_FAILED', 'VAULT_UNREACHABLE'].includes(code)) return true;
+    const activationMessage = String(req.activation_progress?.message || '').toLowerCase();
+    const activationError = String(req.activation_error || '').toLowerCase();
+    return (
+        activationMessage.includes('preparing access') ||
+        activationMessage.includes('activation is pending') ||
+        activationMessage.includes('permission assignment is pending') ||
+        activationError.includes('retry in a few minutes') ||
+        activationError.includes('still being prepared')
+    );
+}
+
+function isDbApprovedStaleRequest(req) {
+    if (!req || typeof req !== 'object') return false;
+    const lifecycle = String(req.lifecycle_status || req.status || '').trim().toLowerCase();
+    if (lifecycle !== 'approved') return false;
+    if (String(req.db_username || '').trim()) return false;
+    return true;
+}
+
+function scheduleDbRequestsRefreshWhileProvisioning(requests) {
+    clearDbRequestsRefreshPoll();
+    const rows = Array.isArray(requests) ? requests : [];
+    const hasProvisioning = rows.some(req => String(req?.status || '').toLowerCase() === 'approved' && isDbRetryableActivation(req));
+    if (!hasProvisioning) return;
+    dbRequestsRefreshPollId = window.setTimeout(() => {
+        loadDbRequests();
+        refreshApprovedDatabases();
+    }, 4000);
+}
+
+function getDbRequestHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (typeof getCsrfToken === 'function') {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    }
+    return headers;
+}
+
+function getActiveRequestUserEmail() {
+    return String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+}
+
+function getDbProfileSnapshot() {
+    return (typeof window !== 'undefined' && window.NPAM_USER_PROFILE && typeof window.NPAM_USER_PROFILE === 'object')
+        ? window.NPAM_USER_PROFILE
+        : {};
+}
+
+async function ensureDbProfileLoaded(force) {
+    if (getDbRequestMode() === 'others') return getDbProfileSnapshot();
+    const profile = getDbProfileSnapshot();
+    const hasAnyProfile = Object.keys(profile).length > 0;
+    const hasApproverProfile = !!String(profile.manager_email || profile.manager_manager_email || '').trim();
+    if (!force && hasAnyProfile && hasApproverProfile) return profile;
+    if (dbProfileLoadPromise) return dbProfileLoadPromise;
+    if (typeof window === 'undefined' || typeof window.loadProfileData !== 'function') return profile;
+    dbProfileLoadPromise = Promise.resolve(window.loadProfileData())
+        .then(function(data) {
+            applyDbProfileDefaults(true);
+            syncDbApprovalUiState();
+            return data;
+        })
+        .catch(function() {
+            return getDbProfileSnapshot();
+        })
+        .finally(function() {
+            dbProfileLoadPromise = null;
+        });
+    return dbProfileLoadPromise;
+}
+
+function getDbProfileApproverEmail() {
+    if (getDbRequestMode() === 'others') {
+        if (dbRequestRecipients.length === 1) {
+            return getDbRecipientAutoApprover(dbRequestRecipients[0]) || '';
+        }
+        return '';
+    }
+    const profile = (typeof window !== 'undefined' && window.NPAM_USER_PROFILE && typeof window.NPAM_USER_PROFILE === 'object')
+        ? window.NPAM_USER_PROFILE
+        : {};
+    const managerEmail = String(profile.manager_email || '').trim().toLowerCase();
+    const managerManagerEmail = String(profile.manager_manager_email || '').trim().toLowerCase();
+    return managerEmail || managerManagerEmail;
+}
+
+function canRequestDbForOthers() {
+    if (typeof canAccessAdminConsole === 'function') return canAccessAdminConsole();
+    if (typeof currentPamRole === 'function') {
+        const role = currentPamRole();
+        return role === 'Engineer' || role === 'Admin' || role === 'SuperAdmin';
+    }
+    return String(localStorage.getItem('isAdmin') || '').toLowerCase() === 'true';
+}
+
+function canDbOverrideApproverEmail() {
+    if (typeof canAccessAdminConsole === 'function') return canAccessAdminConsole();
+    return false;
+}
+
+function getDbRequestMode() {
+    const raw = String(dbRequestDraft?.request_for_mode || 'self').trim().toLowerCase();
+    if (raw === 'others' && canRequestDbForOthers()) return 'others';
+    return 'self';
+}
+
+function normalizeDbRequestRecipient(item) {
+    const source = item || {};
+    const email = String(source.email || '').trim().toLowerCase();
+    if (!email) return null;
+    return {
+        email,
+        display_name: String(source.display_name || source.name || email).trim() || email,
+        manager_email: String(source.manager_email || '').trim().toLowerCase(),
+        manager_manager_email: String(source.manager_manager_email || '').trim().toLowerCase(),
+    };
+}
+
+function getDbRecipientAutoApprover(recipient) {
+    const item = recipient || {};
+    return String(item.manager_email || item.manager_manager_email || '').trim().toLowerCase();
+}
+
+function getCurrentDbRequesterRecord() {
+    const email = getActiveRequestUserEmail();
+    if (!email) return null;
+    const business = (typeof window !== 'undefined' && window.NPAM_USER_PROFILE && typeof window.NPAM_USER_PROFILE === 'object')
+        ? window.NPAM_USER_PROFILE
+        : {};
+    return {
+        email,
+        display_name: String((currentProfileData && currentProfileData.display_name) || (currentUser && currentUser.name) || localStorage.getItem('userName') || email).trim(),
+        manager_email: String(business.manager_email || '').trim().toLowerCase(),
+        manager_manager_email: String(business.manager_manager_email || '').trim().toLowerCase(),
+    };
+}
+
+function getDbRequestRecipientsForSubmission() {
+    if (getDbRequestMode() === 'others') {
+        return dbRequestRecipients.slice();
+    }
+    const self = getCurrentDbRequesterRecord();
+    return self ? [self] : [];
+}
+
+function getDbRequestTargetSummaryLabel() {
+    const recipients = getDbRequestRecipientsForSubmission();
+    if (!recipients.length) return '—';
+    if (getDbRequestMode() !== 'others') {
+        const self = recipients[0];
+        return (self.display_name || self.email) + ' (' + self.email + ')';
+    }
+    if (recipients.length === 1) {
+        const target = recipients[0];
+        return (target.display_name || target.email) + ' (' + target.email + ')';
+    }
+    return recipients.length + ' users selected';
+}
+
+function getDbRecipientFullName(recipient) {
+    const item = recipient || {};
+    return String(item.display_name || item.name || item.email || '').trim();
+}
+
+function buildDbRecipientSubmissionTargets(approverRequired, manualApproverEmail) {
+    const recipients = getDbRequestRecipientsForSubmission();
+    if (!recipients.length) {
+        throw new Error(getDbRequestMode() === 'others'
+            ? 'Please select one or more users for this request.'
+            : 'Your session is missing the authenticated user email. Sign in again and retry.');
+    }
+    return recipients.map(function(recipient) {
+        const email = String(recipient.email || '').trim().toLowerCase();
+        const autoApprover = getDbRecipientAutoApprover(recipient);
+        const approverEmail = getDbRequestMode() === 'others'
+            ? autoApprover
+            : String(manualApproverEmail || '').trim().toLowerCase();
+        if (approverRequired && !approverEmail) {
+            throw new Error(
+                getDbRequestMode() === 'others'
+                    ? `RM email is missing for ${email}. Ask the user to complete their workforce profile before raising the request.`
+                    : 'Please enter the approver email address.'
+            );
+        }
+        return {
+            email,
+            fullName: getDbRecipientFullName(recipient) || email.split('@')[0].replace(/\./g, ' '),
+            requestApproverEmail: approverEmail,
+            dbUsername: email.split('@')[0],
+        };
+    });
+}
+
+function renderDbRequestRecipientResults(panel, results) {
+    const wrap = document.getElementById(panel === 'ai' ? 'dbAiRequestUserResults' : 'dbStructuredRequestUserResults');
+    if (!wrap) return;
+    if (!results || !results.length) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>No matching users found.</span></div>';
+        return;
+    }
+    wrap.innerHTML = results.map(function(item, index) {
+        const email = String(item.email || '').trim().toLowerCase();
+        const already = dbRequestRecipients.some(function(rec) { return rec.email === email; });
+        return `<div class="guardrail-search-item">
+            <span><strong>${escapeHtml(item.display_name || email)}</strong><br><small>${escapeHtml(email)}</small></span>
+            <button type="button" class="btn-secondary btn-sm" onclick="addDbRequestRecipient('${panel}', ${index})" ${already ? 'disabled' : ''}>${already ? 'Added' : 'Add'}</button>
+        </div>`;
+    }).join('');
+}
+
+function renderDbRequestRecipientUi(panel) {
+    const mode = getDbRequestMode();
+    const allowOthers = canRequestDbForOthers();
+    const selfRadio = document.getElementById(panel === 'ai' ? 'dbAiRequestTargetSelf' : 'dbStructuredRequestTargetSelf');
+    const othersRadio = document.getElementById(panel === 'ai' ? 'dbAiRequestTargetOthers' : 'dbStructuredRequestTargetOthers');
+    const searchWrap = document.getElementById(panel === 'ai' ? 'dbAiRequestUserSearchWrap' : 'dbStructuredRequestUserSearchWrap');
+    const selectedWrap = document.getElementById(panel === 'ai' ? 'dbAiRequestUserSelected' : 'dbStructuredRequestUserSelected');
+    const hintEl = document.getElementById(panel === 'ai' ? 'dbAiRequestTargetHint' : 'dbStructuredRequestTargetHint');
+    if (selfRadio) selfRadio.checked = mode === 'self';
+    if (othersRadio) {
+        othersRadio.checked = mode === 'others';
+        othersRadio.disabled = !allowOthers;
+        const label = othersRadio.closest('.db-radio-label');
+        if (label) label.style.display = allowOthers ? '' : 'none';
+    }
+    if (searchWrap) searchWrap.style.display = mode === 'others' && allowOthers ? '' : 'none';
+    if (selectedWrap) {
+        if (mode !== 'others' || !allowOthers) {
+            selectedWrap.innerHTML = '';
+            selectedWrap.style.display = 'none';
+        } else {
+            selectedWrap.style.display = '';
+            selectedWrap.innerHTML = dbRequestRecipients.length
+                ? `<div class="guardrail-chip-list">` + dbRequestRecipients.map(function(item) {
+                    const approver = getDbRecipientAutoApprover(item);
+                    return `<span class="guardrail-chip">
+                        ${escapeHtml(item.display_name || item.email)}
+                        <small style="opacity:0.8;">${escapeHtml(item.email)}</small>
+                        ${approver ? `<small style="opacity:0.8;">RM: ${escapeHtml(approver)}</small>` : '<small style="opacity:0.8;">RM missing</small>'}
+                        <button type="button" onclick="removeDbRequestRecipient('${String(item.email || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')">&times;</button>
+                    </span>`;
+                }).join('') + `</div>`
+                : '<div class="guardrail-search-item"><span>Select one or more users to raise this request on their behalf.</span></div>';
+        }
+    }
+    if (hintEl) {
+        hintEl.textContent = mode === 'others' && allowOthers
+            ? 'NPAMx will create one request per selected user and use each user’s RM automatically for approval routing.'
+            : 'This request will be raised for your own account and use your saved RM details for approval routing.';
+    }
+}
+
+function refreshDbRequestRecipientUi() {
+    renderDbRequestRecipientUi('structured');
+    renderDbRequestRecipientUi('ai');
+    if (!document.getElementById('dbStructuredPanel')?.classList.contains('db-structured-panel-hidden') && dbRequestDraft?._selectedInstance?.id) {
+        refreshDbStructuredAccessCatalog(selectedEngine?.engine || dbRequestDraft?._selectedInstance?.engine || '');
+    }
+    if (typeof hydrateStructuredSummary === 'function') hydrateStructuredSummary();
+    if (typeof showDbRequestSummaryIfReady === 'function') showDbRequestSummaryIfReady();
+    syncDbApprovalUiState();
+}
+
+function setDbRequestMode(mode) {
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.request_for_mode = (String(mode || '').trim().toLowerCase() === 'others' && canRequestDbForOthers()) ? 'others' : 'self';
+    if (dbRequestDraft.request_for_mode !== 'others') {
+        dbRequestRecipients = [];
+        dbApproverEmailManuallyEdited = false;
+    }
+    applyDbProfileDefaults(true);
+    refreshDbRequestRecipientUi();
+}
+
+async function searchDbRequestUsers(panel) {
+    const input = document.getElementById(panel === 'ai' ? 'dbAiRequestUserSearch' : 'dbStructuredRequestUserSearch');
+    const query = String((input && input.value) || '').trim();
+    const wrap = document.getElementById(panel === 'ai' ? 'dbAiRequestUserResults' : 'dbStructuredRequestUserResults');
+    if (!wrap) return;
+    if (!query) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>Enter a name or email to search.</span></div>';
+        return;
+    }
+    wrap.innerHTML = '<div class="guardrail-search-item"><span>Searching…</span></div>';
+    try {
+        const data = await apiJson('/profile/directory-search?q=' + encodeURIComponent(query));
+        window.__dbRequestUserSearch = window.__dbRequestUserSearch || { structured: [], ai: [] };
+        window.__dbRequestUserSearch[panel] = Array.isArray(data.users) ? data.users : [];
+        renderDbRequestRecipientResults(panel, window.__dbRequestUserSearch[panel]);
+    } catch (err) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>' + escapeHtml(err.message || 'Search failed.') + '</span></div>';
+    }
+}
+
+function addDbRequestRecipient(panel, index) {
+    const results = (window.__dbRequestUserSearch && window.__dbRequestUserSearch[panel]) || [];
+    const item = normalizeDbRequestRecipient(results[index]);
+    if (!item) return;
+    if (!dbRequestRecipients.some(function(existing) { return existing.email === item.email; })) {
+        dbRequestRecipients.push(item);
+    }
+    renderDbRequestRecipientResults(panel, results);
+    refreshDbRequestRecipientUi();
+}
+
+function removeDbRequestRecipient(email) {
+    const target = String(email || '').trim().toLowerCase();
+    dbRequestRecipients = dbRequestRecipients.filter(function(item) { return item.email !== target; });
+    refreshDbRequestRecipientUi();
+}
+
+function getDbApproverEmail() {
+    const structured = String(document.getElementById('dbStructuredApproverEmail')?.value || '').trim().toLowerCase();
+    const ai = String(document.getElementById('dbAiApproverEmail')?.value || '').trim().toLowerCase();
+    return structured || ai || getDbProfileApproverEmail();
+}
+
+function syncDbApproverEmail(value) {
+    const email = String(value || '').trim().toLowerCase();
+    const structured = document.getElementById('dbStructuredApproverEmail');
+    const ai = document.getElementById('dbAiApproverEmail');
+    if (structured && structured.value.trim().toLowerCase() !== email) structured.value = email;
+    if (ai && ai.value.trim().toLowerCase() !== email) ai.value = email;
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.request_approver_email = email;
+}
+
+function handleDbApproverEmailInput(value) {
+    if (!canDbOverrideApproverEmail()) {
+        applyDbProfileDefaults(true);
+        return;
+    }
+    dbApproverEmailManuallyEdited = true;
+    syncDbApproverEmail(value);
+    refreshDbWorkflowPreview();
+}
+window.handleDbApproverEmailInput = handleDbApproverEmailInput;
+
+function getDbOwnerEmail() {
+    const structured = String(document.getElementById('dbStructuredDbOwnerEmail')?.value || '').trim().toLowerCase();
+    const ai = String(document.getElementById('dbAiDbOwnerEmail')?.value || '').trim().toLowerCase();
+    return structured || ai || '';
+}
+
+function renderDbOwnerSelection(panel) {
+    const wrap = document.getElementById(panel === 'ai' ? 'dbAiDbOwnerSelected' : 'dbStructuredDbOwnerSelected');
+    if (!wrap) return;
+    if (!dbSelectedOwner || !dbSelectedOwner.email) {
+        wrap.innerHTML = '';
+        return;
+    }
+    const label = dbSelectedOwner.display_name || dbSelectedOwner.email;
+    wrap.innerHTML = `<div class="guardrail-chip-list"><span class="guardrail-chip">
+        ${escapeHtml(label)}
+        <small style="opacity:0.8;">${escapeHtml(dbSelectedOwner.email)}</small>
+        <button type="button" onclick="clearDbOwnerSelection()">&times;</button>
+    </span></div>`;
+}
+
+function syncDbOwnerEmail(value, displayName) {
+    const email = String(value || '').trim().toLowerCase();
+    const label = String(displayName || '').trim();
+    const structured = document.getElementById('dbStructuredDbOwnerEmail');
+    const ai = document.getElementById('dbAiDbOwnerEmail');
+    if (structured && structured.value.trim().toLowerCase() !== email) structured.value = email;
+    if (ai && ai.value.trim().toLowerCase() !== email) ai.value = email;
+    dbRequestDraft = dbRequestDraft || {};
+    dbRequestDraft.db_owner_email = email;
+    if (email) {
+        dbSelectedOwner = {
+            email,
+            display_name: label || (dbSelectedOwner?.email === email ? dbSelectedOwner?.display_name : '') || email
+        };
+    } else {
+        dbSelectedOwner = null;
+    }
+    renderDbOwnerSelection('structured');
+    renderDbOwnerSelection('ai');
+}
+
+function handleDbOwnerEmailInput(value) {
+    dbOwnerEmailManuallyEdited = true;
+    syncDbOwnerEmail(value);
+    refreshDbWorkflowPreview();
+}
+window.handleDbOwnerEmailInput = handleDbOwnerEmailInput;
+
+function clearDbOwnerSelection() {
+    dbOwnerEmailManuallyEdited = false;
+    syncDbOwnerEmail('', '');
+    refreshDbWorkflowPreview();
+}
+window.clearDbOwnerSelection = clearDbOwnerSelection;
+
+function renderDbOwnerSearchResults(panel, results) {
+    const wrap = document.getElementById(panel === 'ai' ? 'dbAiDbOwnerResults' : 'dbStructuredDbOwnerResults');
+    if (!wrap) return;
+    if (!Array.isArray(results) || !results.length) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>No users found.</span></div>';
+        return;
+    }
+    wrap.innerHTML = results.map(function(item, index) {
+        const email = String(item.email || '').trim().toLowerCase();
+        const already = email && email === String(getDbOwnerEmail() || '').trim().toLowerCase();
+        return `<div class="guardrail-search-item">
+            <span><strong>${escapeHtml(item.display_name || email)}</strong><br><small>${escapeHtml(email)}</small></span>
+            <button type="button" class="btn-secondary btn-sm" onclick="selectDbOwnerSearchResult('${panel}', ${index})" ${already ? 'disabled' : ''}>${already ? 'Added' : 'Add'}</button>
+        </div>`;
+    }).join('');
+}
+
+async function searchDbOwnerUsers(panel) {
+    const input = document.getElementById(panel === 'ai' ? 'dbAiDbOwnerSearch' : 'dbStructuredDbOwnerSearch');
+    const query = String((input && input.value) || '').trim();
+    const wrap = document.getElementById(panel === 'ai' ? 'dbAiDbOwnerResults' : 'dbStructuredDbOwnerResults');
+    if (!wrap) return;
+    if (!query) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>Enter a name or email to search.</span></div>';
+        return;
+    }
+    wrap.innerHTML = '<div class="guardrail-search-item"><span>Searching…</span></div>';
+    try {
+        const data = await apiJson('/profile/directory-search?q=' + encodeURIComponent(query));
+        window.__dbOwnerSearch = window.__dbOwnerSearch || { structured: [], ai: [] };
+        window.__dbOwnerSearch[panel] = Array.isArray(data.users) ? data.users : [];
+        renderDbOwnerSearchResults(panel, window.__dbOwnerSearch[panel]);
+    } catch (err) {
+        wrap.innerHTML = '<div class="guardrail-search-item"><span>' + escapeHtml(err.message || 'Search failed.') + '</span></div>';
+    }
+}
+window.searchDbOwnerUsers = searchDbOwnerUsers;
+
+function selectDbOwnerSearchResult(panel, index) {
+    const results = (window.__dbOwnerSearch && window.__dbOwnerSearch[panel]) || [];
+    const item = normalizeDbRequestRecipient(results[index]);
+    if (!item) return;
+    dbOwnerEmailManuallyEdited = true;
+    syncDbOwnerEmail(item.email, item.display_name || item.email);
+    renderDbOwnerSearchResults(panel, results);
+    refreshDbWorkflowPreview();
+}
+window.selectDbOwnerSearchResult = selectDbOwnerSearchResult;
+
+function applyDbProfileDefaults(force) {
+    const defaultEmail = getDbProfileApproverEmail();
+    if (!defaultEmail) {
+        if (force) {
+            ensureDbProfileLoaded(true).catch(function() {});
+        }
+        return;
+    }
+    const structured = document.getElementById('dbStructuredApproverEmail');
+    const ai = document.getElementById('dbAiApproverEmail');
+    const shouldApply = getDbRequestMode() !== 'others'
+        && (force || !dbApproverEmailManuallyEdited || !String(dbRequestDraft?.request_approver_email || '').trim());
+    if (!shouldApply) return;
+    if (structured && (force || !String(structured.value || '').trim() || !dbApproverEmailManuallyEdited)) structured.value = defaultEmail;
+    if (ai && (force || !String(ai.value || '').trim() || !dbApproverEmailManuallyEdited)) ai.value = defaultEmail;
+    if ((force || !String(dbRequestDraft?.request_approver_email || '').trim() || !dbApproverEmailManuallyEdited) && defaultEmail) {
+        dbRequestDraft = dbRequestDraft || {};
+        dbRequestDraft.request_approver_email = defaultEmail;
+    }
+}
+window.applyDbProfileDefaults = applyDbProfileDefaults;
+
+function getDbEffectiveIamRoleById(roleId) {
+    const rid = String(roleId || '').trim();
+    return (dbEffectiveIamRoles || []).find(function(role) {
+        return String(role.id || '').trim() === rid;
+    }) || null;
+}
+
+function getDbSelectedIamRole() {
+    return dbSelectedIamRoleId ? getDbEffectiveIamRoleById(dbSelectedIamRoleId) : null;
+}
+
+function getDbSelectedIamRoleType() {
+    const role = getDbSelectedIamRole();
+    return String((role && role.request_role) || '').trim().toLowerCase();
+}
+
+function getDbRoleActionList(role) {
+    const roleType = String(role?.request_role || '').trim().toLowerCase();
+    if (roleType === 'read_only') {
+        const engine = String((dbRequestDraft?._selectedInstance || {}).engine || selectedEngine?.engine || '').trim();
+        return getDbDefaultReadBaseOps(engine).map(function(item) {
+            return String(item || '').trim().toUpperCase();
+        }).filter(Boolean);
+    }
+    return Array.isArray(role?.actions)
+        ? role.actions.map(function(item) { return String(item || '').trim().toUpperCase(); }).filter(Boolean)
+        : [];
+}
+
+function getDbReadRoleExtraActions(selectedRole) {
+    const baseActions = new Set(getDbRoleActionList(selectedRole));
+    return (dbStructuredPermissions || []).map(function(item) {
+        return String(item || '').trim().toUpperCase();
+    }).filter(Boolean).filter(function(item) {
+        return !baseActions.has(item);
+    });
+}
+
+function renderDbEffectiveIamRoles() {
+    const select = document.getElementById('dbStructuredIamRoleSelect');
+    const hint = document.getElementById('dbStructuredIamRoleHint');
+    if (!select) return;
+    const hasTarget = !!(String(dbRequestDraft?.account_id || '').trim() && String((dbRequestDraft?._selectedInstance || {}).id || '').trim());
+    const roles = Array.isArray(dbEffectiveIamRoles) ? dbEffectiveIamRoles : [];
+    const currentValue = dbSelectedIamRoleId && getDbEffectiveIamRoleById(dbSelectedIamRoleId) ? dbSelectedIamRoleId : '';
+    select.innerHTML = ['<option value="">Select access role</option>'].concat(roles.map(function(role) {
+        return '<option value="' + escapeAttr(role.id || '') + '">' + escapeHtml(role.name || role.id || 'Saved role') + '</option>';
+    })).join('');
+    select.value = currentValue;
+    select.disabled = !hasTarget || !roles.length;
+    if (hint) {
+        if (!hasTarget) {
+            hint.textContent = 'Select account and instance first to load the access roles available for this request.';
+        } else if (!roles.length) {
+            hint.textContent = 'No access roles are available for the selected request target(s) on this database.';
+        } else if (currentValue) {
+            const role = getDbEffectiveIamRoleById(currentValue);
+            if (!role) {
+                hint.textContent = 'Pick an access role to continue.';
+            } else {
+                const roleType = String(role.request_role || '').trim().toLowerCase();
+                const baseActions = getDbRoleActionList(role);
+                if (roleType === 'read_only') {
+                    const extraActions = getDbReadRoleExtraActions(role);
+                    hint.textContent = 'Read Only includes: ' + (baseActions.join(', ') || 'SELECT') + '. You can add more read-only actions below if needed' + (extraActions.length ? ' (' + extraActions.join(', ') + ' selected).' : '.');
+                } else {
+                    hint.textContent = (role.name || 'Selected role') + ' includes: ' + (baseActions.join(', ') || '—') + '. Additional permission customization is disabled for this role.';
+                }
+            }
+        } else {
+            hint.textContent = 'Pick an access role to see what it includes. Read Only can be extended with extra read-only actions if needed.';
+        }
+    }
+    updateDbStructuredPermissionVisibility();
+}
+
+function syncDbSelectedIamRoleWithPermissions() {
+    if (!dbSelectedIamRoleId) {
+        return;
+    }
+    const role = getDbEffectiveIamRoleById(dbSelectedIamRoleId);
+    if (!role) {
+        dbSelectedIamRoleId = '';
+        if (dbRequestDraft) {
+            delete dbRequestDraft.iam_role_template_id;
+            delete dbRequestDraft.iam_role_template_name;
+        }
+        renderDbEffectiveIamRoles();
+        return;
+    }
+    const expected = (role.actions || []).map(function(item) { return String(item || '').trim().toUpperCase(); }).filter(Boolean).sort();
+    const selected = (dbStructuredPermissions || []).map(function(item) { return String(item || '').trim().toUpperCase(); }).filter(Boolean).sort();
+    const roleType = String(role.request_role || '').trim().toLowerCase();
+    if (roleType === 'read_only') {
+        const expectedReadOnly = getDbRoleActionList(role).sort();
+        const selectedSet = new Set(selected);
+        const hasAllBaseActions = expectedReadOnly.every(function(item) { return selectedSet.has(item); });
+        const hasOnlyReadActions = selected.every(function(item) { return DB_READ_ONLY_OPS.has(item); });
+        if (hasAllBaseActions && hasOnlyReadActions) {
+            renderDbEffectiveIamRoles();
+            return;
+        }
+    }
+    if (expected.length !== selected.length || expected.some(function(item, index) { return item !== selected[index]; })) {
+        dbSelectedIamRoleId = '';
+        if (dbRequestDraft) {
+            delete dbRequestDraft.iam_role_template_id;
+            delete dbRequestDraft.iam_role_template_name;
+        }
+        renderDbEffectiveIamRoles();
+    }
+}
+
+function applyDbEffectiveIamRole(roleId) {
+    const rid = String(roleId || '').trim();
+    dbSelectedIamRoleId = rid;
+    dbRequestDraft = dbRequestDraft || {};
+    if (!rid) {
+        delete dbRequestDraft.iam_role_template_id;
+        delete dbRequestDraft.iam_role_template_name;
+        delete dbRequestDraft.role;
+        renderDbEffectiveIamRoles();
+        hydrateStructuredSummary();
+        return;
+    }
+    const role = getDbEffectiveIamRoleById(rid);
+    if (!role) {
+        dbSelectedIamRoleId = '';
+        delete dbRequestDraft.iam_role_template_id;
+        delete dbRequestDraft.iam_role_template_name;
+        delete dbRequestDraft.role;
+        renderDbEffectiveIamRoles();
+        return;
+    }
+    dbRequestDraft.iam_role_template_id = role.id;
+    dbRequestDraft.iam_role_template_name = role.name || role.id;
+    dbRequestDraft.role = String(role.request_role || '').trim().toLowerCase() || deriveStructuredRole(role.actions || []);
+    dbStructuredPermissions = getDbRoleActionList(role);
+    renderDbEffectiveIamRoles();
+    renderStructuredPermissionGroups(selectedEngine?.engine || dbRequestDraft?._selectedInstance?.engine || '');
+    syncStructuredPermissionUI();
+    hydrateStructuredSummary();
+    Promise.resolve(ensureDbProfileLoaded(false)).then(function() {
+        applyDbProfileDefaults(true);
+        refreshDbWorkflowPreview();
+    }).catch(function() {});
+}
+window.applyDbEffectiveIamRole = applyDbEffectiveIamRole;
+
+async function refreshDbEffectiveIamRoles() {
+    const selectedInstance = dbRequestDraft?._selectedInstance || {};
+    const accountId = String(dbRequestDraft?.account_id || '').trim();
+    if (!accountId || !selectedInstance.id) {
+        dbEffectiveIamRoles = [];
+        dbSelectedIamRoleId = '';
+        if (dbRequestDraft) {
+            delete dbRequestDraft.iam_role_template_id;
+            delete dbRequestDraft.iam_role_template_name;
+        }
+        renderDbEffectiveIamRoles();
+        return;
+    }
+    try {
+        const targetEmails = getDbRequestRecipientsForSubmission().map(function(item) {
+            return String(item.email || '').trim().toLowerCase();
+        }).filter(Boolean);
+        const res = await fetch(`${DB_API_BASE}/api/iam-roles/effective`, {
+            method: 'POST',
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({
+                account_id: accountId,
+                db_instance_id: String(selectedInstance.id || '').trim(),
+                engine: normalizeEngineForStructured(selectedInstance.engine || selectedEngine?.engine || ''),
+                user_emails: targetEmails
+            })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to load IAM roles.');
+        dbEffectiveIamRoles = Array.isArray(data.roles) ? data.roles : [];
+    } catch (_) {
+        dbEffectiveIamRoles = [];
+    }
+    const selectedRole = dbSelectedIamRoleId ? getDbEffectiveIamRoleById(dbSelectedIamRoleId) : null;
+    if (!selectedRole) {
+        dbSelectedIamRoleId = '';
+        if (dbRequestDraft) {
+            delete dbRequestDraft.iam_role_template_id;
+            delete dbRequestDraft.iam_role_template_name;
+            delete dbRequestDraft.role;
+        }
+    } else {
+        dbStructuredPermissions = getDbRoleActionList(selectedRole);
+        dbRequestDraft.role = String(selectedRole.request_role || '').trim().toLowerCase() || deriveStructuredRole(selectedRole.actions || []);
+    }
+    renderDbEffectiveIamRoles();
+    if (!dbSelectedIamRoleId && dbEffectiveIamRoles.length) {
+        const preferred = dbEffectiveIamRoles.find(function(role) {
+            return String(role.request_role || '').trim().toLowerCase() === 'read_only';
+        }) || dbEffectiveIamRoles[0];
+        if (preferred && preferred.id) applyDbEffectiveIamRole(preferred.id);
+    } else {
+        updateDbStructuredPermissionVisibility();
+    }
+}
+
+function updateDbStructuredPermissionVisibility() {
+    const groupsSection = document.getElementById('dbStructuredPermissionGroupsSection');
+    const selectedSection = document.getElementById('dbStructuredSelectedSection');
+    const groupsTitle = groupsSection ? groupsSection.querySelector('h4') : null;
+    const selectedTitle = selectedSection ? selectedSection.querySelector('h4') : null;
+    const selectedRoleType = getDbSelectedIamRoleType();
+    const showCustom = selectedRoleType === 'read_only';
+    if (groupsSection) groupsSection.style.display = showCustom ? '' : 'none';
+    if (selectedSection) selectedSection.style.display = showCustom ? '' : 'none';
+    if (groupsTitle) groupsTitle.textContent = 'Add Additional Read Actions';
+    if (selectedTitle) selectedTitle.textContent = 'Selected Read Actions';
+}
+
+async function refreshDbStructuredAccessCatalog(engine) {
+    await refreshDbRequestableActions();
+    await refreshDbEffectiveIamRoles();
+    renderStructuredPermissionGroups(engine || selectedEngine?.engine || dbRequestDraft?._selectedInstance?.engine || '');
+    syncStructuredPermissionUI();
+}
+
+function renderDbWorkflowPreview(message, variant) {
+    const targets = [
+        document.getElementById('dbStructuredWorkflowPreview'),
+        document.getElementById('dbAiWorkflowPreview')
+    ].filter(Boolean);
+    targets.forEach(function(el) {
+        const text = String(message || '').trim();
+        if (!text) {
+            el.style.display = 'none';
+            el.textContent = '';
+            el.removeAttribute('data-variant');
+            return;
+        }
+        el.style.display = 'block';
+        el.textContent = text;
+        el.setAttribute('data-variant', String(variant || 'info'));
+    });
+}
+
+function dbWorkflowRequiresApprover() {
+    return !!(dbWorkflowPreview && dbWorkflowPreview.requires_request_approver);
+}
+
+function dbWorkflowHasSelfApproval() {
+    return !!(dbWorkflowPreview && dbWorkflowPreview.self_approval_allowed);
+}
+
+function getDbInstanceBlockedReason() {
+    if (dbInstancePolicy?.request_allowed === false) {
+        return dbInstancePolicy.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON;
+    }
+    const selectedInstance = dbRequestDraft?._selectedInstance || {};
+    if (selectedInstance.request_allowed === false || selectedInstance.iam_auth_enabled === false) {
+        return String(selectedInstance.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON).trim();
+    }
+    return '';
+}
+
+function dbWorkflowBlockedReason() {
+    const instanceBlockedReason = getDbInstanceBlockedReason();
+    if (instanceBlockedReason) return instanceBlockedReason;
+    if (dbWorkflowPreview && dbWorkflowPreview.blocked_by_guardrail) {
+        return String(dbWorkflowPreview.message || '').trim();
+    }
+    return '';
+}
+
+function maybeShowDbGuardrailPopup() {
+    if (!(dbWorkflowPreview && dbWorkflowPreview.blocked_by_guardrail)) return;
+    const reason = String(dbWorkflowPreview.message || '').trim();
+    if (!reason) return;
+    const key = JSON.stringify({
+        reason: reason,
+        instance_id: String((dbRequestDraft?._selectedInstance || {}).id || '').trim().toLowerCase(),
+        permissions: (Array.isArray(dbStructuredPermissions) ? dbStructuredPermissions : []).map(function(item) {
+            return String(item || '').trim().toUpperCase();
+        }).join(',')
+    });
+    if (key === dbLastGuardrailPopupKey) return;
+    dbLastGuardrailPopupKey = key;
+    showDbErrorPopup(reason, [
+        'This action is currently blocked by the configured database guardrails.',
+        'Remove the blocked write actions or contact the NPAMx admin if an approved exception is required.'
+    ], 'Guardrail Blocked');
+}
+
+function getDbApproverDisplay() {
+    if (getDbRequestMode() === 'others') {
+        if (!dbRequestRecipients.length) return 'Select user(s)';
+        if (dbRequestRecipients.length === 1) {
+            return getDbRecipientAutoApprover(dbRequestRecipients[0]) || 'RM missing on target user profile';
+        }
+        return 'Auto per selected user';
+    }
+    const approverEmail = getDbApproverEmail();
+    if (dbWorkflowRequiresApprover()) return approverEmail || '—';
+    if (dbWorkflowHasSelfApproval()) return 'Self approval';
+    if (dbWorkflowPreview && !dbWorkflowRequiresApprover()) return 'Not required';
+    return approverEmail || '—';
+}
+
+function syncDbApprovalUiState() {
+    const blockedReason = dbWorkflowBlockedReason();
+    const requiresApprover = dbWorkflowRequiresApprover();
+    const workflowKnown = !!(dbWorkflowPreview && (dbWorkflowPreview.workflow_id || dbWorkflowPreview.blocked_by_guardrail || dbWorkflowPreview.error));
+    const autoPerRecipient = getDbRequestMode() === 'others';
+    const hideApproverField = autoPerRecipient || dbWorkflowPreviewPending || !!blockedReason || (workflowKnown && !requiresApprover);
+
+    const structuredInput = document.getElementById('dbStructuredApproverEmail');
+    const aiInput = document.getElementById('dbAiApproverEmail');
+    const structuredField = structuredInput?.closest('.db-structured-field');
+    const aiField = aiInput?.closest('.db-structured-field');
+    if (structuredField) structuredField.style.display = hideApproverField ? 'none' : '';
+    if (aiField) aiField.style.display = hideApproverField ? 'none' : '';
+    const adminCanOverride = canDbOverrideApproverEmail();
+    [structuredInput, aiInput].forEach(function(input) {
+        if (!input) return;
+        input.readOnly = !adminCanOverride;
+        input.setAttribute('aria-readonly', adminCanOverride ? 'false' : 'true');
+        input.title = adminCanOverride
+            ? 'Admins can override the approver email when needed.'
+            : 'This approver email is locked to your saved reporting manager. Contact NPAMX admins if a fallback approver is required.';
+    });
+    [structuredField, aiField].forEach(function(field) {
+        const hint = field ? field.querySelector('.db-step-hint') : null;
+        if (!hint) return;
+        hint.textContent = adminCanOverride
+            ? 'Auto-filled from the requester profile. Admins can override this when manager fallback or testing is required.'
+            : 'Auto-filled from your saved reporting manager profile. If your manager is unavailable, contact NPAMX admins to reroute approval from Pending Approvals.';
+    });
+
+    if (workflowKnown && !requiresApprover) {
+        syncDbApproverEmail('');
+    }
+    if (!adminCanOverride && requiresApprover && getDbRequestMode() !== 'others') {
+        const lockedDefault = getDbProfileApproverEmail();
+        if (lockedDefault && String(getDbApproverEmail() || '').trim().toLowerCase() !== lockedDefault) {
+            dbApproverEmailManuallyEdited = false;
+            syncDbApproverEmail(lockedDefault);
+        }
+    }
+    if (requiresApprover && getDbRequestMode() !== 'others' && !String(getDbApproverEmail() || '').trim()) {
+        ensureDbProfileLoaded(true).then(function() {
+            const nextEmail = getDbProfileApproverEmail();
+            if (nextEmail) syncDbApproverEmail(nextEmail);
+        }).catch(function() {});
+    }
+
+    const structuredBtn = document.getElementById('dbStructuredSubmitBtn');
+    const aiBtn = document.getElementById('dbAiSubmitBtn');
+    if (structuredBtn) structuredBtn.disabled = !!blockedReason || dbWorkflowPreviewPending;
+    if (aiBtn) aiBtn.disabled = !!blockedReason || dbWorkflowPreviewPending;
+}
+
+function maybeShowDbInstancePolicyPopup(policy) {
+    const p = policy || dbInstancePolicy || {};
+    if (!p || p.request_allowed !== false) return;
+    const reason = String(p.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON).trim();
+    if (!reason) return;
+    const key = JSON.stringify({
+        reason: reason,
+        account_env: String(p.account_env || '').trim().toLowerCase(),
+        data_classification: String(p.data_classification || '').trim().toLowerCase()
+    });
+    if (key === dbLastPolicyPopupKey) return;
+    dbLastPolicyPopupKey = key;
+    showDbErrorPopup(reason, [
+        'Contact the DevOps team to enable IAM authentication or complete the required RDS/Redshift metadata configuration.',
+        'Once IAM authentication is enabled, return here and continue with the access request.'
+    ], 'Database Request Blocked');
+}
+
+async function refreshDbWorkflowPreview() {
+    await ensureDbProfileLoaded(false);
+    applyDbProfileDefaults(false);
+    updateDbDurationUi();
+    const accountId = String(dbRequestDraft?.account_id || '').trim();
+    if (!accountId) {
+        dbWorkflowPreview = null;
+        dbWorkflowPreviewKey = '';
+        dbWorkflowPreviewPending = false;
+        renderDbWorkflowPreview('', 'info');
+        applyDbInstancePolicyNotice(dbInstancePolicy || {});
+        syncDbApprovalUiState();
+        return;
+    }
+    const permissions = Array.isArray(dbStructuredPermissions) && dbStructuredPermissions.length
+        ? dbStructuredPermissions.slice()
+        : (String(dbRequestDraft?.permissions || '').split(',').map(function(item) { return item.trim().toUpperCase(); }).filter(Boolean));
+    const selectedInstance = dbRequestDraft?._selectedInstance || {};
+    if (dbInstancePolicy?.request_allowed === false || selectedInstance.request_allowed === false || selectedInstance.iam_auth_enabled === false) {
+        dbWorkflowPreviewPending = false;
+        dbWorkflowPreviewKey = '';
+        dbWorkflowPreview = null;
+        renderDbWorkflowPreview('', 'info');
+        applyDbInstancePolicyNotice(dbInstancePolicy || selectedInstance);
+        maybeShowDbInstancePolicyPopup(dbInstancePolicy || selectedInstance);
+        syncDbApprovalUiState();
+        return;
+    }
+    if (!permissions.length) {
+        dbWorkflowPreview = null;
+        dbWorkflowPreviewKey = '';
+        dbWorkflowPreviewPending = false;
+        renderDbWorkflowPreview('', 'info');
+        applyDbInstancePolicyNotice(dbInstancePolicy || selectedInstance);
+        syncDbApprovalUiState();
+        return;
+    }
+    const role = deriveStructuredRole(Array.isArray(dbStructuredPermissions) ? dbStructuredPermissions : []);
+    const selectedRole = getDbEffectiveIamRoleById(dbSelectedIamRoleId);
+    const requestRole = String((selectedRole && selectedRole.request_role) || dbRequestDraft?.role || role || '').trim().toLowerCase() || role;
+    const key = JSON.stringify({
+        accountId,
+        role: requestRole,
+        permissions: permissions.slice().sort().join(','),
+        instanceId: String(selectedInstance.id || '').trim(),
+        region: String(selectedInstance.region || '').trim(),
+        accountEnv: String(selectedInstance.account_env || dbInstancePolicy?.account_env || '').trim().toLowerCase(),
+        dataClassification: String(selectedInstance.data_classification || dbInstancePolicy?.data_classification || '').trim().toLowerCase(),
+        isPii: !!(selectedInstance.is_sensitive_classification || dbInstancePolicy?.is_sensitive_classification),
+        dbOwnerEmail: getDbOwnerEmail(),
+    });
+    if (dbWorkflowPreviewKey === key && dbWorkflowPreview && !dbWorkflowPreview.error && !dbWorkflowPreview.blocked_by_guardrail) {
+        const cached = dbWorkflowPreview;
+        renderDbWorkflowPreview(
+            `Workflow: ${cached.workflow_name || '—'} | ${cached.self_approval_allowed ? 'Self approval' : ('SecOps lead: ' + (cached.security_lead_email || '—'))} | Pending expiry: ${cached.pending_request_expiry_hours || 12}h`,
+            'info'
+        );
+        syncDbApprovalUiState();
+        return;
+    }
+    const previewSeq = ++dbWorkflowPreviewSeq;
+    dbWorkflowPreviewPending = true;
+    renderDbWorkflowPreview('Checking applicable guardrails and approval workflow...', 'info');
+    syncDbApprovalUiState();
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/workflow-preview`, {
+            method: 'POST',
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({
+                account_id: accountId,
+                db_instance_id: String(selectedInstance.id || '').trim(),
+                region: String(selectedInstance.region || '').trim(),
+                engine: String(selectedInstance.engine || selectedEngine?.engine || '').trim().toLowerCase(),
+                resource_kind: String(selectedInstance.resource_kind || '').trim().toLowerCase(),
+                user_emails: getDbRequestRecipientsForSubmission().map(function(item) {
+                    return String(item.email || '').trim().toLowerCase();
+                }).filter(Boolean),
+                permissions,
+                role: requestRole,
+                iam_role_template_id: String(dbRequestDraft?.iam_role_template_id || '').trim(),
+                iam_role_template_name: String(dbRequestDraft?.iam_role_template_name || '').trim(),
+                data_classification: String(selectedInstance.data_classification || dbInstancePolicy?.data_classification || '').trim().toLowerCase(),
+                is_pii: !!(selectedInstance.is_sensitive_classification || dbInstancePolicy?.is_sensitive_classification),
+                db_owner_email: getDbOwnerEmail(),
+            })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'No matching approval workflow found.');
+        if (previewSeq !== dbWorkflowPreviewSeq) return;
+        dbWorkflowPreviewPending = false;
+        dbWorkflowPreview = data;
+        dbWorkflowPreviewKey = key;
+        updateDbDurationUi();
+        renderDbWorkflowPreview(
+            `Workflow: ${data.workflow_name || '—'} | ${data.self_approval_allowed ? 'Self approval' : ('SecOps lead: ' + (data.security_lead_email || '—'))} | Pending expiry: ${data.pending_request_expiry_hours || 12}h`,
+            'info'
+        );
+        applyDbInstancePolicyNotice(dbInstancePolicy || selectedInstance);
+        syncDbApprovalUiState();
+    } catch (error) {
+        if (previewSeq !== dbWorkflowPreviewSeq) return;
+        dbWorkflowPreviewPending = false;
+        dbWorkflowPreview = null;
+        dbWorkflowPreviewKey = '';
+        const message = safeUserFacingErrorMessage(error);
+        if (
+            message === DB_WRITE_APPROVAL_GUIDANCE
+            || message.indexOf('You are not allowed to request write actions') >= 0
+            || message.indexOf('cannot use a self-approval workflow') >= 0
+        ) {
+            dbWorkflowPreview = {
+                blocked_by_guardrail: true,
+                message: DB_WRITE_APPROVAL_GUIDANCE,
+                requires_request_approver: false,
+                self_approval_allowed: false
+            };
+            renderDbWorkflowPreview('', 'info');
+            applyDbInstancePolicyNotice(dbInstancePolicy);
+            maybeShowDbGuardrailPopup();
+            syncDbApprovalUiState();
+            return;
+        }
+        dbWorkflowPreview = {
+            error: true,
+            message: message,
+            requires_request_approver: false,
+            self_approval_allowed: false
+        };
+        renderDbWorkflowPreview(message, 'error');
+        applyDbInstancePolicyNotice(dbInstancePolicy || selectedInstance);
+        syncDbApprovalUiState();
+    }
+}
 
 function isDbFeatureEnabled(key, fallback) {
     const defaultValue = (typeof fallback === 'boolean') ? fallback : true;
@@ -88,6 +1201,12 @@ window.applyDatabaseFeatureFlags = applyDatabaseFeatureFlags;
 
 const DB_READ_ONLY_OPS = new Set(['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE']);
 
+function getDbDefaultReadBaseOps(engine) {
+    const e = normalizeEngineForStructured(engine);
+    if (['documentdb', 'mongodb', 'docdb'].includes(e)) return ['FIND'];
+    return ['SELECT'];
+}
+
 // Structured permission catalog (engine-specific filtering applied at render time)
 const DB_STRUCTURED_PERMISSIONS = [
     {
@@ -109,16 +1228,6 @@ const DB_STRUCTURED_PERMISSIONS = [
         id: 'index',
         title: 'Index & Performance',
         ops: ['CREATE INDEX', 'DROP INDEX', 'ANALYZE']
-    },
-    {
-        id: 'privileges',
-        title: 'Privileges',
-        ops: ['GRANT', 'REVOKE']
-    },
-    {
-        id: 'admin',
-        title: 'Administrative',
-        ops: ['EXECUTE', 'CALL', 'LOCK', 'UNLOCK']
     }
 ];
 
@@ -260,6 +1369,8 @@ function closeDbStepPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    dbRequestRecipients = [];
+    dbRequestDraft = null;
     resetDbInstancePolicy();
     applyDbInstancePolicyNotice(null);
 }
@@ -275,6 +1386,8 @@ function closeDbAiPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    dbRequestRecipients = [];
+    dbRequestDraft = null;
     resetDbInstancePolicy();
     applyDbInstancePolicyNotice(null);
 }
@@ -290,6 +1403,8 @@ function closeDbStructuredPanel() {
     dbStepState = null;
     dbConversationId = null;
     dbStructuredPermissions = [];
+    dbRequestRecipients = [];
+    dbRequestDraft = null;
     resetDbInstancePolicy();
     applyDbInstancePolicyNotice(null);
 }
@@ -303,6 +1418,10 @@ function openStructuredDatabaseAccess() {
         }
     } catch (_) {}
     if (typeof showPage === 'function') showPage('databases');
+    Promise.resolve(ensureDbProfileLoaded(false)).then(function() {
+        applyDbProfileDefaults(true);
+        if (dbRequestDraft?.account_id) refreshDbWorkflowPreview();
+    }).catch(function() {});
 }
 
 function setDbAccessMode(mode) {
@@ -375,122 +1494,116 @@ async function renderDbStepContent() {
             `;
         } else if (step === 2 && useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
-            content.innerHTML = `<div class="db-step-loading"><i class="fas fa-spinner fa-spin"></i> Fetching RDS instances…</div>`;
+            const targetMeta = getDbTargetUiMeta(selectedEngine?.engine);
+            content.innerHTML = `<div class="db-step-loading"><i class="fas fa-spinner fa-spin"></i> Fetching ${escapeHtml(targetMeta.plural.toLowerCase())}…</div>`;
             const result = await fetchDatabasesForAccount(accountId, selectedEngine?.engine);
-            const instances = result.databases || [];
+            const dbs = result.databases || [];
             if (result.error) {
-                showDbErrorPopup(result.error, result.instructions);
+                showDbErrorPopup(result.error, result.instructions, 'Unable to List ' + targetMeta.plural);
+            } else if (accountId && !dbs.length) {
+                showDbErrorPopup(
+                    'No ' + targetMeta.plural.toLowerCase() + ' found for the selected account in this region.',
+                    [
+                        'Verify the selected account has ' + targetMeta.plural.toLowerCase() + ' in the selected region.',
+                        'If DevOps exposes replica-only databases, confirm those replicas exist and are visible to the PAM role.',
+                        'Check the backend IAM role has read permissions for the selected service.'
+                    ],
+                    'No ' + targetMeta.plural + ' Found'
+                );
             } else {
                 dbLastFetchError = null;
             }
-            const emptyMsg = result.error
-                ? 'Could not list RDS instances. Check permissions or enter instance ID manually.'
-                : 'No RDS instances found in this account.';
             content.innerHTML = `
-                ${result.error ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View error details">&#128577; Unable to list RDS — Click to see instructions</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
-                ${instances.length ? `
-                <div class="db-step-toolbar">
-                    <div class="db-step-toolbar-left">
-                        <span class="db-step-count"><i class="fas fa-server"></i> <span id="dbStepInstanceCount">${instances.length}</span> Instances</span>
-                        <span class="db-step-toolbar-subtle">Use search and pick from the dropdown.</span>
-                    </div>
-                    <div class="db-step-search">
-                        <i class="fas fa-search"></i>
-                        <input type="text" id="dbStepInstanceSearch" placeholder="Type to filter instance ID, engine, or default DB..." oninput="filterDbStepInstances()">
-                    </div>
-                </div>` : ''}
                 <div class="db-step-field">
-                    <label>Select RDS Instance</label>
-                    ${instances.length ? `
-                    <div class="db-instance-select-shell">
-                        <i class="fas fa-server"></i>
-                        <select id="dbStepInstanceSelect" class="db-step-select db-step-instance-select" onchange="onDbStepInstanceDropdownChange(this)">
-                            <option value="">-- Select an RDS instance --</option>
-                            ${instances.map(inst => {
-                                const eng = (inst.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
-                                const defaultDb = inst.name || 'default';
-                                const searchText = escapeAttr(`${inst.id} ${inst.engine} ${defaultDb} ${inst.region || ''}`.toLowerCase());
-                                return `<option
-                                    value="${escapeAttr(inst.id)}"
-                                    data-name="${escapeAttr(defaultDb)}"
-                                    data-engine="${escapeAttr(eng)}"
-                                    data-auth-mode="${escapeAttr(inst.auth_mode || '')}"
-                                    data-iam-auth-enabled="${escapeAttr(String(!!inst.iam_auth_enabled))}"
-                                    data-password-auth-enabled="${escapeAttr(String(inst.password_auth_enabled !== false))}"
-                                    data-db-resource-id="${escapeAttr(inst.db_resource_id || '')}"
-                                    data-region="${escapeAttr(inst.region || '')}"
-                                    data-account-env="${escapeAttr(inst.account_env || '')}"
-                                    data-data-classification="${escapeAttr(inst.data_classification || '')}"
-                                    data-is-sensitive-classification="${escapeAttr(String(!!inst.is_sensitive_classification))}"
-                                    data-enforce-read-only="${escapeAttr(String(!!inst.enforce_read_only))}"
-                                    data-tags-present="${escapeAttr(String(!!inst.tags_present))}"
-                                    data-request-allowed="${escapeAttr(String(inst.request_allowed !== false))}"
-                                    data-request-block-reason="${escapeAttr(inst.request_block_reason || '')}"
-                                    data-search="${searchText}"
-                                >${escapeHtml(inst.id)} | ${escapeHtml(inst.engine)} | default DB ${escapeHtml(defaultDb)}</option>`;
-                            }).join('')}
-                        </select>
-                    </div>
-                    <p id="dbStepSelectedInstanceMeta" class="db-step-selected-meta" style="display:none;"></p>
-                    <p id="dbStepInstanceEmptyFiltered" class="db-step-empty db-step-empty-filter" style="display:none;">No instances match your search.</p>
-                    ` : `<p class="db-step-empty">${emptyMsg}</p>`}
-                </div>
-                <div class="db-step-manual-toggle">
-                    <button type="button" class="btn-secondary btn-sm" onclick="toggleDbManualEntry()">Can't find your instance? Enter instance ID manually</button>
-                </div>
-                <div id="dbManualEntry" class="db-manual-entry" style="display:${instances.length ? 'none' : 'block'}">
-                    <div class="db-step-field"><label>RDS Instance ID</label><input type="text" id="dbStepInstanceId" placeholder="e.g. database-1" class="db-step-input"></div>
-                    <div class="db-step-field"><label>Region (optional)</label><input type="text" id="dbStepInstanceRegion" placeholder="e.g. ap-south-1" class="db-step-input"></div>
+                    <label>Select ${escapeHtml(targetMeta.singular)} <span style="color:#c62828;">*</span></label>
+                    ${(result.error || (accountId && !dbs.length)) ? `<div class="db-step-error-bar"><span class="db-error-reopen" onclick="reopenDbErrorPopup()" title="View details">&#128577; ${escapeHtml(result.error ? ('Unable to list ' + targetMeta.plural) : ('No ' + targetMeta.plural.toLowerCase() + ' found'))} — Click to see details</span> <button class="btn-secondary btn-sm" onclick="retryDbFetch()" style="margin-left:8px">Retry</button></div>` : ''}
+                    <select id="dbStepInstanceSelect" class="db-step-select">
+                        <option value="">-- Select ${escapeHtml(targetMeta.singular)} --</option>
+                        ${dbs.map(db => {
+                            const selected = String(dbRequestDraft?._selectedInstance?.id || '') === String(db.id || '') ? ' selected' : '';
+                            const roleHint = db.topology_role === 'replica'
+                                ? ` [Replica${db.source_instance_id ? ' of ' + db.source_instance_id : ''}]`
+                                : (db.topology_role === 'cluster' ? ' [Cluster]' : '');
+                            return `<option value="${escapeAttr(db.id)}"
+                                data-name="${escapeAttr(db.name || db.id)}"
+                                data-region="${escapeAttr(db.region || '')}"
+                                data-engine="${escapeAttr((db.engine || selectedEngine.engine || '').toLowerCase())}"
+                                data-auth-mode="${escapeAttr(db.auth_mode || '')}"
+                                data-resource-kind="${escapeAttr(db.resource_kind || '')}"
+                                data-iam-auth-enabled="${escapeAttr(String(!!db.iam_auth_enabled))}"
+                                data-password-auth-enabled="${escapeAttr(String(db.password_auth_enabled !== false))}"
+                                data-db-resource-id="${escapeAttr(db.db_resource_id || '')}"
+                                data-account-env="${escapeAttr(db.account_env || '')}"
+                                data-data-classification="${escapeAttr(db.data_classification || '')}"
+                                data-is-sensitive-classification="${escapeAttr(String(!!db.is_sensitive_classification))}"
+                                data-enforce-read-only="${escapeAttr(String(!!db.enforce_read_only))}"
+                                data-tags-present="${escapeAttr(String(db.tags_present !== false))}"
+                                data-request-allowed="${escapeAttr(String(db.request_allowed !== false))}"
+                                data-request-block-reason="${escapeAttr(db.request_block_reason || '')}"${selected}>${escapeHtml(db.id + roleHint)}</option>`;
+                        }).join('')}
+                    </select>
+                    <small class="db-step-hint">Select the target ${escapeHtml(targetMeta.singular.toLowerCase())}, then continue with the request details.</small>
                 </div>
             `;
         } else if (step === 3 && useChatFlow) {
-            const inst = dbRequestDraft._selectedInstance || {};
-            const defaultDb = inst.name || 'default';
+            const scopeMeta = getDbRequestScopeMeta(selectedEngine?.engine);
             content.innerHTML = `
                 <div class="db-step-field">
-                    <label>Database Name(s)</label>
+                    <label>${escapeHtml(scopeMeta.databaseLabel)} Name <span style="color:#c62828;">*</span></label>
                     <div class="db-step-dbname-shell">
                         <i class="fas fa-table"></i>
-                        <input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input" value="${(defaultDb || '').replace(/"/g, '&quot;')}">
+                        <input type="text" id="dbStepDbName" placeholder="e.g. mydb" class="db-step-input" value="${escapeAttr(dbRequestDraft?.requested_database_name || dbRequestDraft?.db_name || '')}">
                     </div>
-                    <div class="db-step-dbname-suggestions">
-                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('default')">default</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('app')">app</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('analytics')">analytics</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbNameSuggestion('reporting')">reporting</button>
-                    </div>
-                    <small class="db-step-hint">Enter the database name inside the instance. Multiple databases: comma-separated.</small>
                 </div>
             `;
         } else if (step === 4 && useChatFlow) {
-            const dbNames = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
-            const dbLabel = dbNames.length ? dbNames.join(', ') : (dbRequestDraft?.db_name || 'selected database');
-            const existingTables = Array.isArray(dbRequestDraft?.requested_tables)
-                ? dbRequestDraft.requested_tables.join(', ')
-                : '';
-            content.innerHTML = `
+            const scopeMeta = getDbRequestScopeMeta(selectedEngine?.engine);
+            const schemaField = scopeMeta.schemaVisible ? `
                 <div class="db-step-field">
-                    <label>Table Name(s) in ${escapeHtml(dbLabel)}</label>
+                    <label>${escapeHtml(scopeMeta.schemaLabel)} Name ${scopeMeta.schemaRequired ? '<span style="color:#c62828;">*</span>' : '<span style="color:#5f6b7a;">(Optional)</span>'}</label>
+                    <div class="db-step-dbname-shell">
+                        <i class="fas fa-sitemap"></i>
+                        <input type="text" id="dbStepSchemaName" placeholder="${escapeAttr(scopeMeta.schemaPlaceholder)}" class="db-step-input" value="${escapeAttr(dbRequestDraft?.requested_schema_name || '')}">
+                    </div>
+                </div>
+            ` : '';
+            content.innerHTML = `
+                ${schemaField}
+                <div class="db-step-field">
+                    <label>${escapeHtml(scopeMeta.objectLabel)} Name ${scopeMeta.objectRequired ? '<span style="color:#c62828;">*</span>' : '<span style="color:#5f6b7a;">(Optional)</span>'}</label>
                     <div class="db-step-dbname-shell">
                         <i class="fas fa-layer-group"></i>
-                        <input type="text" id="dbStepTableName" placeholder="e.g. customers, orders" class="db-step-input" value="${escapeAttr(existingTables)}">
+                        <input type="text" id="dbStepTableName" placeholder="${escapeAttr(scopeMeta.objectPlaceholder)}" class="db-step-input" value="${escapeAttr(dbRequestDraft?.requested_table_name || '')}">
                     </div>
-                    <div class="db-step-dbname-suggestions">
-                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('customers')">customers</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('orders')">orders</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('transactions')">transactions</button>
-                        <button type="button" class="db-step-suggestion" onclick="applyDbTableSuggestion('all')">all</button>
+                    <small class="db-step-hint">A specific ${escapeHtml(scopeMeta.objectLabel.toLowerCase())} is required so NPAMX can avoid broad database-wide access.</small>
+                </div>
+                <div class="db-step-field">
+                    <label>${escapeHtml(scopeMeta.detailLabel)} ${scopeMeta.detailRequired ? '<span style="color:#c62828;">*</span>' : '<span style="color:#5f6b7a;">(Optional)</span>'}</label>
+                    <div class="db-step-dbname-shell">
+                        <i class="fas fa-list"></i>
+                        <input type="text" id="dbStepDetailName" placeholder="${escapeAttr(scopeMeta.detailPlaceholder)}" class="db-step-input" value="${escapeAttr(dbRequestDraft?.requested_column_name || '')}">
                     </div>
-                    <small class="db-step-hint">Mention table name(s) to scope your request. Multiple tables: comma-separated.</small>
+                    <small class="db-step-hint">A specific ${escapeHtml(scopeMeta.detailLabel.toLowerCase())} is required so access remains scoped away from PII-heavy objects.</small>
                 </div>
             `;
         } else if (step === 2 && !useChatFlow) {
             const accountId = document.getElementById('dbStepAccount')?.value || dbRequestDraft?.account_id;
+            const targetMeta = getDbTargetUiMeta(selectedEngine?.engine);
             content.innerHTML = `<div class="db-step-loading"><i class="fas fa-spinner fa-spin"></i> Fetching databases…</div>`;
             const result = await fetchDatabasesForAccount(accountId, selectedEngine?.engine);
             const dbs = result.databases || [];
             if (result.error) {
-                showDbErrorPopup(result.error, result.instructions);
+                showDbErrorPopup(result.error, result.instructions, 'Unable to List ' + targetMeta.plural);
+            } else if (accountId && !dbs.length) {
+                showDbErrorPopup(
+                    'No ' + targetMeta.plural.toLowerCase() + ' found for the selected account in this region.',
+                    [
+                        'Verify the selected account has ' + targetMeta.plural.toLowerCase() + ' in the selected region.',
+                        'If DevOps exposes replica-only databases, confirm those replicas exist and are visible to the PAM role.',
+                        'Check the backend IAM role has read permissions for the selected service.'
+                    ],
+                    'No ' + targetMeta.plural + ' Found'
+                );
             } else {
                 dbLastFetchError = null;
             }
@@ -517,7 +1630,24 @@ async function renderDbStepContent() {
 	                            const eng = (db.engine || selectedEngine.engine || 'mysql').toString().toLowerCase();
 	                            const searchText = escapeAttr(`${db.name} ${db.engine}`.toLowerCase());
 	                            return `<label class="db-discover-item">
-	                                <input type="checkbox" value="${escapeAttr(db.id)}" data-name="${escapeAttr(db.name)}" data-engine="${escapeAttr(eng)}" onchange="toggleDbStepSelection()">
+	                                <input type="checkbox"
+                                        value="${escapeAttr(db.id)}"
+                                        data-name="${escapeAttr(db.name)}"
+                                        data-engine="${escapeAttr(eng)}"
+                                        data-auth-mode="${escapeAttr(db.auth_mode || '')}"
+                                        data-resource-kind="${escapeAttr(db.resource_kind || '')}"
+                                        data-iam-auth-enabled="${escapeAttr(String(!!db.iam_auth_enabled))}"
+                                        data-password-auth-enabled="${escapeAttr(String(db.password_auth_enabled !== false))}"
+                                        data-db-resource-id="${escapeAttr(db.db_resource_id || '')}"
+                                        data-region="${escapeAttr(db.region || '')}"
+                                        data-account-env="${escapeAttr(db.account_env || '')}"
+                                        data-data-classification="${escapeAttr(db.data_classification || '')}"
+                                        data-is-sensitive-classification="${escapeAttr(String(!!db.is_sensitive_classification))}"
+                                        data-enforce-read-only="${escapeAttr(String(!!db.enforce_read_only))}"
+                                        data-tags-present="${escapeAttr(String(db.tags_present !== false))}"
+                                        data-request-allowed="${escapeAttr(String(db.request_allowed !== false))}"
+                                        data-request-block-reason="${escapeAttr(db.request_block_reason || '')}"
+                                        onchange="toggleDbStepSelection()">
 	                                <span data-search="${searchText}">
 	                                    <strong>${escapeHtml(db.name)}</strong>
 	                                    <small>${escapeHtml(db.engine)}</small>
@@ -602,21 +1732,41 @@ async function renderDbStepContent() {
 }
 
 async function fetchAccounts() {
+    window.__npamReadCache = window.__npamReadCache || {};
+    const cache = window.__npamReadCache.db_accounts || (window.__npamReadCache.db_accounts = { data: null, ts: 0, promise: null });
+    const now = Date.now();
+    if (cache.promise) return cache.promise;
+    if (Array.isArray(cache.data) && (now - cache.ts) < 15000) {
+        return cache.data;
+    }
     try {
-        const r = await fetch(`${DB_API_BASE}/api/accounts`);
-        const data = await r.json();
-        return typeof data === 'object' && !Array.isArray(data) ? Object.values(data) : (data || []);
+        cache.promise = fetch(`${DB_API_BASE}/api/accounts?scope=requester`, { credentials: 'include' })
+            .then(async function(r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const data = await r.json();
+                const normalized = typeof data === 'object' && !Array.isArray(data) ? Object.values(data) : (data || []);
+                const filtered = normalized.filter(function(account) {
+                    return account && account.visible_to_requesters !== false;
+                });
+                cache.data = filtered;
+                cache.ts = Date.now();
+                return filtered;
+            })
+            .finally(function() {
+                cache.promise = null;
+            });
+        return await cache.promise;
     } catch (e) {
-        return [{ id: 'default', name: 'Default Account' }];
+        return [];
     }
 }
 
 async function fetchDatabasesForAccount(accountId, engine) {
     if (!accountId) return { databases: [], error: null, instructions: [] };
-    const apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api'))));
+    const apiBase = (typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.origin + '/api')));
     const url = `${apiBase}/databases?account_id=${encodeURIComponent(accountId)}${engine ? '&engine=' + encodeURIComponent(engine) : ''}`;
     try {
-        const r = await fetch(url);
+        const r = await fetch(url, { credentials: 'include' });
         const contentType = (r.headers.get('Content-Type') || '').toLowerCase();
         if (!contentType.includes('application/json')) {
             return {
@@ -624,7 +1774,7 @@ async function fetchDatabasesForAccount(accountId, engine) {
                 error: r.ok ? 'Server returned non-JSON. Check API URL.' : `Server returned ${r.status} (not JSON). Backend may be down or URL wrong.`,
                 instructions: [
                     'Check that the backend server is running and reachable.',
-                    'If frontend and backend are on different origins, ensure CORS is configured and the API base URL points to the backend (e.g. http://backend-host:5000/api).'
+                    'If frontend and backend are on different origins, ensure CORS is configured and the API base URL points to the backend (for example, https://your-host/api).'
                 ]
             };
         }
@@ -649,7 +1799,7 @@ async function fetchDatabasesForAccount(accountId, engine) {
             error: isJsonError ? 'Backend returned HTML instead of JSON. Is the API URL correct and backend running?' : msg,
             instructions: [
                 'Check that the backend server is running and reachable.',
-                'Ensure the API base URL points to your backend (e.g. http://your-backend:5000/api), not the frontend.',
+                'Ensure the API base URL points to your backend (for example, https://your-host/api), not the frontend.',
                 'Ensure CORS is configured if frontend and backend are on different origins.'
             ]
         };
@@ -658,10 +1808,35 @@ async function fetchDatabasesForAccount(accountId, engine) {
 
 let dbLastFetchError = null;
 
-function showDbErrorPopup(error, instructions) {
-    dbLastFetchError = { error, instructions };
+function getDbTargetUiMeta(engine) {
+    const normalized = normalizeEngineForStructured(engine);
+    if (normalized === 'athena') {
+        return { singular: 'Workgroup', plural: 'Workgroups' };
+    }
+    if (normalized === 'redshift') {
+        return { singular: 'Redshift Cluster', plural: 'Redshift Clusters' };
+    }
+    if (normalized === 'mongodb') {
+        return { singular: 'MongoDB Cluster', plural: 'MongoDB Clusters' };
+    }
+    if (normalized === 'documentdb') {
+        return { singular: 'DocumentDB Cluster', plural: 'DocumentDB Clusters' };
+    }
+    return { singular: 'RDS Instance', plural: 'RDS Instances' };
+}
+
+function getDbTargetLabel(engine, resourceKind) {
+    const kind = String(resourceKind || '').trim().toLowerCase();
+    if (kind === 'redshift_cluster') return 'Redshift Cluster';
+    return getDbTargetUiMeta(engine).singular;
+}
+
+function showDbErrorPopup(error, instructions, title) {
+    dbLastFetchError = { error, instructions, title };
     const popup = document.getElementById('dbErrorPopup');
     if (!popup) return;
+    const titleEl = popup.querySelector('.db-error-title');
+    if (titleEl) titleEl.textContent = title || 'Unable to List RDS Instances';
     popup.querySelector('.db-error-msg').textContent = error || 'Unable to list RDS instances';
     const list = popup.querySelector('.db-error-instructions');
     list.innerHTML = (instructions || []).map(i => `<li>${escapeHtml(i)}</li>`).join('');
@@ -675,7 +1850,7 @@ function hideDbErrorPopup() {
 
 function reopenDbErrorPopup() {
     if (dbLastFetchError) {
-        showDbErrorPopup(dbLastFetchError.error, dbLastFetchError.instructions);
+        showDbErrorPopup(dbLastFetchError.error, dbLastFetchError.instructions, dbLastFetchError.title);
     }
 }
 
@@ -691,47 +1866,51 @@ function toggleDbManualEntry() {
 
 async function fetchGcpProjects() {
     try {
-        const r = await fetch(`${DB_API_BASE}/api/gcp/projects`);
+        const r = await fetch(`${DB_API_BASE}/api/gcp/projects`, { credentials: 'include' });
         const data = await r.json();
         return data.projects || data || [];
     } catch (e) {
-        return [{ id: 'proj-dev', name: 'Development' }, { id: 'proj-staging', name: 'Staging' }, { id: 'proj-prod', name: 'Production' }];
+        return [];
     }
 }
 
 async function fetchAzureSubscriptions() {
     try {
-        const r = await fetch(`${DB_API_BASE}/api/azure/subscriptions`);
+        const r = await fetch(`${DB_API_BASE}/api/azure/subscriptions`, { credentials: 'include' });
         const data = await r.json();
         return data.subscriptions || data || [];
     } catch (e) {
-        return [{ id: 'sub-dev', name: 'Dev Subscription' }, { id: 'sub-prod', name: 'Production Subscription' }];
+        return [];
     }
 }
 
 async function fetchOracleCompartments() {
     try {
-        const r = await fetch(`${DB_API_BASE}/api/oracle/compartments`);
+        const r = await fetch(`${DB_API_BASE}/api/oracle/compartments`, { credentials: 'include' });
         const data = await r.json();
         return data.compartments || data || [];
     } catch (e) {
-        return [{ id: 'comp-root', name: 'Root' }, { id: 'comp-dev', name: 'Development' }, { id: 'comp-prod', name: 'Production' }];
+        return [];
     }
 }
 
 async function fetchMongoAtlasProjects() {
     try {
-        const r = await fetch(`${DB_API_BASE}/api/mongodb-atlas/projects`);
+        const r = await fetch(`${DB_API_BASE}/api/mongodb-atlas/projects`, { credentials: 'include' });
         const data = await r.json();
         return data.projects || data || [];
     } catch (e) {
-        return [{ id: 'atlas-cluster-1', name: 'Cluster-Production' }, { id: 'atlas-cluster-2', name: 'Cluster-Staging' }];
+        return [];
     }
 }
 
 function onDbStepAccountChange() {
     dbRequestDraft = dbRequestDraft || {};
     dbRequestDraft.account_id = document.getElementById('dbStepAccount')?.value || '';
+    dbWorkflowPreview = null;
+    dbWorkflowPreviewKey = '';
+    applyDbProfileDefaults(false);
+    refreshDbWorkflowPreview();
 }
 
 function resetDbInstancePolicy() {
@@ -765,38 +1944,56 @@ function isReadOnlyDbOperation(op) {
 }
 
 function enforceStructuredPermissionPolicy() {
-    if (!dbInstancePolicy?.enforce_read_only) return;
-    if (!Array.isArray(dbStructuredPermissions) || !dbStructuredPermissions.length) return;
-    const filtered = dbStructuredPermissions.filter(isReadOnlyDbOperation);
-    if (filtered.length !== dbStructuredPermissions.length) {
-        dbStructuredPermissions = filtered;
-        syncStructuredPermissionUI();
-        hydrateStructuredSummary();
-        alert('This production RDS is tagged as sensitive data. Only view access operations are allowed.');
+    const selectedRole = getDbSelectedIamRole();
+    const selectedRoleType = String((selectedRole && selectedRole.request_role) || '').trim().toLowerCase();
+    if (selectedRoleType === 'read_only') {
+        const baseActions = getDbRoleActionList(selectedRole);
+        const selectedSet = new Set((dbStructuredPermissions || []).map(function(item) {
+            return String(item || '').trim().toUpperCase();
+        }).filter(Boolean));
+        baseActions.forEach(function(action) { selectedSet.add(action); });
+        dbStructuredPermissions = Array.from(selectedSet).filter(function(action) {
+            return DB_READ_ONLY_OPS.has(action);
+        });
     }
+    applyDbInstancePolicyNotice(dbInstancePolicy);
 }
 
 function applyDbInstancePolicyNotice(policy) {
     const noticeEl = document.getElementById('dbInstancePolicyNotice');
     if (!noticeEl) return;
     const p = policy || dbInstancePolicy || {};
-    if (!p || (!p.enforce_read_only && p.request_allowed !== false)) {
+    const blockedReason = dbWorkflowBlockedReason();
+    const selectedInstance = dbRequestDraft?._selectedInstance || {};
+    const instanceMetadataBlocked = !!getDbInstanceBlockedReason() || (!!p && p.request_allowed === false) || selectedInstance.request_allowed === false || selectedInstance.iam_auth_enabled === false;
+    if (dbWorkflowPreviewPending) {
+        noticeEl.style.display = 'block';
+        noticeEl.className = 'db-policy-notice db-policy-notice-warning';
+        noticeEl.textContent = 'Checking applicable guardrails and approval workflow...';
+        return;
+    }
+    if (instanceMetadataBlocked) {
+        noticeEl.style.display = 'block';
+        noticeEl.className = 'db-policy-notice db-policy-notice-error';
+        noticeEl.textContent = getDbInstanceBlockedReason() || blockedReason || DEFAULT_DB_POLICY_BLOCK_REASON;
+        return;
+    }
+    if (blockedReason) {
+        if (dbWorkflowPreview && dbWorkflowPreview.blocked_by_guardrail) {
+            noticeEl.style.display = 'none';
+            noticeEl.className = 'db-policy-notice';
+            noticeEl.textContent = '';
+        } else {
+            noticeEl.style.display = 'block';
+            noticeEl.className = 'db-policy-notice db-policy-notice-error';
+            noticeEl.textContent = blockedReason;
+        }
+        return;
+    }
+    if (!p || p.request_allowed !== false) {
         noticeEl.style.display = 'none';
         noticeEl.className = 'db-policy-notice';
         noticeEl.textContent = '';
-        return;
-    }
-    if (p.request_allowed === false) {
-        noticeEl.style.display = 'block';
-        noticeEl.className = 'db-policy-notice db-policy-notice-error';
-        noticeEl.textContent = p.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.";
-        return;
-    }
-    if (p.enforce_read_only) {
-        const cls = String(p.data_classification || 'sensitive').toUpperCase();
-        noticeEl.style.display = 'block';
-        noticeEl.className = 'db-policy-notice db-policy-notice-warning';
-        noticeEl.textContent = `Selected production RDS is tagged as ${cls}. Only view access operations are allowed.`;
         return;
     }
     noticeEl.style.display = 'none';
@@ -807,10 +2004,12 @@ function onDbStepInstanceSelect(radio) {
     dbRequestDraft = dbRequestDraft || {};
     const policy = extractDbPolicyFromSourceEl(radio);
     dbInstancePolicy = policy || dbInstancePolicy;
+    dbLastPolicyPopupKey = '';
     dbRequestDraft._selectedInstance = {
         id: radio.value,
         name: radio.getAttribute('data-name'),
         engine: radio.getAttribute('data-engine'),
+        resource_kind: radio.getAttribute('data-resource-kind') || '',
         auth_mode: radio.getAttribute('data-auth-mode') || '',
         iam_auth_enabled: String(radio.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
         password_auth_enabled: String(radio.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
@@ -825,6 +2024,12 @@ function onDbStepInstanceSelect(radio) {
         request_block_reason: policy?.request_block_reason || ''
     };
     applyDbInstancePolicyNotice(dbInstancePolicy);
+    applyDbProfileDefaults(true);
+    maybeShowDbInstancePolicyPopup(dbInstancePolicy);
+    refreshDbWorkflowPreview();
+    if (!document.getElementById('dbStructuredPanel')?.classList.contains('db-structured-panel-hidden')) {
+        refreshDbStructuredAccessCatalog(selectedEngine?.engine || radio.getAttribute('data-engine') || '');
+    }
 }
 
 function renderDbStepSelectedInstanceMeta(sourceEl) {
@@ -852,6 +2057,9 @@ function onDbStepInstanceDropdownChange(selectEl) {
         dbRequestDraft = dbRequestDraft || {};
         dbRequestDraft._selectedInstance = null;
         resetDbInstancePolicy();
+        dbEffectiveIamRoles = [];
+        dbSelectedIamRoleId = '';
+        renderDbEffectiveIamRoles();
         renderDbStepSelectedInstanceMeta(null);
         applyDbInstancePolicyNotice(null);
         return;
@@ -867,6 +2075,47 @@ function toggleDbStepSelection() {
         name: cb.getAttribute('data-name'),
         engine: cb.getAttribute('data-engine')
     }));
+    const firstSelected = checkboxes[0] || null;
+    dbRequestDraft = dbRequestDraft || {};
+    if (!firstSelected) {
+        dbRequestDraft._selectedInstance = null;
+        resetDbInstancePolicy();
+        dbEffectiveIamRoles = [];
+        dbSelectedIamRoleId = '';
+        renderDbEffectiveIamRoles();
+        applyDbInstancePolicyNotice(null);
+        dbWorkflowPreview = null;
+        dbWorkflowPreviewKey = '';
+        renderDbWorkflowPreview('', 'info');
+        syncDbApprovalUiState();
+        return;
+    }
+    const policy = extractDbPolicyFromSourceEl(firstSelected);
+    dbInstancePolicy = policy || dbInstancePolicy;
+    dbRequestDraft._selectedInstance = {
+        id: firstSelected.value,
+        name: firstSelected.getAttribute('data-name'),
+        engine: firstSelected.getAttribute('data-engine'),
+        resource_kind: firstSelected.getAttribute('data-resource-kind') || '',
+        auth_mode: firstSelected.getAttribute('data-auth-mode') || '',
+        iam_auth_enabled: String(firstSelected.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
+        password_auth_enabled: String(firstSelected.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
+        db_resource_id: firstSelected.getAttribute('data-db-resource-id') || '',
+        region: firstSelected.getAttribute('data-region') || '',
+        account_env: policy?.account_env || '',
+        data_classification: policy?.data_classification || '',
+        is_sensitive_classification: !!policy?.is_sensitive_classification,
+        enforce_read_only: !!policy?.enforce_read_only,
+        tags_present: policy?.tags_present !== false,
+        request_allowed: policy?.request_allowed !== false,
+        request_block_reason: policy?.request_block_reason || ''
+    };
+    applyDbInstancePolicyNotice(dbInstancePolicy);
+    maybeShowDbInstancePolicyPopup(dbInstancePolicy);
+    refreshDbWorkflowPreview();
+    if (!document.getElementById('dbStructuredPanel')?.classList.contains('db-structured-panel-hidden')) {
+        refreshDbStructuredAccessCatalog(selectedEngine?.engine || firstSelected.getAttribute('data-engine') || '');
+    }
 }
 
 function filterDbStepInstances() {
@@ -969,13 +2218,13 @@ function updateDbStepNextButton() {
     if (!btn || !dbStepState || !selectedEngine) return;
     const { step, provider } = dbStepState;
     const useChatFlow = provider === 'aws' && AWS_CHAT_FLOW_ENGINES.includes((selectedEngine.engine || '').toLowerCase());
-    const finalLabel = dbAccessMode === 'structured' ? 'Continue to Permissions' : 'Continue to NPAMX';
+    const finalLabel = dbAccessMode === 'structured' ? 'Continue to Permissions' : 'Continue to NPAMx';
     let label = 'Continue';
 
     if (provider === 'aws' && useChatFlow) {
-        if (step === 1) label = 'Next: Instance';
+        if (step === 1) label = `Next: ${getDbTargetUiMeta(selectedEngine?.engine).singular}`;
         else if (step === 2) label = 'Next: Database Name';
-        else if (step === 3) label = 'Next: Table(s)';
+        else if (step === 3) label = 'Next: Schema & Table';
         else label = finalLabel;
     } else if (provider === 'aws' && !useChatFlow) {
         label = step === 1 ? 'Next: Databases' : finalLabel;
@@ -1007,83 +2256,59 @@ async function dbStepNext() {
             return;
         }
         if (step === 2 && useChatFlow) {
-            const select = document.getElementById('dbStepInstanceSelect');
-            const hasDiscoveredInstances = !!(select && Array.from(select.options).some(opt => !!opt.value));
-            const selectedOption = (select && select.value) ? select.options[select.selectedIndex] : null;
-            const manualInstanceId = document.getElementById('dbStepInstanceId')?.value?.trim();
-            const manualRegion = document.getElementById('dbStepInstanceRegion')?.value?.trim();
-            if (manualInstanceId) {
-                resetDbInstancePolicy();
-                applyDbInstancePolicyNotice(null);
-                dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
-            } else if (hasDiscoveredInstances) {
-                if (!selectedOption) {
-                    alert('Please select an RDS instance or enter instance ID manually.');
-                    return;
-                }
-                const policy = extractDbPolicyFromSourceEl(selectedOption) || {};
-                dbInstancePolicy = policy;
-                applyDbInstancePolicyNotice(policy);
-                if (policy.request_allowed === false) {
-                    alert(policy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
-                    return;
-                }
-                dbRequestDraft._selectedInstance = {
-                    id: selectedOption.value,
-                    name: selectedOption.getAttribute('data-name'),
-                    engine: selectedOption.getAttribute('data-engine'),
-                    auth_mode: selectedOption.getAttribute('data-auth-mode') || '',
-                    iam_auth_enabled: String(selectedOption.getAttribute('data-iam-auth-enabled') || '').toLowerCase() === 'true',
-                    password_auth_enabled: String(selectedOption.getAttribute('data-password-auth-enabled') || '').toLowerCase() !== 'false',
-                    db_resource_id: selectedOption.getAttribute('data-db-resource-id') || '',
-                    region: selectedOption.getAttribute('data-region') || '',
-                    account_env: policy.account_env || '',
-                    data_classification: policy.data_classification || '',
-                    is_sensitive_classification: !!policy.is_sensitive_classification,
-                    enforce_read_only: !!policy.enforce_read_only,
-                    tags_present: policy.tags_present !== false,
-                    request_allowed: policy.request_allowed !== false,
-                    request_block_reason: policy.request_block_reason || ''
-                };
-            } else {
-                if (!manualInstanceId) {
-                    alert('Please enter the RDS instance ID.');
-                    return;
-                }
-                resetDbInstancePolicy();
-                applyDbInstancePolicyNotice(null);
-                dbRequestDraft._selectedInstance = { id: manualInstanceId, name: 'default', engine: selectedEngine.engine, region: manualRegion || '' };
+            const instanceSelect = document.getElementById('dbStepInstanceSelect');
+            const selectedOption = instanceSelect && instanceSelect.options ? instanceSelect.options[instanceSelect.selectedIndex] : null;
+            const selectedInstanceId = instanceSelect?.value?.trim() || '';
+            if (!selectedInstanceId) {
+                alert(`Please select the ${getDbTargetUiMeta(selectedEngine?.engine).singular}.`);
+                return;
             }
+            onDbStepInstanceSelect(selectedOption);
+            if (dbInstancePolicy?.request_allowed === false) {
+                alert(dbInstancePolicy.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON);
+                return;
+            }
+            dbRequestDraft.requested_instance_input = selectedInstanceId;
             dbStepState.step = 3;
             renderDbStepContent();
             return;
         }
         if (step === 3 && useChatFlow) {
             const inst = dbRequestDraft._selectedInstance || {};
-            const dbNameInput = document.getElementById('dbStepDbName')?.value?.trim() || inst.name || 'default';
-            const dbNames = dbNameInput.split(',').map(s => s.trim()).filter(Boolean);
-            selectedDatabases = dbNames.map(name => ({
-                id: inst.id || 'manual',
-                name,
-                engine: inst.engine || selectedEngine.engine
-            }));
-            if (selectedDatabases.length === 0) {
-                alert('Please enter at least one database name.');
+            const dbNameInput = document.getElementById('dbStepDbName')?.value?.trim() || '';
+            if (!dbNameInput) {
+                alert('Please enter the Database Name.');
                 return;
             }
-            dbRequestDraft.db_name = dbNames.join(', ');
+            selectedDatabases = [{
+                id: inst.id || 'manual',
+                name: dbNameInput,
+                engine: inst.engine || selectedEngine.engine
+            }];
+            dbRequestDraft.db_name = dbNameInput;
+            dbRequestDraft.requested_database_name = dbNameInput;
             dbStepState.step = 4;
             renderDbStepContent();
             return;
         }
         if (step === 4 && useChatFlow) {
+            const scopeMeta = getDbRequestScopeMeta(selectedEngine?.engine);
+            const schemaInput = document.getElementById('dbStepSchemaName')?.value?.trim() || '';
             const tableInput = document.getElementById('dbStepTableName')?.value?.trim() || '';
-            const tables = tableInput.split(',').map(s => s.trim()).filter(Boolean);
-            if (tables.length === 0) {
-                alert('Please mention at least one table name (or "all").');
+            const detailInput = document.getElementById('dbStepDetailName')?.value?.trim() || '';
+            if (scopeMeta.schemaRequired && !schemaInput) {
+                alert(`Please enter the ${scopeMeta.schemaLabel} Name.`);
                 return;
             }
+            if (scopeMeta.objectRequired && !tableInput) {
+                alert(`Please enter the ${scopeMeta.objectLabel} Name.`);
+                return;
+            }
+            const tables = tableInput.split(',').map(s => s.trim()).filter(Boolean);
+            dbRequestDraft.requested_schema_name = schemaInput;
+            dbRequestDraft.requested_table_name = tableInput;
             dbRequestDraft.requested_tables = tables;
+            dbRequestDraft.requested_column_name = detailInput;
             transitionToDbFinalPanel();
             return;
         }
@@ -1165,11 +2390,16 @@ function transitionToDbChatUI() {
     if (stepPanel) stepPanel.classList.add('db-step-hidden');
     if (aiPanel) aiPanel.classList.remove('db-ai-panel-hidden');
     applyDbInstancePolicyNotice(dbInstancePolicy);
+    refreshDbRequestRecipientUi();
     document.getElementById('dbAiEngineLabel').textContent = selectedEngine?.label || 'Database';
+    dbApproverEmailManuallyEdited = false;
+    applyDbProfileDefaults(true);
+    syncDbApprovalUiState();
+    refreshDbWorkflowPreview();
     initDbChatWithPrompts(selectedEngine?.label || 'Database', selectedEngine?.engine || 'mysql');
 }
 
-function transitionToDbStructuredUI() {
+async function transitionToDbStructuredUI() {
     const stepPanel = document.getElementById('dbStepPanel');
     const structuredPanel = document.getElementById('dbStructuredPanel');
     const aiPanel = document.getElementById('dbAiPanel');
@@ -1181,7 +2411,10 @@ function transitionToDbStructuredUI() {
     const engineLabel = document.getElementById('dbStructuredEngineLabel');
     if (engineLabel) engineLabel.textContent = label;
     applyDbInstancePolicyNotice(dbInstancePolicy);
-    renderStructuredPermissionGroups(engine);
+    refreshDbRequestRecipientUi();
+    dbApproverEmailManuallyEdited = false;
+    applyDbProfileDefaults(true);
+    await refreshDbStructuredAccessCatalog(engine);
     enforceStructuredPermissionPolicy();
     if (typeof initDbDurationMode === 'function' && !document.getElementById('dbDurationModeHours')?.dataset.dbDurationInited) {
         initDbDurationMode();
@@ -1189,6 +2422,8 @@ function transitionToDbStructuredUI() {
         if (el) el.dataset.dbDurationInited = 'true';
     }
     hydrateStructuredSummary();
+    syncDbApprovalUiState();
+    refreshDbWorkflowPreview();
 }
 
 function transitionToDbFinalPanel() {
@@ -1203,7 +2438,7 @@ function dbAssistantAvatar(variant = 'avatar') {
 function dbMermaidSvg(opts = {}) {
     const variant = opts.variant || 'avatar'; // 'avatar' | 'loader'
     const extraClass = opts.className ? ` ${opts.className}` : '';
-    const aria = variant === 'loader' ? 'aria-label="NPAMX thinking"' : 'aria-label="NPAMX"';
+    const aria = variant === 'loader' ? 'aria-label="NPAMx thinking"' : 'aria-label="NPAMx"';
     // Custom lightweight vector mermaid (no external assets).
     // Generate unique ids per SVG instance to avoid <defs> id collisions.
     const uid = `npamx-${variant}-${Math.random().toString(16).slice(2, 10)}`;
@@ -1320,41 +2555,136 @@ function sendDbAiPrompt(message) {
 function normalizeEngineForStructured(engine) {
     const e = String(engine || '').toLowerCase();
     if (!e) return '';
-    if (e.includes('aurora')) return 'mysql';
-    if (e.includes('maria')) return 'mysql';
+    if (e.includes('athena')) return 'athena';
+    if (e.includes('documentdb') || e === 'docdb') return 'documentdb';
+    if (e.includes('mongodb') || e.includes('mongo')) return 'mongodb';
+    if (e.includes('redshift')) return 'redshift';
+    if (e.includes('postgres')) return 'postgres';
+    if (e.includes('aurora')) return e.includes('mysql') ? 'mysql' : 'aurora';
+    if (e.includes('maria')) return 'maria';
+    if (e.includes('sqlserver') || e.includes('sql_server') || e.includes('mssql')) return 'mssql';
+    if (e.includes('mysql')) return 'mysql';
     return e;
+}
+
+function getDbRequestScopeMeta(engine) {
+    const e = normalizeEngineForStructured(engine);
+    if (['mysql', 'maria', 'aurora'].includes(e)) {
+        return {
+            databaseLabel: 'Database',
+            schemaVisible: false,
+            schemaRequired: false,
+            schemaLabel: 'Schema',
+            schemaPlaceholder: 'e.g. public',
+            objectLabel: 'Table',
+            objectPluralLabel: 'Tables',
+            objectRequired: true,
+            objectPlaceholder: 'e.g. customers',
+            detailLabel: 'Column',
+            detailRequired: true,
+            detailPlaceholder: 'e.g. customer_id'
+        };
+    }
+    if (['postgres', 'redshift'].includes(e)) {
+        return {
+            databaseLabel: 'Database',
+            schemaVisible: true,
+            schemaRequired: true,
+            schemaLabel: 'Schema',
+            schemaPlaceholder: 'e.g. public',
+            objectLabel: 'Table',
+            objectPluralLabel: 'Tables',
+            objectRequired: true,
+            objectPlaceholder: 'e.g. customers',
+            detailLabel: 'Column',
+            detailRequired: true,
+            detailPlaceholder: 'e.g. customer_id'
+        };
+    }
+    if (e === 'athena') {
+        return {
+            databaseLabel: 'Database',
+            schemaVisible: false,
+            schemaRequired: false,
+            schemaLabel: 'Schema',
+            schemaPlaceholder: '',
+            objectLabel: 'Table',
+            objectPluralLabel: 'Tables',
+            objectRequired: true,
+            objectPlaceholder: 'e.g. orders',
+            detailLabel: 'Column',
+            detailRequired: true,
+            detailPlaceholder: 'e.g. order_id'
+        };
+    }
+    if (['documentdb', 'mongodb', 'docdb'].includes(e)) {
+        return {
+            databaseLabel: 'Database',
+            schemaVisible: false,
+            schemaRequired: false,
+            schemaLabel: 'Schema',
+            schemaPlaceholder: '',
+            objectLabel: 'Collection',
+            objectPluralLabel: 'Collections',
+            objectRequired: true,
+            objectPlaceholder: 'e.g. orders',
+            detailLabel: 'Document Scope',
+            detailRequired: true,
+            detailPlaceholder: 'e.g. orderId=12345'
+        };
+    }
+    return {
+        databaseLabel: 'Database',
+        schemaVisible: true,
+        schemaRequired: true,
+        schemaLabel: 'Schema',
+        schemaPlaceholder: 'e.g. public',
+        objectLabel: 'Table',
+        objectPluralLabel: 'Tables',
+        objectRequired: true,
+        objectPlaceholder: 'e.g. customers',
+        detailLabel: 'Column',
+        detailRequired: true,
+        detailPlaceholder: 'e.g. customer_id'
+    };
 }
 
 function getStructuredPermissionGroupsForEngine(engine) {
     const e = normalizeEngineForStructured(engine);
-    const isMysql = ['mysql'].includes(e);
+    const isMysql = ['mysql', 'maria', 'aurora'].includes(e);
     const isPostgres = ['postgres', 'postgresql'].includes(e);
     const isMssql = ['mssql', 'sqlserver', 'sql_server'].includes(e);
     const isRedshift = ['redshift'].includes(e);
+    const isAthena = ['athena'].includes(e);
     const isDoc = ['documentdb', 'mongodb', 'docdb'].includes(e);
 
     // Default: SQL-like set.
     let groups = DB_STRUCTURED_PERMISSIONS.map(g => ({ ...g, ops: [...g.ops] }));
 
     if (isMysql) {
-        const mysqlAllowed = new Set([
-            'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE',
-            'INSERT', 'UPDATE', 'DELETE',
-            'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME',
-            'CREATE INDEX', 'DROP INDEX',
-            'EXECUTE', 'CALL', 'LOCK', 'UNLOCK'
-        ]);
-        groups = groups.map(g => ({ ...g, ops: g.ops.filter(op => mysqlAllowed.has(op)) }));
+        return [
+            { id: 'mysql_read', title: 'Data Retrieval', ops: ['SELECT'] },
+            { id: 'mysql_read_extra', title: 'Additional Read Access', ops: ['SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'] },
+            { id: 'mysql_write', title: 'Data Modification', ops: ['INSERT', 'UPDATE', 'DELETE'] }
+        ];
     } else if (isPostgres) {
-        const postgresAllowed = new Set([
-            'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE',
-            'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
-            'EXECUTE', 'CALL'
-        ]);
-        groups = groups.map(g => ({ ...g, ops: g.ops.filter(op => postgresAllowed.has(op)) }));
+        return [
+            { id: 'postgres_read', title: 'Data Retrieval', ops: ['SELECT'] },
+            { id: 'postgres_read_extra', title: 'Additional Read Access', ops: ['SHOW', 'EXPLAIN', 'DESCRIBE'] },
+            { id: 'postgres_write', title: 'Data Modification', ops: ['INSERT', 'UPDATE', 'DELETE'] },
+            { id: 'postgres_schema', title: 'Schema Access', ops: ['USAGE'] }
+        ];
     } else if (isRedshift) {
-        // Redshift is Postgres-like; keep without DESCRIBE.
-        groups = groups.map(g => (g.id === 'retrieval' ? { ...g, ops: g.ops.filter(op => op !== 'DESCRIBE') } : g));
+        return [
+            { id: 'redshift_read', title: 'Data Retrieval', ops: ['SELECT'] },
+            { id: 'redshift_read_extra', title: 'Additional Read Access', ops: ['SHOW', 'EXPLAIN', 'DESCRIBE'] },
+            { id: 'redshift_write', title: 'Data Modification', ops: ['INSERT', 'UPDATE', 'DELETE'] },
+            { id: 'redshift_schema', title: 'Schema Access', ops: ['USAGE'] }
+        ];
+    } else if (isAthena) {
+        return [
+            { id: 'athena_read', title: 'Query Access', ops: ['SELECT'] }
+        ];
     } else if (isDoc) {
         // No SQL permissions for DocumentDB/Mongo.
         return [
@@ -1371,13 +2701,67 @@ function getStructuredPermissionGroupsForEngine(engine) {
     return groups;
 }
 
+async function refreshDbRequestableActions() {
+    const selectedInstance = dbRequestDraft?._selectedInstance || {};
+    const accountId = String(dbRequestDraft?.account_id || '').trim();
+    const fallback = ['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE'];
+    if (!accountId || !selectedInstance.id) {
+        dbVisiblePermissionOps = fallback.slice();
+        dbStructuredPermissions = (dbStructuredPermissions || []).filter(function(op) {
+            return dbVisiblePermissionOps.indexOf(String(op || '').trim().toUpperCase()) >= 0;
+        });
+        return;
+    }
+    try {
+        const targetEmails = getDbRequestRecipientsForSubmission().map(function(item) {
+            return String(item.email || '').trim().toLowerCase();
+        }).filter(Boolean);
+        const res = await fetch(`${DB_API_BASE}/api/databases/requestable-actions`, {
+            method: 'POST',
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({
+                account_id: accountId,
+                db_instance_id: String(selectedInstance.id || '').trim(),
+                user_emails: targetEmails
+            })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to load allowed actions.');
+        const visible = Array.isArray(data.visible_actions) ? data.visible_actions.map(function(op) {
+            return String(op || '').trim().toUpperCase();
+        }).filter(Boolean) : fallback.slice();
+        dbVisiblePermissionOps = visible.length ? visible : fallback.slice();
+    } catch (_) {
+        dbVisiblePermissionOps = fallback.slice();
+    }
+    dbStructuredPermissions = (dbStructuredPermissions || []).filter(function(op) {
+        return dbVisiblePermissionOps.indexOf(String(op || '').trim().toUpperCase()) >= 0;
+    });
+}
+
 function renderStructuredPermissionGroups(engine) {
     const container = document.getElementById('dbStructuredPermGroups');
     const selectedContainer = document.getElementById('dbStructuredSelected');
     if (!container || !selectedContainer) return;
 
-    const groups = getStructuredPermissionGroupsForEngine(engine);
-    const enforceReadOnly = !!dbInstancePolicy?.enforce_read_only;
+    const visibleOps = new Set((dbVisiblePermissionOps || []).map(function(op) {
+        return String(op || '').trim().toUpperCase();
+    }));
+    const selectedRoleType = getDbSelectedIamRoleType();
+    if (selectedRoleType === 'read_only') {
+        Array.from(visibleOps).forEach(function(op) {
+            if (!DB_READ_ONLY_OPS.has(op)) visibleOps.delete(op);
+        });
+    }
+    const groups = getStructuredPermissionGroupsForEngine(engine).map(function(group) {
+        return {
+            ...group,
+            ops: (group.ops || []).filter(function(op) {
+                return visibleOps.has(String(op || '').trim().toUpperCase());
+            })
+        };
+    }).filter(function(group) { return (group.ops || []).length; });
     container.innerHTML = groups.map(g => `
         <div class="db-perm-group" data-group="${escapeAttr(g.id)}">
             <div class="db-perm-group-title">${escapeHtml(g.title)}</div>
@@ -1385,9 +2769,8 @@ function renderStructuredPermissionGroups(engine) {
                 ${(g.ops || []).map(op => `
                     <button
                         type="button"
-                        class="db-perm-btn${enforceReadOnly && !isReadOnlyDbOperation(op) ? ' is-policy-locked' : ''}"
+                        class="db-perm-btn"
                         data-op="${escapeAttr(op)}"
-                        ${enforceReadOnly && !isReadOnlyDbOperation(op) ? 'disabled title="Disabled by data-classification policy (view-only access)."' : ''}
                     >${escapeHtml(op)}</button>
                 `).join('')}
             </div>
@@ -1424,7 +2807,20 @@ function renderStructuredPermissionGroups(engine) {
 function toggleStructuredPermission(op) {
     const perm = String(op || '').trim();
     if (!perm) return;
-    if (dbInstancePolicy?.enforce_read_only && !isReadOnlyDbOperation(perm)) return;
+    const selectedRole = getDbSelectedIamRole();
+    const selectedRoleType = String((selectedRole && selectedRole.request_role) || '').trim().toLowerCase();
+    if (selectedRoleType === 'read_only' && !DB_READ_ONLY_OPS.has(perm.toUpperCase())) {
+        return;
+    }
+    if (selectedRoleType === 'read_only') {
+        const baseActions = new Set(getDbRoleActionList(selectedRole));
+        if (baseActions.has(perm.toUpperCase())) {
+            if (typeof window.notifyApp === 'function') {
+                window.notifyApp('Included in role', 'This action is already part of the selected Read Only role.', 'info');
+            }
+            return;
+        }
+    }
     const idx = dbStructuredPermissions.indexOf(perm);
     if (idx >= 0) dbStructuredPermissions.splice(idx, 1);
     else dbStructuredPermissions.push(perm);
@@ -1435,6 +2831,14 @@ function toggleStructuredPermission(op) {
 function removeStructuredPermission(op) {
     const perm = String(op || '').trim();
     if (!perm) return;
+    const selectedRole = getDbSelectedIamRole();
+    const selectedRoleType = String((selectedRole && selectedRole.request_role) || '').trim().toLowerCase();
+    if (selectedRoleType === 'read_only') {
+        const baseActions = new Set(getDbRoleActionList(selectedRole));
+        if (baseActions.has(perm.toUpperCase())) {
+            return;
+        }
+    }
     dbStructuredPermissions = dbStructuredPermissions.filter(p => p !== perm);
     syncStructuredPermissionUI();
     hydrateStructuredSummary();
@@ -1444,6 +2848,7 @@ function syncStructuredPermissionUI() {
     const container = document.getElementById('dbStructuredPermGroups');
     const selectedContainer = document.getElementById('dbStructuredSelected');
     if (!container || !selectedContainer) return;
+    syncDbSelectedIamRoleWithPermissions();
 
     const selected = new Set(dbStructuredPermissions);
     container.querySelectorAll('.db-perm-btn').forEach(btn => {
@@ -1452,7 +2857,9 @@ function syncStructuredPermissionUI() {
     });
 
     if (!dbStructuredPermissions.length) {
-        selectedContainer.innerHTML = `<div class="db-perm-selected-empty">Select one or more permissions above.</div>`;
+        selectedContainer.innerHTML = `<div class="db-perm-selected-empty">${getDbSelectedIamRoleType() === 'read_only' ? 'No extra read actions selected.' : 'Select one or more permissions above.'}</div>`;
+        applyDbInstancePolicyNotice(dbInstancePolicy);
+        refreshDbWorkflowPreview();
         return;
     }
     selectedContainer.innerHTML = `
@@ -1467,13 +2874,13 @@ function syncStructuredPermissionUI() {
             `).join('')}
         </div>
     `;
+    applyDbInstancePolicyNotice(dbInstancePolicy);
+    refreshDbWorkflowPreview();
 }
 
 function deriveStructuredRole(ops) {
     const perms = Array.isArray(ops) ? ops : [];
     const up = perms.map(p => String(p || '').toUpperCase());
-    const hasAdminOps = up.some(p => ['GRANT', 'REVOKE', 'EXECUTE', 'CALL', 'LOCK', 'UNLOCK'].includes(p));
-    if (hasAdminOps) return 'admin';
     const hasSchema = up.some(p => ['CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX'].includes(p));
     if (hasSchema) return 'read_full_write';
     const hasWrite = up.some(p => ['INSERT', 'UPDATE', 'DELETE', 'MERGE'].includes(p));
@@ -1490,14 +2897,93 @@ function deriveStructuredQueryTypes(ops) {
     return queryTypes;
 }
 
-const DB_MAX_DURATION_DAYS = 3;
-const DB_MAX_DURATION_HOURS = DB_MAX_DURATION_DAYS * 24; // 72
+function getDbDurationPolicy() {
+    const env = String(
+        dbWorkflowPreview?.environment
+        || dbRequestDraft?._selectedInstance?.account_env
+        || dbInstancePolicy?.account_env
+        || ''
+    ).trim().toLowerCase();
+    const previewHours = parseInt(dbWorkflowPreview?.max_duration_hours || '', 10);
+    const previewDays = parseInt(dbWorkflowPreview?.max_duration_days || '', 10);
+    if (Number.isFinite(previewHours) && previewHours > 0) {
+        return {
+            environment: env || 'nonprod',
+            maxDays: Number.isFinite(previewDays) && previewDays > 0 ? previewDays : Math.max(1, Math.ceil(previewHours / 24)),
+            maxHours: previewHours,
+        };
+    }
+    const roleType = String(
+        getDbSelectedIamRoleType()
+        || dbRequestDraft?.role
+        || deriveStructuredRole(dbStructuredPermissions)
+        || ''
+    ).trim().toLowerCase();
+    if (env === 'prod') {
+        return { environment: 'prod', maxDays: 3, maxHours: 72 };
+    }
+    if (roleType === 'read_only') {
+        return { environment: env || 'nonprod', maxDays: 30, maxHours: 720 };
+    }
+    return { environment: env || 'nonprod', maxDays: 5, maxHours: 120 };
+}
+
+function getDbMaxDurationDays() {
+    return getDbDurationPolicy().maxDays;
+}
+
+function getDbMaxDurationHours() {
+    return getDbDurationPolicy().maxHours;
+}
+
+function updateDbDurationUi() {
+    const policy = getDbDurationPolicy();
+    const hoursInput = document.getElementById('dbStructuredDuration');
+    const dateRangeText = document.getElementById('dbDurationModeDaterangeText');
+    const dateHint = document.getElementById('dbDaterangeHint');
+    const fiveDayChip = document.getElementById('dbDurationFiveDayChip');
+    const thirtyDayChip = document.getElementById('dbDurationThirtyDayChip');
+    const startEl = document.getElementById('dbStartDate');
+    const endEl = document.getElementById('dbEndDate');
+    if (hoursInput) {
+        hoursInput.max = String(policy.maxHours);
+        hoursInput.title = `1-${policy.maxHours} hours`;
+        const current = parseInt(hoursInput.value || '2', 10);
+        if (Number.isFinite(current) && current > policy.maxHours) {
+            hoursInput.value = String(policy.maxHours);
+        }
+    }
+    if (dateRangeText) {
+        dateRangeText.textContent = `Date range (max ${policy.maxDays} days)`;
+    }
+    if (dateHint) {
+        dateHint.textContent = `Select up to ${policy.maxDays} consecutive days. End date is limited automatically.`;
+    }
+    if (fiveDayChip) {
+        fiveDayChip.style.display = policy.maxHours >= 120 ? '' : 'none';
+    }
+    if (thirtyDayChip) {
+        thirtyDayChip.style.display = policy.maxHours >= 720 ? '' : 'none';
+    }
+    if (startEl && endEl && startEl.value) {
+        const start = new Date(startEl.value);
+        const maxEnd = new Date(start);
+        maxEnd.setDate(maxEnd.getDate() + Math.max(0, policy.maxDays - 1));
+        endEl.max = maxEnd.toISOString().slice(0, 10);
+        if (endEl.value) {
+            const end = new Date(endEl.value);
+            if (end > maxEnd) {
+                endEl.value = endEl.max;
+            }
+        }
+    }
+}
 
 function setStructuredDuration(hours) {
     const el = document.getElementById('dbStructuredDuration');
     if (!el) return;
     const h = parseInt(hours, 10);
-    if (!Number.isFinite(h) || h < 1 || h > DB_MAX_DURATION_HOURS) return;
+    if (!Number.isFinite(h) || h < 1 || h > getDbMaxDurationHours()) return;
     el.value = String(h);
     hydrateStructuredSummary();
 }
@@ -1521,7 +3007,7 @@ function initDbDurationMode() {
         if (!startEl || !endEl || !startEl.value) return;
         const start = new Date(startEl.value);
         const maxEnd = new Date(start);
-        maxEnd.setDate(maxEnd.getDate() + DB_MAX_DURATION_DAYS);
+        maxEnd.setDate(maxEnd.getDate() + Math.max(0, getDbMaxDurationDays() - 1));
         endEl.max = maxEnd.toISOString().slice(0, 10);
         const end = new Date(endEl.value);
         if (endEl.value && end > maxEnd) {
@@ -1563,7 +3049,7 @@ function initDbDurationMode() {
             if (!startEl || !startEl.value) return;
             const start = new Date(startEl.value);
             const maxEnd = new Date(start);
-            maxEnd.setDate(maxEnd.getDate() + DB_MAX_DURATION_DAYS);
+            maxEnd.setDate(maxEnd.getDate() + Math.max(0, getDbMaxDurationDays() - 1));
             const end = new Date(endEl.value);
             if (end > maxEnd) {
                 endEl.value = maxEnd.toISOString().slice(0, 10);
@@ -1579,19 +3065,41 @@ function initDbDurationMode() {
         hoursBlock.style.display = '';
         daterangeBlock.style.display = 'none';
     }
+    updateDbDurationUi();
 }
 
 function resetStructuredDbRequest() {
     dbStructuredPermissions = [];
+    dbEffectiveIamRoles = [];
+    dbSelectedIamRoleId = '';
     dbRequestDraft = dbRequestDraft || {};
     dbRequestDraft.requested_tables = [];
+    dbRequestDraft.request_for_mode = 'self';
+    delete dbRequestDraft.request_approver_email;
+    delete dbRequestDraft.iam_role_template_id;
+    delete dbRequestDraft.iam_role_template_name;
+    delete dbRequestDraft.role;
+    dbRequestRecipients = [];
+    dbApproverEmailManuallyEdited = false;
+    dbOwnerEmailManuallyEdited = false;
+    dbSelectedOwner = null;
     const dur = document.getElementById('dbStructuredDuration');
     const just = document.getElementById('dbStructuredJustification');
+    const approver = document.getElementById('dbStructuredApproverEmail');
+    const approverAi = document.getElementById('dbAiApproverEmail');
+    const dbOwner = document.getElementById('dbStructuredDbOwnerEmail');
+    const dbOwnerAi = document.getElementById('dbAiDbOwnerEmail');
     const modeHours = document.getElementById('dbDurationModeHours');
     const startEl = document.getElementById('dbStartDate');
     const endEl = document.getElementById('dbEndDate');
     if (dur) dur.value = '2';
     if (just) just.value = '';
+    if (approver) approver.value = '';
+    if (approverAi) approverAi.value = '';
+    if (dbOwner) dbOwner.value = '';
+    if (dbOwnerAi) dbOwnerAi.value = '';
+    renderDbOwnerSelection('structured');
+    renderDbOwnerSelection('ai');
     if (modeHours) modeHours.checked = true;
     const hoursBlock = document.getElementById('dbDurationHoursBlock');
     const daterangeBlock = document.getElementById('dbDurationDaterangeBlock');
@@ -1605,11 +3113,21 @@ function resetStructuredDbRequest() {
     const today = new Date().toISOString().slice(0, 10);
     if (startEl) startEl.value = '';
     if (endEl) endEl.value = '';
+    dbWorkflowPreview = null;
+    dbWorkflowPreviewKey = '';
+    dbWorkflowPreviewPending = false;
+    renderDbEffectiveIamRoles();
+    renderDbWorkflowPreview('', 'info');
+    syncDbApprovalUiState();
+    refreshDbRequestRecipientUi();
     syncStructuredPermissionUI();
+    updateDbStructuredPermissionVisibility();
+    updateDbDurationUi();
     hydrateStructuredSummary();
 }
 
 function getDbStructuredDurationHours() {
+    const maxHours = getDbMaxDurationHours();
     const modeDaterange = document.getElementById('dbDurationModeDaterange');
     if (modeDaterange && modeDaterange.checked) {
         const startEl = document.getElementById('dbStartDate');
@@ -1620,12 +3138,12 @@ function getDbStructuredDurationHours() {
         if (end < start) return null;
         const hours = Math.round((end - start) / (1000 * 60 * 60));
         if (hours < 1) return 1;
-        if (hours > DB_MAX_DURATION_HOURS) return DB_MAX_DURATION_HOURS;
+        if (hours > maxHours) return maxHours;
         return hours;
     }
     const v = parseInt(document.getElementById('dbStructuredDuration')?.value || '2', 10);
     if (!Number.isFinite(v) || v < 1) return 2;
-    return Math.min(v, DB_MAX_DURATION_HOURS);
+    return Math.min(v, maxHours);
 }
 
 function getDbStructuredDurationDisplay() {
@@ -1646,59 +3164,83 @@ function getDbStructuredDurationDisplay() {
 function hydrateStructuredSummary() {
     const summary = document.getElementById('dbStructuredSummary');
     if (!summary) return;
+    updateDbDurationUi();
+    const scopeMeta = getDbRequestScopeMeta(selectedEngine?.engine || dbRequestDraft?._selectedInstance?.engine || '');
     const dbs = selectedDatabases?.map(d => d.name).filter(Boolean) || [];
     const dbNames = dbs.length ? dbs.join(', ') : (dbRequestDraft?.db_name || 'default');
+    const instanceText = String((dbRequestDraft?._selectedInstance || {}).id || dbRequestDraft?.requested_instance_input || '').trim() || '—';
+    const schemaName = String(dbRequestDraft?.requested_schema_name || '').trim() || '—';
     const tableNames = Array.isArray(dbRequestDraft?.requested_tables) && dbRequestDraft.requested_tables.length
         ? dbRequestDraft.requested_tables.join(', ')
-        : '—';
+        : (String(dbRequestDraft?.requested_table_name || '').trim() || '—');
+    const detailName = String(dbRequestDraft?.requested_column_name || '').trim() || '—';
     const durationDisplay = getDbStructuredDurationDisplay();
     const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
-    const role = deriveStructuredRole(dbStructuredPermissions);
-    const ops = dbStructuredPermissions.length ? dbStructuredPermissions.join(', ') : '—';
+    const approverDisplay = getDbApproverDisplay();
+    const dbOwnerEmail = getDbOwnerEmail();
+    const requestTarget = getDbRequestTargetSummaryLabel();
+    const selectedRole = getDbEffectiveIamRoleById(dbSelectedIamRoleId);
+    const role = String((selectedRole && selectedRole.request_role) || dbRequestDraft?.role || deriveStructuredRole(dbStructuredPermissions)).trim().toLowerCase() || deriveStructuredRole(dbStructuredPermissions);
+    const savedRole = String(dbRequestDraft?.iam_role_template_name || '').trim();
+    const manualAccessType = String(dbRequestDraft?.requested_access_type || '').trim();
+    const ops = dbStructuredPermissions.length ? dbStructuredPermissions.join(', ') : (manualAccessType || '—');
 
     summary.innerHTML = `
         <div class="db-structured-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine?.label || 'Database')}</span>
+            <span><strong>${escapeHtml(getDbTargetLabel(selectedEngine?.engine, dbRequestDraft?._selectedInstance?.resource_kind))}:</strong> ${escapeHtml(instanceText)}</span>
+            <span><strong>Request For:</strong> ${escapeHtml(requestTarget)}</span>
             <span><strong>Database(s):</strong> ${escapeHtml(dbNames)}</span>
-            <span><strong>Table(s):</strong> ${escapeHtml(tableNames)}</span>
+            ${scopeMeta.schemaVisible ? `<span><strong>${escapeHtml(scopeMeta.schemaLabel)}:</strong> ${escapeHtml(schemaName)}</span>` : ''}
+            <span><strong>${escapeHtml(scopeMeta.objectPluralLabel)}:</strong> ${escapeHtml(tableNames)}</span>
+            <span><strong>${escapeHtml(scopeMeta.detailLabel)}:</strong> ${escapeHtml(detailName)}</span>
             <span><strong>Selected Queries:</strong> ${escapeHtml(ops)}</span>
             <span><strong>Role:</strong> ${escapeHtml(getDbRoleLabel(role))}</span>
+            <span><strong>Access Role:</strong> ${escapeHtml(savedRole || '—')}</span>
             <span><strong>Duration:</strong> ${escapeHtml(durationDisplay)}</span>
+            <span><strong>Approver:</strong> ${escapeHtml(approverDisplay)}</span>
+            <span><strong>DB Owner:</strong> ${escapeHtml(dbOwnerEmail || 'Not added')}</span>
             <span><strong>Reason:</strong> ${escapeHtml(justification || '—')}</span>
         </div>
     `;
     summary.style.display = 'block';
+    refreshDbWorkflowPreview();
 }
 
 async function submitStructuredDbRequest() {
+    setDbSubmitStatus('dbStructuredSubmitStatus', '', 'info');
     if (!selectedEngine || !dbRequestDraft || !selectedDatabases?.length) {
         alert('Please select account, instance, and database first.');
         return;
     }
     if (dbInstancePolicy?.request_allowed === false) {
-        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
+        alert(dbInstancePolicy.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON);
         return;
     }
     if (!dbStructuredPermissions.length) {
-        alert('Please select at least one query permission.');
-        return;
-    }
-    if (dbInstancePolicy?.enforce_read_only && dbStructuredPermissions.some(op => !isReadOnlyDbOperation(op))) {
-        alert('Only view access operations are allowed for this selected production RDS.');
-        return;
+        const manualAccessType = String(dbRequestDraft?.requested_access_type || '').trim();
+        if (manualAccessType) {
+            dbStructuredPermissions = manualAccessType.split(',').map(op => op.trim().toUpperCase()).filter(Boolean);
+        }
+        if (!dbStructuredPermissions.length) {
+            alert('Please enter the Access Type.');
+            return;
+        }
     }
     const duration = getDbStructuredDurationHours();
+    const maxDurationHours = getDbMaxDurationHours();
+    const maxDurationDays = getDbMaxDurationDays();
     if (duration == null || duration < 1) {
         const modeDaterange = document.getElementById('dbDurationModeDaterange');
         if (modeDaterange && modeDaterange.checked) {
-            alert('Please select a valid date range (from and to, max 3 days).');
+            alert(`Please select a valid date range (from and to, max ${maxDurationDays} days).`);
         } else {
-            alert('Duration must be between 1 and ' + DB_MAX_DURATION_HOURS + ' hours.');
+            alert('Duration must be between 1 and ' + maxDurationHours + ' hours.');
         }
         return;
     }
-    if (duration > DB_MAX_DURATION_HOURS) {
-        alert('Maximum duration is ' + DB_MAX_DURATION_DAYS + ' days (' + DB_MAX_DURATION_HOURS + ' hours).');
+    if (duration > maxDurationHours) {
+        alert('Maximum duration is ' + maxDurationDays + ' days (' + maxDurationHours + ' hours).');
         return;
     }
     const justification = String(document.getElementById('dbStructuredJustification')?.value || '').trim();
@@ -1706,34 +3248,104 @@ async function submitStructuredDbRequest() {
         alert('Please enter a short business justification.');
         return;
     }
-
-    const userEmail = localStorage.getItem('userEmail') || 'user@company.com';
-    const fullName = (typeof currentUser !== 'undefined' && currentUser && currentUser.name) || localStorage.getItem('userName') || userEmail.split('@')[0].replace(/\./g, ' ');
+    await refreshDbWorkflowPreview();
+    if (dbWorkflowBlockedReason()) {
+        const blockedMessage = dbWorkflowBlockedReason();
+        setDbSubmitStatus('dbStructuredSubmitStatus', blockedMessage, 'error');
+        alert(blockedMessage);
+        return;
+    }
+    if (dbWorkflowPreview && dbWorkflowPreview.error) {
+        setDbSubmitStatus('dbStructuredSubmitStatus', dbWorkflowPreview.message || 'No matching approval workflow found.', 'error');
+        alert(dbWorkflowPreview.message || 'No matching approval workflow found.');
+        return;
+    }
+    const approverEmail = getDbApproverEmail();
+    const dbOwnerEmail = getDbOwnerEmail();
+    const approverRequired = dbWorkflowRequiresApprover();
+    if (getDbRequestMode() !== 'others' && approverRequired && !approverEmail) {
+        alert('Please enter the approver email address.');
+        return;
+    }
+    if (getDbRequestMode() !== 'others' && approverEmail && !/@nykaa\.com$/i.test(approverEmail)) {
+        alert('Approver email must end with @nykaa.com.');
+        return;
+    }
+    const confirmed = await confirmDbRequestSubmission();
+    if (!confirmed) {
+        setDbSubmitStatus('dbStructuredSubmitStatus', 'Database request submission cancelled.', 'info');
+        return;
+    }
     let accountId = dbRequestDraft.account_id || dbRequestDraft.project_id || dbRequestDraft.subscription_id || dbRequestDraft.compartment_id || dbRequestDraft.atlas_project_id || '';
     if (!accountId) {
-        const accounts = await fetchAccounts();
-        if (accounts.length) accountId = accounts[0].id;
+        alert('Please select the target account before submitting the database request.');
+        return;
     }
     const inst = dbRequestDraft?._selectedInstance || {};
+    const scopeMeta = getDbRequestScopeMeta(inst.engine || selectedEngine?.engine || '');
+    if (!inst.id) {
+        alert('Please select the target database instance before submitting the request.');
+        return;
+    }
+    const databaseName = String(dbRequestDraft?.requested_database_name || dbRequestDraft?.db_name || selectedDatabases?.[0]?.name || '').trim();
+    const schemaName = String(dbRequestDraft?.requested_schema_name || '').trim();
+    const tableName = String(dbRequestDraft?.requested_table_name || '').trim();
+    const detailName = String(dbRequestDraft?.requested_column_name || '').trim();
+    const accessType = String(dbRequestDraft?.requested_access_type || '').trim() || dbStructuredPermissions.join(', ');
+    if (!databaseName) {
+        alert('Please enter the Database Name.');
+        return;
+    }
+    if (scopeMeta.schemaRequired && !schemaName) {
+        alert(`Please enter the ${scopeMeta.schemaLabel} Name.`);
+        return;
+    }
+    if (scopeMeta.objectRequired && !tableName) {
+        alert(`Please enter the ${scopeMeta.objectLabel} Name.`);
+        return;
+    }
     const role = deriveStructuredRole(dbStructuredPermissions);
     const query_types = deriveStructuredQueryTypes(dbStructuredPermissions);
+    let targets = [];
+    try {
+        targets = buildDbRecipientSubmissionTargets(approverRequired, approverEmail);
+        const invalidTarget = targets.find(function(item) {
+            return item.requestApproverEmail && !/@nykaa\.com$/i.test(item.requestApproverEmail);
+        });
+        if (invalidTarget) {
+            throw new Error(`Approver email for ${invalidTarget.email} must end with @nykaa.com.`);
+        }
+    } catch (err) {
+        alert(err.message || 'Please select valid target users before submitting.');
+        return;
+    }
 
     const payload = {
         databases: selectedDatabases,
         account_id: accountId,
         region: inst.region || '',
         db_instance_id: inst.id || '',
-        user_email: userEmail,
-        user_full_name: fullName,
-        db_username: userEmail.split('@')[0],
+        rds_instance: inst.id || '',
+        database_name: databaseName,
+        schema_name: schemaName,
+        table_name: tableName,
+        column_name: detailName,
+        access_type: accessType,
         permissions: dbStructuredPermissions,
         query_types,
         requested_tables: Array.isArray(dbRequestDraft.requested_tables) ? dbRequestDraft.requested_tables : [],
         role,
+        iam_role_template_id: String(dbRequestDraft?.iam_role_template_id || '').trim(),
+        iam_role_template_name: String(dbRequestDraft?.iam_role_template_name || '').trim(),
+        engine: normalizeEngineForStructured(inst.engine || selectedEngine?.engine || ''),
+        resource_kind: String(inst.resource_kind || '').trim().toLowerCase(),
+        data_classification: String(inst.data_classification || dbInstancePolicy?.data_classification || '').trim().toLowerCase(),
+        is_pii: !!(inst.is_sensitive_classification || dbInstancePolicy?.is_sensitive_classification),
         duration_hours: duration,
         justification,
         preferred_auth: dbRequestDraft.preferred_auth || ''
     };
+    if (dbOwnerEmail) payload.db_owner_email = dbOwnerEmail;
     const modeDaterange = document.getElementById('dbDurationModeDaterange');
     if (modeDaterange && modeDaterange.checked) {
         const startEl = document.getElementById('dbStartDate');
@@ -1743,21 +3355,39 @@ async function submitStructuredDbRequest() {
     }
 
     try {
-        const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        focusDbRequestsStatus(data.status);
-        loadDbRequests();
-        refreshApprovedDatabases();
-        alert(`Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nTrack it under My Requests > Databases.`);
+        setDbSubmitBusy('dbStructuredSubmitBtn', true, 'Submitting...');
+        setDbSubmitStatus('dbStructuredSubmitStatus', `Submitting ${targets.length} database request${targets.length > 1 ? 's' : ''} for approval...`, 'info');
+        let lastData = null;
+        for (const target of targets) {
+            const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
+                method: 'POST',
+                headers: getDbRequestHeaders(),
+                credentials: 'include',
+                body: JSON.stringify({
+                    ...payload,
+                    user_email: target.email,
+                    user_full_name: target.fullName,
+                    db_username: target.dbUsername,
+                    request_approver_email: approverRequired ? target.requestApproverEmail : (target.requestApproverEmail || ''),
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            lastData = data;
+        }
+        setDbSubmitStatus('dbStructuredSubmitStatus', `Database request${targets.length > 1 ? 's' : ''} submitted successfully. Redirecting to My Requests...`, 'info');
+        showDbRequestsAfterSubmit(
+            lastData?.status,
+            `Database request${targets.length > 1 ? 's' : ''} submitted successfully. Status: ${lastData?.status || 'pending'}. ${lastData?.message || 'Track it under My Requests > Databases.'}`
+        );
+        alert(`Request${targets.length > 1 ? 's' : ''} submitted successfully!\n\nCount: ${targets.length}\nStatus: ${lastData?.status || 'pending'}\n${lastData?.message || 'Track it under My Requests > Databases.'}`);
         // Keep user in structured panel but clear for next request.
         resetStructuredDbRequest();
     } catch (e) {
+        setDbSubmitStatus('dbStructuredSubmitStatus', safeUserFacingErrorMessage(e), 'error');
         alert('Failed: ' + safeUserFacingErrorMessage(e));
+    } finally {
+        setDbSubmitBusy('dbStructuredSubmitBtn', false);
     }
 }
 
@@ -2007,12 +3637,12 @@ function getDbRoleLabel(role) {
         read_limited_write: 'Limited Write',
         read_full_write: 'Full Write',
         admin: 'Admin'
-    })[role] || 'Custom (NPAMX)';
+    })[role] || 'Custom (NPAMx)';
 }
 
 function shouldShowDbRequestSummary() {
     if (!dbRequestDraft || !selectedEngine || !selectedDatabases?.length) return false;
-    // Only show summary when NPAMX is at the confirmation stage (strict workflow).
+    // Only show summary when NPAMx is at the confirmation stage (strict workflow).
     if (!dbRequestDraft._needsConfirmation && !dbRequestDraft._readyToSubmit) return false;
     const permissionsText = String(dbRequestDraft.permissions || '').trim();
     const role = String(dbRequestDraft.role || '').trim();
@@ -2043,7 +3673,8 @@ async function sendDbAiMessage() {
     try {
         const response = await fetch(`${DB_API_BASE}/api/databases/ai-chat`, {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
             body: JSON.stringify({
                 message,
                 conversation_id: dbConversationId,
@@ -2164,6 +3795,47 @@ function domIdFromRequestId(requestId) {
         .replace(/^-|-$/g, '') || 'req';
 }
 
+function formatDbActivationUpdatedAt(value) {
+    const formatted = formatDbDateTime(value);
+    return formatted === '—' ? '' : formatted;
+}
+
+function renderDbActivationProgress(req) {
+    const progress = req && typeof req.activation_progress === 'object' ? req.activation_progress : null;
+    if (!progress) return '';
+    const steps = Array.isArray(progress.steps) ? progress.steps : [];
+    const hasSteps = steps.length > 0;
+    const currentStep = String(progress.current_step || '').trim();
+    const activationError = String(req.activation_error || '').trim();
+    const activationMessage = String(progress.message || '').trim();
+    const updatedAt = formatDbActivationUpdatedAt(progress.updated_at);
+    const panelClass = activationError
+        ? 'db-activation-panel-error'
+        : (currentStep ? 'db-activation-panel-progress' : 'db-activation-panel-info');
+    const items = hasSteps ? steps.map(step => {
+        const status = String(step?.status || 'pending').trim().toLowerCase();
+        const label = String(step?.label || step?.key || 'Step').trim();
+        const chipLabel = status === 'done'
+            ? 'Done'
+            : status === 'in_progress'
+                ? 'In progress'
+                : status === 'error'
+                    ? 'Error'
+                    : 'Pending';
+        return `<li class="db-activation-step db-activation-step-${escapeAttr(status)}">
+            <span class="db-activation-step-label">${escapeHtml(label)}</span>
+            <span class="db-activation-step-chip">${escapeHtml(chipLabel)}</span>
+        </li>`;
+    }).join('') : '';
+    return `<div class="db-activation-panel ${panelClass}">
+        <div class="db-activation-panel-title">${escapeHtml(activationError ? 'Activation issue' : 'Activation status')}</div>
+        ${activationMessage ? `<div class="db-activation-panel-message">${escapeHtml(activationMessage)}</div>` : ''}
+        ${activationError ? `<div class="db-activation-panel-error-text">${escapeHtml(activationError)}</div>` : ''}
+        ${items ? `<ul class="db-activation-steps">${items}</ul>` : ''}
+        ${updatedAt ? `<div class="db-activation-panel-meta">Last updated: ${escapeHtml(updatedAt)}</div>` : ''}
+    </div>`;
+}
+
 function showDbRequestSummaryIfReady() {
     const summary = document.getElementById('dbAiRequestSummary');
     const actions = document.getElementById('dbAiActions');
@@ -2179,10 +3851,17 @@ function showDbRequestSummaryIfReady() {
     const permissionsText = String(dbRequestDraft.permissions || '').trim();
     const duration = dbRequestDraft.duration_hours || 2;
     const reason = String(dbRequestDraft.justification || '').trim();
-    const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.db_name || 'default');
-    const tables = Array.isArray(dbRequestDraft.requested_tables) && dbRequestDraft.requested_tables.length
-        ? dbRequestDraft.requested_tables.join(', ')
-        : '—';
+    const dbOwnerEmail = getDbOwnerEmail();
+    const databases = selectedDatabases?.map(d => d.name).join(', ') || (dbRequestDraft.requested_database_name || dbRequestDraft.db_name || 'default');
+    const scopeMeta = getDbRequestScopeMeta(selectedEngine?.engine || dbRequestDraft?._selectedInstance?.engine || '');
+    const schemaName = String(dbRequestDraft.requested_schema_name || '').trim() || '—';
+    const tables = String(dbRequestDraft.requested_table_name || '').trim()
+        || (Array.isArray(dbRequestDraft.requested_tables) && dbRequestDraft.requested_tables.length
+            ? dbRequestDraft.requested_tables.join(', ')
+            : '—');
+    const detailName = String(dbRequestDraft.requested_column_name || '').trim() || '—';
+    const instanceText = String((dbRequestDraft._selectedInstance || {}).id || dbRequestDraft.requested_instance_input || '').trim() || '—';
+    const manualAccessType = String(dbRequestDraft.requested_access_type || '').trim();
     const operations = permissionsText || (dbRequestDraft.role === 'read_only'
         ? 'SELECT'
         : dbRequestDraft.role === 'read_limited_write'
@@ -2191,28 +3870,35 @@ function showDbRequestSummaryIfReady() {
                 ? 'SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE'
                 : dbRequestDraft.role === 'admin'
                     ? 'ALL PRIVILEGES'
-                    : 'Custom (NPAMX)');
+                    : (manualAccessType || 'Custom (NPAMx)'));
     const title = dbRequestDraft._readyToSubmit ? 'Confirmed request' : 'Please confirm this request';
+    const requestTarget = getDbRequestTargetSummaryLabel();
     summary.innerHTML = `
         <p><strong>${escapeHtml(title)}</strong></p>
         <div class="db-ai-summary-grid">
             <span><strong>Engine:</strong> ${escapeHtml(selectedEngine.label)}</span>
+            <span><strong>${escapeHtml(getDbTargetLabel(selectedEngine?.engine, dbRequestDraft?._selectedInstance?.resource_kind))}:</strong> ${escapeHtml(instanceText)}</span>
+            <span><strong>Request For:</strong> ${escapeHtml(requestTarget)}</span>
             <span><strong>Databases:</strong> ${escapeHtml(databases)}</span>
-            <span><strong>Tables:</strong> ${escapeHtml(tables)}</span>
+            ${scopeMeta.schemaVisible ? `<span><strong>${escapeHtml(scopeMeta.schemaLabel)}:</strong> ${escapeHtml(schemaName)}</span>` : ''}
+            <span><strong>${escapeHtml(scopeMeta.objectPluralLabel)}:</strong> ${escapeHtml(tables)}</span>
+            <span><strong>${escapeHtml(scopeMeta.detailLabel)}:</strong> ${escapeHtml(detailName)}</span>
             <span><strong>Operations:</strong> ${escapeHtml(operations)}</span>
             <span><strong>Role:</strong> ${escapeHtml(role)}</span>
             <span><strong>Reason:</strong> ${escapeHtml(reason)}</span>
             <span><strong>Duration:</strong> ${escapeHtml(String(duration))} hour(s)</span>
+            <span><strong>DB Owner:</strong> ${escapeHtml(dbOwnerEmail || 'Not added')}</span>
         </div>`;
     summary.style.display = 'block';
     actions.style.display = 'flex';
 }
 
 function editDbRequestDuration() {
-    const hrs = prompt('Duration (hours):', dbRequestDraft?.duration_hours || 2);
+    const maxDurationHours = getDbMaxDurationHours();
+    const hrs = prompt(`Duration (hours, 1-${maxDurationHours}):`, dbRequestDraft?.duration_hours || 2);
     if (hrs) {
         const h = parseInt(hrs, 10);
-        if (h >= 1 && h <= 24) {
+        if (h >= 1 && h <= maxDurationHours) {
             dbRequestDraft = dbRequestDraft || {};
             dbRequestDraft.duration_hours = h;
             showDbRequestSummaryIfReady();
@@ -2221,17 +3907,44 @@ function editDbRequestDuration() {
 }
 
 async function submitDbRequestViaAi(opts = {}) {
+    setDbSubmitStatus('dbAiSubmitStatus', '', 'info');
     if (!selectedEngine || !dbRequestDraft) {
-        alert('Please complete the NPAMX conversation first. Select account and database.');
+        alert('Please complete the NPAMx conversation first. Select account and database.');
         return;
     }
     const skipPrompt = !!opts.skipPrompt;
     if (!dbRequestDraft._readyToSubmit && !dbRequestDraft.confirmed_by_user) {
-        alert('Please finish the NPAMX chat and confirm the summary by replying Yes before submitting.');
+        alert('Please finish the NPAMx chat and confirm the summary by replying Yes before submitting.');
         return;
     }
-    const userEmail = localStorage.getItem('userEmail') || 'user@company.com';
-    const fullName = (typeof currentUser !== 'undefined' && currentUser && currentUser.name) || localStorage.getItem('userName') || userEmail.split('@')[0].replace(/\./g, ' ');
+    await refreshDbWorkflowPreview();
+    if (dbWorkflowBlockedReason()) {
+        const blockedMessage = dbWorkflowBlockedReason();
+        setDbSubmitStatus('dbAiSubmitStatus', blockedMessage, 'error');
+        alert(blockedMessage);
+        return;
+    }
+    if (dbWorkflowPreview && dbWorkflowPreview.error) {
+        setDbSubmitStatus('dbAiSubmitStatus', dbWorkflowPreview.message || 'No matching approval workflow found.', 'error');
+        alert(dbWorkflowPreview.message || 'No matching approval workflow found.');
+        return;
+    }
+    const approverEmail = getDbApproverEmail();
+    const dbOwnerEmail = getDbOwnerEmail();
+    const approverRequired = dbWorkflowRequiresApprover();
+    if (getDbRequestMode() !== 'others' && approverRequired && !approverEmail) {
+        alert('Please enter the approver email address.');
+        return;
+    }
+    if (getDbRequestMode() !== 'others' && approverEmail && !/@nykaa\.com$/i.test(approverEmail)) {
+        alert('Approver email must end with @nykaa.com.');
+        return;
+    }
+    const confirmed = await confirmDbRequestSubmission();
+    if (!confirmed) {
+        setDbSubmitStatus('dbAiSubmitStatus', 'Database request submission cancelled.', 'info');
+        return;
+    }
     let justification = String(dbRequestDraft.justification || '').trim();
     if (!justification && !skipPrompt) {
         justification = prompt('Justification (why you need access):', '') || '';
@@ -2244,8 +3957,8 @@ async function submitDbRequestViaAi(opts = {}) {
     }
     let accountId = dbRequestDraft.account_id || dbRequestDraft.project_id || dbRequestDraft.subscription_id || dbRequestDraft.compartment_id || dbRequestDraft.atlas_project_id || '';
     if (!accountId) {
-        const accounts = await fetchAccounts();
-        if (accounts.length) accountId = accounts[0].id;
+        alert('Please select the target account before submitting the database request.');
+        return;
     }
     const databases = selectedDatabases.length ? selectedDatabases : [];
     if (!databases.length) {
@@ -2253,66 +3966,168 @@ async function submitDbRequestViaAi(opts = {}) {
         return;
     }
     if (dbInstancePolicy?.request_allowed === false) {
-        alert(dbInstancePolicy.request_block_reason || "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com.");
+        alert(dbInstancePolicy.request_block_reason || DEFAULT_DB_POLICY_BLOCK_REASON);
         return;
     }
-    if (dbInstancePolicy?.enforce_read_only) {
-        const requestedOps = Array.isArray(dbRequestDraft.permissions)
-            ? dbRequestDraft.permissions.map(x => String(x || '').trim()).filter(Boolean)
-            : String(dbRequestDraft.permissions || '').split(',').map(x => x.trim()).filter(Boolean);
-        const role = String(dbRequestDraft.role || '').trim().toLowerCase();
-        const roleImpliesWrite = role === 'admin' || role === 'read_full_write' || role === 'read_limited_write';
-        if (roleImpliesWrite || requestedOps.some(op => !isReadOnlyDbOperation(op))) {
-            alert('Only view access operations are allowed for this selected production RDS.');
-            return;
+    let targets = [];
+    try {
+        targets = buildDbRecipientSubmissionTargets(approverRequired, approverEmail);
+        const invalidTarget = targets.find(function(item) {
+            return item.requestApproverEmail && !/@nykaa\.com$/i.test(item.requestApproverEmail);
+        });
+        if (invalidTarget) {
+            throw new Error(`Approver email for ${invalidTarget.email} must end with @nykaa.com.`);
         }
+    } catch (err) {
+        alert(err.message || 'Please select valid target users before submitting.');
+        return;
     }
     try {
+        setDbSubmitBusy('dbAiSubmitBtn', true, 'Submitting...');
+        setDbSubmitStatus('dbAiSubmitStatus', `Submitting ${targets.length} database request${targets.length > 1 ? 's' : ''} for approval...`, 'info');
         const inst = dbRequestDraft?._selectedInstance || {};
-        const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                databases,
-                account_id: accountId,
-                region: inst.region || '',
-                db_instance_id: inst.id || '',
-                user_email: userEmail,
-                user_full_name: fullName,
-                db_username: userEmail.split('@')[0],
-                permissions: dbRequestDraft.permissions || '',
-                query_types: Array.isArray(dbRequestDraft.query_types) ? dbRequestDraft.query_types : [],
-                requested_tables: Array.isArray(dbRequestDraft.requested_tables) ? dbRequestDraft.requested_tables : [],
-                role: dbRequestDraft.role || 'custom',
-                duration_hours: dbRequestDraft.duration_hours || 2,
-                justification,
-                preferred_auth: dbRequestDraft.preferred_auth || '',
-                ai_generated: true,
-                confirmed_by_user: !!dbRequestDraft.confirmed_by_user,
-                conversation_id: dbConversationId
-            })
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        if (!inst.id) {
+            alert('Please select the target database instance before submitting the request.');
+            return;
+        }
+        const scopeMeta = getDbRequestScopeMeta(inst.engine || selectedEngine?.engine || '');
+        const databaseName = String(dbRequestDraft?.requested_database_name || dbRequestDraft?.db_name || databases?.[0]?.name || '').trim();
+        const schemaName = String(dbRequestDraft?.requested_schema_name || '').trim();
+        const tableName = String(dbRequestDraft?.requested_table_name || '').trim();
+        const detailName = String(dbRequestDraft?.requested_column_name || '').trim();
+        const accessType = String(dbRequestDraft?.requested_access_type || '').trim()
+            || (Array.isArray(dbRequestDraft?.query_types) ? dbRequestDraft.query_types.join(', ') : '')
+            || String(dbRequestDraft?.permissions || '').trim();
+        if (!databaseName) {
+            alert('Please enter the Database Name.');
+            return;
+        }
+        if (scopeMeta.schemaRequired && !schemaName) {
+            alert(`Please enter the ${scopeMeta.schemaLabel} Name.`);
+            return;
+        }
+        if (scopeMeta.objectRequired && !tableName) {
+            alert(`Please enter the ${scopeMeta.objectLabel} Name.`);
+            return;
+        }
+        let lastData = null;
+        for (const target of targets) {
+            const res = await fetch(`${DB_API_BASE}/api/databases/request-access`, {
+                method: 'POST',
+                headers: getDbRequestHeaders(),
+                credentials: 'include',
+                body: JSON.stringify({
+                    databases,
+                    account_id: accountId,
+                    region: inst.region || '',
+                    db_instance_id: inst.id || '',
+                    rds_instance: inst.id || '',
+                    engine: String(inst.engine || selectedEngine?.engine || '').trim().toLowerCase(),
+                    resource_kind: String(inst.resource_kind || '').trim().toLowerCase(),
+                    database_name: databaseName,
+                    schema_name: schemaName,
+                    table_name: tableName,
+                    column_name: detailName,
+                    access_type: accessType,
+                    user_email: target.email,
+                    user_full_name: target.fullName,
+                    db_username: target.dbUsername,
+                    permissions: dbRequestDraft.permissions || '',
+                    query_types: Array.isArray(dbRequestDraft.query_types) ? dbRequestDraft.query_types : [],
+                    requested_tables: Array.isArray(dbRequestDraft.requested_tables) ? dbRequestDraft.requested_tables : [],
+                    role: dbRequestDraft.role || 'custom',
+                    iam_role_template_id: String(dbRequestDraft?.iam_role_template_id || '').trim(),
+                    iam_role_template_name: String(dbRequestDraft?.iam_role_template_name || '').trim(),
+                    data_classification: String(inst.data_classification || dbInstancePolicy?.data_classification || '').trim().toLowerCase(),
+                    is_pii: !!(inst.is_sensitive_classification || dbInstancePolicy?.is_sensitive_classification),
+                    duration_hours: dbRequestDraft.duration_hours || 2,
+                    justification,
+                    request_approver_email: approverRequired ? target.requestApproverEmail : (target.requestApproverEmail || ''),
+                    db_owner_email: dbOwnerEmail,
+                    preferred_auth: dbRequestDraft.preferred_auth || '',
+                    ai_generated: true,
+                    confirmed_by_user: !!dbRequestDraft.confirmed_by_user,
+                    conversation_id: dbConversationId
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            lastData = data;
+        }
+        setDbSubmitStatus('dbAiSubmitStatus', `Database request${targets.length > 1 ? 's' : ''} submitted successfully. Redirecting to My Requests...`, 'info');
         closeDbAiPanel();
-        focusDbRequestsStatus(data.status);
-        loadDbRequests();
-        refreshApprovedDatabases();
-        var msg = `Request submitted successfully!\n\nStatus: ${data.status}\n${data.message}\n\nPlease check the approval status under My Requests tab in Databases.`;
-        if (data.creation_error) msg += '\n\n' + data.creation_error;
+        showDbRequestsAfterSubmit(
+            lastData?.status,
+            `Database request${targets.length > 1 ? 's' : ''} submitted successfully. Status: ${lastData?.status || 'pending'}. ${lastData?.message || 'Please check My Requests > Databases.'}`
+        );
+        var msg = `Request${targets.length > 1 ? 's' : ''} submitted successfully!\n\nCount: ${targets.length}\nStatus: ${lastData?.status || 'pending'}\n${lastData?.message || 'Please check the approval status under My Requests tab in Databases.'}`;
+        if (lastData?.creation_error) msg += '\n\n' + lastData.creation_error;
         alert(msg);
     } catch (e) {
+        setDbSubmitStatus('dbAiSubmitStatus', safeUserFacingErrorMessage(e), 'error');
         alert('Failed: ' + safeUserFacingErrorMessage(e));
+    } finally {
+        setDbSubmitBusy('dbAiSubmitBtn', false);
     }
 }
 
 function filterDbRequests(status) {
-    dbStatusFilter = (status || 'active');
+    dbStatusFilter = (status || 'pending');
+    if (typeof currentRequestsCategory !== 'undefined') currentRequestsCategory = 'databases';
+    if (typeof currentRequestsStatus !== 'undefined') currentRequestsStatus = dbStatusFilter;
+    if (typeof persistRequestsViewState === 'function') persistRequestsViewState();
     dbRequestsPage = 1;
     dbBulkDeleteSelection = new Set();
     dbVisibleBulkDeleteIds = [];
     renderDbBulkDeleteToolbar();
     loadDbRequests();
+}
+
+function setDbRequestsStatusBanner(message, variant) {
+    if (typeof setInlineStatus === 'function') {
+        setInlineStatus('dbRequestsStatusBanner', message, variant || 'info');
+    }
+}
+
+function showDbRequestsAfterSubmit(status, message) {
+    const targetStatus = mapDbLifecycleToUiStatus(status || 'pending');
+    clearDbRequestsRefreshPoll();
+    if (typeof currentRequestsCategory !== 'undefined') currentRequestsCategory = 'databases';
+    if (typeof currentRequestsStatus !== 'undefined') currentRequestsStatus = targetStatus;
+    dbStatusFilter = targetStatus;
+    if (typeof setRequestsFlowMode === 'function') {
+        try { setRequestsFlowMode('mine'); } catch (_) {}
+    }
+    if (typeof persistRequestsViewState === 'function') persistRequestsViewState();
+    if (typeof showPage === 'function') {
+        try { showPage('requests'); } catch (_) {}
+    }
+    focusDbRequestsStatus(targetStatus);
+    setDbRequestsLoadingState('Refreshing your database requests...');
+    loadDbRequests();
+    refreshApprovedDatabases();
+    let attemptsRemaining = 6;
+    const poll = function() {
+        attemptsRemaining -= 1;
+        loadDbRequests();
+        refreshApprovedDatabases();
+        if (attemptsRemaining > 0) {
+            dbRequestsRefreshPollId = window.setTimeout(poll, 1800);
+        } else {
+            clearDbRequestsRefreshPoll();
+        }
+    };
+    dbRequestsRefreshPollId = window.setTimeout(poll, 1800);
+    window.setTimeout(function() {
+        const dbCard = document.getElementById('requestsDatabasesCard');
+        if (dbCard && typeof dbCard.scrollIntoView === 'function') {
+            dbCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }, 80);
+    setDbRequestsStatusBanner(
+        message || 'Database request submitted successfully. Track it under My Requests > Databases.',
+        'info'
+    );
 }
 
 function mapDbLifecycleToUiStatus(status) {
@@ -2321,19 +4136,30 @@ function mapDbLifecycleToUiStatus(status) {
     if (s === 'active') return 'active';
     if (s === 'approved') return 'approved';
     if (s === 'pending') return 'pending';
-    if (s === 'rejected' || s === 'denied' || s === 'failed') return 'rejected';
+    if (s === 'rejected' || s === 'denied' || s === 'failed' || s === 'cancelled' || s === 'canceled') return 'rejected';
     if (s === 'expired' || s === 'revoked') return 'expired';
     return s;
 }
 
+function normalizeDbRequestUiStatus(req) {
+    const row = req && typeof req === 'object' ? req : {};
+    const lifecycle = String(row.lifecycle_status || row.status || '').trim().toLowerCase();
+    const isExpired = row.is_expired === true;
+    if (lifecycle === 'pending') return 'pending';
+    if (lifecycle === 'denied' || lifecycle === 'rejected' || lifecycle === 'failed' || lifecycle === 'cancelled' || lifecycle === 'canceled') return 'rejected';
+    if (lifecycle === 'expired' || lifecycle === 'revoked') return 'expired';
+    if ((lifecycle === 'active' || lifecycle === 'approved') && isExpired) return 'expired';
+    return mapDbLifecycleToUiStatus(lifecycle || row.status || '');
+}
+
 function isDbRequestDeletableStatus(status) {
     const s = String(status || '').toLowerCase();
-    return s === 'pending' || s === 'expired' || s === 'rejected';
+    return s === 'pending';
 }
 
 function isDbBulkDeleteStatus(status) {
     const s = String(status || '').toLowerCase();
-    return s === 'pending' || s === 'expired';
+    return s === 'pending';
 }
 
 function renderDbBulkDeleteToolbar() {
@@ -2388,18 +4214,27 @@ function toggleDbBulkSelectAll(checked) {
 }
 
 async function deleteSelectedDbRequests() {
-    const userEmail = localStorage.getItem('userEmail') || '';
     const selectedIds = (dbVisibleBulkDeleteIds || []).filter(id => dbBulkDeleteSelection.has(id));
     if (!selectedIds.length) {
         alert('Select at least one request to delete.');
         return;
     }
-    if (!confirm(`Delete ${selectedIds.length} selected request(s)?`)) return;
+    if (typeof confirmAppAction === 'function') {
+        const confirmed = await confirmAppAction(`Delete ${selectedIds.length} selected request(s)?`, {
+            title: 'Delete requests',
+            confirmLabel: 'Delete',
+            variant: 'warning'
+        });
+        if (!confirmed) return;
+    } else if (!confirm(`Delete ${selectedIds.length} selected request(s)?`)) {
+        return;
+    }
     try {
         const res = await fetch(`${DB_API_BASE}/api/databases/requests/bulk-delete`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_email: userEmail, request_ids: selectedIds })
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({ request_ids: selectedIds })
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -2420,6 +4255,9 @@ async function deleteSelectedDbRequests() {
 
 function focusDbRequestsStatus(status) {
     dbStatusFilter = mapDbLifecycleToUiStatus(status);
+    if (typeof currentRequestsCategory !== 'undefined') currentRequestsCategory = 'databases';
+    if (typeof currentRequestsStatus !== 'undefined') currentRequestsStatus = dbStatusFilter;
+    if (typeof persistRequestsViewState === 'function') persistRequestsViewState();
     dbRequestsPage = 1;
     dbBulkDeleteSelection = new Set();
     dbVisibleBulkDeleteIds = [];
@@ -2472,52 +4310,147 @@ function renderDbRequestsPager(meta) {
     `;
 }
 
+function normalizeDbRequestRow(req) {
+    if (!req || typeof req !== 'object') return null;
+    const row = Object.assign({}, req);
+    const requestId = String(row.request_id || row.id || '').trim();
+    if (!requestId) return null;
+    row.request_id = requestId;
+    if (!row.status && row.lifecycle_status) row.status = row.lifecycle_status;
+    row.status = normalizeDbRequestUiStatus(row);
+    return row;
+}
+
+async function fetchDbRequestsFromGenericFeed(requestedStatus, queryText) {
+    const res = await fetch(`${DB_API_BASE}/api/requests`, { credentials: 'include' });
+    const data = await res.json().catch(function() { return []; });
+    if (!res.ok) {
+        throw new Error((data && data.error) || 'Failed to load requests.');
+    }
+    const rows = Array.isArray(data) ? data : [];
+    const q = String(queryText || '').trim().toLowerCase();
+    const requestsFlowMode = (typeof window.getRequestsFlowMode === 'function') ? window.getRequestsFlowMode() : 'mine';
+    const filtered = rows
+        .filter(function(item) {
+            return item && item.type === 'database_access';
+        })
+        .map(normalizeDbRequestRow)
+        .filter(Boolean)
+        .filter(function(item) {
+            if (requestsFlowMode === 'mine') return item?.is_requester === true;
+            if (requestsFlowMode === 'approvals') return item?.is_requester !== true && (item?.can_approve === true || item?.can_deny === true);
+            return true;
+        })
+        .filter(function(item) {
+            const uiStatus = normalizeDbRequestUiStatus(item);
+            if (requestedStatus && requestedStatus !== 'all' && uiStatus !== requestedStatus) {
+                return false;
+            }
+            if (!q) return true;
+            const dbNames = Array.isArray(item.databases)
+                ? item.databases.map(function(db) { return String((db && db.name) || '').trim().toLowerCase(); }).join(' ')
+                : '';
+            const searchHay = [
+                String(item.request_id || '').toLowerCase(),
+                String(item.account_id || '').toLowerCase(),
+                String(item.db_instance_id || '').toLowerCase(),
+                String(item.user_email || '').toLowerCase(),
+                dbNames
+            ].join(' ');
+            return searchHay.includes(q);
+        })
+        .sort(function(a, b) {
+            return new Date(b.created_at || b.requested_at || 0) - new Date(a.created_at || a.requested_at || 0);
+        });
+    const page = parseInt(dbRequestsPage || 1, 10) || 1;
+    const pageSize = parseInt(dbRequestsPageSize || 20, 10) || 20;
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    return {
+        requests: filtered.slice(start, end),
+        page: page,
+        page_size: pageSize,
+        total: filtered.length
+    };
+}
+
 async function loadDbRequests() {
-    const userEmail = localStorage.getItem('userEmail') || 'satish@nykaa.com';
+    const requestedStatus = String(dbStatusFilter || 'pending').trim().toLowerCase() || 'pending';
+    const loadSeq = ++dbRequestsLoadSeq;
+    const list = document.getElementById('dbRequestsList');
+    if (list) {
+        list.innerHTML = `<div class="db-requests-empty"><i class="fas fa-spinner fa-spin"></i> Loading ${escapeHtml(requestedStatus)} database requests...</div>`;
+    }
     try {
         const url = new URL(`${DB_API_BASE}/api/databases/requests`);
-        url.searchParams.set('user_email', userEmail);
-        url.searchParams.set('status', dbStatusFilter || 'active');
+        url.searchParams.set('status', requestedStatus);
+        const requestsFlowMode = (typeof window.getRequestsFlowMode === 'function') ? window.getRequestsFlowMode() : 'mine';
+        url.searchParams.set('flow_mode', requestsFlowMode);
         url.searchParams.set('page', String(dbRequestsPage || 1));
         url.searchParams.set('page_size', String(dbRequestsPageSize || 20));
         if (dbRequestsSearch) url.searchParams.set('q', dbRequestsSearch);
 
-        const res = await fetch(url.toString());
-        const data = await res.json();
-        const list = document.getElementById('dbRequestsList');
+        const res = await fetch(url.toString(), { credentials: 'include' });
+        let data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+            data = await fetchDbRequestsFromGenericFeed(requestedStatus, dbRequestsSearch);
+        }
+        if (loadSeq !== dbRequestsLoadSeq) return;
         if (!list) return;
-        const requests = data.requests || [];
+        let requests = Array.isArray(data.requests) ? data.requests.map(normalizeDbRequestRow).filter(Boolean) : [];
+        databaseRequestsCache = requests.slice();
         renderDbRequestsPager(data);
-        if (!isDbBulkDeleteStatus(dbStatusFilter)) {
+        if (!isDbBulkDeleteStatus(requestedStatus)) {
             dbBulkDeleteSelection = new Set();
             dbVisibleBulkDeleteIds = [];
         }
         if (!requests || requests.length === 0) {
-            const label = dbStatusFilter ? dbStatusFilter : 'active';
-            list.innerHTML = `<div class="db-requests-empty">No ${escapeHtml(label)} database requests</div>`;
+            const label = requestsFlowMode === 'approvals'
+                ? 'database requests are waiting for your approval'
+                : `${requestedStatus || 'pending'} database requests`;
+            list.innerHTML = `<div class="db-requests-empty">No ${escapeHtml(label)}</div>`;
+            databaseRequestsCache = [];
             dbBulkDeleteSelection = new Set();
             dbVisibleBulkDeleteIds = [];
             renderDbBulkDeleteToolbar();
+            clearDbRequestsRefreshPoll();
             return;
         }
-        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r] || r;
+        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMx)' })[r] || r;
         const isAdminUser = (typeof currentUser !== 'undefined' && currentUser && currentUser.isAdmin) || localStorage.getItem('isAdmin') === 'true';
-        const currentUserEmail = (localStorage.getItem('userEmail') || '').trim().toLowerCase();
-        const canApprove = (req) => {
-            if (req.status !== 'pending') return false;
-            const requesterEmail = String(req.user_email || '').trim().toLowerCase();
-            return isAdminUser || (currentUserEmail && requesterEmail === currentUserEmail);
+        const canApprove = (req) => req?.status === 'pending' && req?.can_approve === true;
+        const canDeny = (req) => req?.status === 'pending' && req?.can_deny === true;
+        const canDeleteRequest = (req) => {
+            const status = String(req?.status || '').toLowerCase();
+            const staleApproved = isDbApprovedStaleRequest(req);
+            if (status !== 'pending' && !staleApproved) return false;
+            if (isAdminUser) return true;
+            return req?.is_requester === true;
         };
-        const canDeleteRequest = (req) => isDbRequestDeletableStatus(req?.status);
-        dbVisibleBulkDeleteIds = isDbBulkDeleteStatus(dbStatusFilter)
+        const canCloneRequest = (req) => {
+            const status = String(req?.status || '').toLowerCase();
+            return req?.is_requester === true && ['completed', 'expired', 'revoked'].includes(status);
+        };
+        scheduleDbRequestsRefreshWhileProvisioning(requests);
+        dbVisibleBulkDeleteIds = isDbBulkDeleteStatus(requestedStatus)
             ? requests.filter(canDeleteRequest).map(req => String(req.request_id || '').trim()).filter(Boolean)
             : [];
-        if (isDbBulkDeleteStatus(dbStatusFilter)) {
+        if (isDbBulkDeleteStatus(requestedStatus)) {
             dbBulkDeleteSelection = new Set(
                 Array.from(dbBulkDeleteSelection).filter(id => dbVisibleBulkDeleteIds.includes(id))
             );
         }
-        list.innerHTML = requests.map(req => {
+        const tableHeader = `
+            <div class="db-requests-table-header ${isDbBulkDeleteStatus(requestedStatus) ? 'db-requests-table-header-bulk' : ''}">
+                ${isDbBulkDeleteStatus(requestedStatus) ? '<div class="db-requests-col db-requests-col-select"></div>' : ''}
+                <div class="db-requests-col db-requests-col-id">Request</div>
+                <div class="db-requests-col db-requests-col-status">Status</div>
+                <div class="db-requests-col db-requests-col-target">Target</div>
+                <div class="db-requests-col db-requests-col-expiry">Expires</div>
+                <div class="db-requests-col db-requests-col-actions">Quick Action</div>
+                <div class="db-requests-col db-requests-col-expand"></div>
+            </div>`;
+        const tableRows = requests.map(req => {
             const db = req.databases && req.databases[0];
             const eng = String(db?.engine || 'db');
             const dbNames = Array.isArray(req.databases)
@@ -2532,27 +4465,65 @@ async function loadDbRequests() {
                 ? req.query_types.map(s => String(s || '').trim()).filter(Boolean)
                 : [];
             const actionsText = queryTypes.length ? queryTypes.join(', ') : permsText;
-            const expires = req.expires_at ? new Date(req.expires_at).toLocaleString() : '—';
+            const expires = formatDbDateTime(req.expires_at);
             const requestedAt = req.requested_at || req.created_at;
-            const requestedAtText = requestedAt ? new Date(requestedAt).toLocaleString() : '—';
+            const requestedAtText = formatDbDateTime(requestedAt);
             const justification = String(req.justification || '').trim();
             const accountId = String(req.account_id || '').trim();
             const accountName = String(req.account_name || '').trim();
             const accountText = accountName
                 ? (accountId ? `${accountName} (${accountId})` : accountName)
                 : (accountId || '—');
-            const instanceText = String(req.db_instance_id || db?.id || '—').trim() || '—';
+            const instanceText = String(req.requested_instance_input || req.db_instance_id || db?.id || '—').trim() || '—';
+            const scopeMeta = getDbRequestScopeMeta(req.engine || db?.engine || '');
+            const schemaText = String(req.requested_schema_name || '').trim() || '—';
+            const tableText = String(req.requested_table_name || '').trim()
+                || (Array.isArray(req.requested_tables) && req.requested_tables.length ? req.requested_tables.join(', ') : '—');
+            const detailText = String(req.requested_column_name || '').trim() || '—';
+            const accessTypeText = String(req.requested_access_type || '').trim() || actionsText;
             const requestIdRaw = String(req.request_id || '');
             const requestIdEsc = requestIdRaw.replace(/'/g, "\\'");
             const isActive = req.status === 'active';
-            const statusLabel = String(req.status || '').replace(/_/g, ' ');
+            const isPendingSelfApproval = req.status === 'pending' && req?.is_requester === true && req?.can_approve === true;
             const domId = domIdFromRequestId(requestIdRaw);
-            const showBulkSelect = isDbBulkDeleteStatus(dbStatusFilter) && canDeleteRequest(req);
+            const showBulkSelect = isDbBulkDeleteStatus(requestedStatus) && canDeleteRequest(req);
             const checked = dbBulkDeleteSelection.has(requestIdRaw);
+            const approvalNote = String(req.approval_note || '').trim();
+            const activationError = String(req.activation_error || '').trim();
+            const activationMessage = String(req.activation_progress?.message || '').trim();
+            const activationRetryable = isDbRetryableActivation(req);
+            const activationIssueLabel = activationRetryable ? 'Provisioning' : 'Activation issue';
+            const activationIssueStyle = activationRetryable ? 'color:#8a5a00;' : 'color:#c62828;';
+            const lifecycleStatus = String(req.lifecycle_status || req.status || '').trim().toLowerCase();
+            const canCancelProcessing = req?.is_requester === true && lifecycleStatus === 'approved' && activationRetryable;
+            const canDeleteStaleApproved = canDeleteRequest(req) && isDbApprovedStaleRequest(req);
+            const workflowName = String(req.approval_workflow_name || '').trim();
+            const pendingStage = String(req.pending_stage || '').trim();
+            const pendingApprovers = Array.isArray(req.pending_approvers)
+                ? req.pending_approvers.map(item => String(item || '').trim()).filter(Boolean).join(', ')
+                : '';
+            const cancelledReason = String(req.cancellation_reason || req.approval_note || '').trim();
+            const activationProblem = lifecycleStatus === 'approved' && activationError;
+            const statusLabel = lifecycleStatus === 'cancelled' || lifecycleStatus === 'canceled'
+                ? 'cancelled'
+                : activationProblem
+                    ? 'activation issue'
+                    : (isPendingSelfApproval ? 'pending self approval' : String(req.status || '').replace(/_/g, ' '));
+            const statusBadge = activationProblem ? 'rejected' : String(req.status || '').trim().toLowerCase();
+            const activationProgressPanel = lifecycleStatus === 'approved'
+                ? renderDbActivationProgress(req)
+                : '';
+            const quickRowActions = [];
+            if (canCloneRequest(req)) {
+                quickRowActions.push(`<button class="btn-secondary btn-sm" onclick="event.preventDefault(); event.stopPropagation(); cloneDbRequest('${requestIdEsc}')"><i class="fas fa-clone"></i> Clone</button>`);
+            }
+            if (req.status === 'approved' && !activationRetryable) {
+                quickRowActions.push(`<button class="btn-secondary btn-sm" onclick="event.preventDefault(); event.stopPropagation(); retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>`);
+            }
             return `<details class="db-request-item db-request-${escapeAttr(req.status)}">
-                <summary class="db-request-summary">
-                    <div class="db-request-summary-left">
-                        ${showBulkSelect ? `<label class="db-request-select-wrap" onclick="event.stopPropagation()">
+                <summary class="db-request-summary db-request-table-row ${showBulkSelect ? 'db-request-table-row-bulk' : ''}">
+                    ${showBulkSelect ? `<div class="db-requests-col db-requests-col-select">
+                        <label class="db-request-select-wrap" onclick="event.stopPropagation()">
                             <input
                                 type="checkbox"
                                 class="db-request-select-checkbox"
@@ -2560,26 +4531,56 @@ async function loadDbRequests() {
                                 ${checked ? 'checked' : ''}
                                 onchange="toggleDbRequestSelection('${requestIdEsc}', this.checked)"
                             >
-                        </label>` : ''}
-                        <span class="db-request-id">${escapeHtml((req.request_id || '').slice(0, 8))}</span>
-                        <span class="db-request-title"><strong>${escapeHtml(eng)}</strong>${dbNames ? ` • ${escapeHtml(dbNames)}` : ''}</span>
+                        </label>
+                    </div>` : ''}
+                    <div class="db-requests-col db-requests-col-id" data-label="Request">
+                        <div class="db-request-cell-primary"><span class="db-request-id">${escapeHtml((req.request_id || '').slice(0, 8))}</span></div>
+                        <div class="db-request-cell-secondary">${escapeHtml(eng)} · ${escapeHtml(roleLabel(req.role))}</div>
                     </div>
-                    <div class="db-request-summary-right">
-                        <span class="db-request-status db-status-badge-${escapeAttr(req.status)}">${escapeHtml(statusLabel)}</span>
-                        <span class="db-request-expiry">Expires: ${escapeHtml(expires)}</span>
+                    <div class="db-requests-col db-requests-col-status" data-label="Status">
+                        <span class="db-request-status db-status-badge-${escapeAttr(statusBadge)}">${escapeHtml(statusLabel)}</span>
+                    </div>
+                    <div class="db-requests-col db-requests-col-target" data-label="Target">
+                        <div class="db-request-cell-primary">${escapeHtml(instanceText)}</div>
+                        <div class="db-request-cell-secondary">${escapeHtml(dbNames || '—')} · ${escapeHtml(accountText)}</div>
+                    </div>
+                    <div class="db-requests-col db-requests-col-expiry" data-label="Expires">
+                        <div class="db-request-cell-primary">${escapeHtml(expires)}</div>
+                        <div class="db-request-cell-secondary">${escapeHtml(String(req.duration_hours || 2))}h</div>
+                    </div>
+                    <div class="db-requests-col db-requests-col-actions" data-label="Quick Action">
+                        <div class="db-request-row-actions" onclick="event.stopPropagation()">
+                            ${quickRowActions.length ? quickRowActions.join('') : '<span class="db-request-row-action-placeholder">Open row</span>'}
+                        </div>
+                    </div>
+                    <div class="db-requests-col db-requests-col-expand">
                         <i class="fas fa-chevron-down db-request-chevron" aria-hidden="true"></i>
                     </div>
                 </summary>
                 <div class="db-request-details">
                     <div class="db-request-body">
                         <p><strong>Requested:</strong> ${escapeHtml(requestedAtText)}</p>
+                        ${req.requested_by_email && String(req.requested_by_email).toLowerCase() !== String(req.user_email || '').toLowerCase() ? `<p><strong>Submitted By:</strong> ${escapeHtml(req.requested_by_email)}</p>` : ''}
                         <p><strong>AWS Account:</strong> <span class="db-req-perms">${escapeHtml(accountText)}</span></p>
-                        <p><strong>RDS Instance:</strong> <code>${escapeHtml(instanceText)}</code></p>
+                        <p><strong>Requested:</strong> ${escapeHtml(requestedAtText)}</p>
+                        <p><strong>${escapeHtml(getDbTargetLabel(req.engine || db?.engine || '', req.resource_kind || ''))}:</strong> <code>${escapeHtml(instanceText)}</code></p>
                         <p><strong>Database(s):</strong> ${escapeHtml(dbNames || '—')}</p>
+                        ${scopeMeta.schemaVisible ? `<p><strong>${escapeHtml(scopeMeta.schemaLabel)}:</strong> ${escapeHtml(schemaText)}</p>` : ''}
+                        <p><strong>${escapeHtml(scopeMeta.objectPluralLabel)}:</strong> ${escapeHtml(tableText)}</p>
+                        <p><strong>${escapeHtml(scopeMeta.detailLabel)}:</strong> ${escapeHtml(detailText)}</p>
                         <p><strong>Actions:</strong> <span class="db-req-perms">${escapeHtml(actionsText)}</span></p>
+                        <p><strong>Access Type:</strong> <span class="db-req-perms">${escapeHtml(accessTypeText)}</span></p>
                         <p><span class="db-req-proxy">Proxy:</span> <code>${escapeHtml(String(db?.host || '-'))}:${escapeHtml(String(db?.port || '-'))}</code></p>
                         <p>Role: ${escapeHtml(roleLabel(req.role))} | ${escapeHtml(String(req.duration_hours || 2))}h</p>
                         ${justification ? `<p class="db-req-justification">${escapeHtml(justification)}</p>` : ''}
+                        ${workflowName ? `<p><strong>Workflow:</strong> ${escapeHtml(workflowName)}</p>` : ''}
+                        ${pendingStage ? `<p><strong>Pending Stage:</strong> ${escapeHtml(pendingStage)}</p>` : ''}
+                        ${pendingApprovers ? `<p><strong>Current Approvers:</strong> ${escapeHtml(pendingApprovers)}</p>` : ''}
+                        ${approvalNote ? `<p class="db-req-justification">${escapeHtml(approvalNote)}</p>` : ''}
+                        ${(lifecycleStatus === 'cancelled' || lifecycleStatus === 'canceled') && cancelledReason ? `<p class="db-req-justification" style="color:#8a5a00;"><strong>Cancelled:</strong> ${escapeHtml(cancelledReason)}</p>` : ''}
+                        ${req.status === 'approved' && !activationProgressPanel && activationMessage ? `<p class="db-req-justification"><strong>Activation:</strong> ${escapeHtml(activationMessage)}</p>` : ''}
+                        ${req.status === 'approved' && !activationProgressPanel && activationError ? `<p class="db-req-justification" style="${activationIssueStyle}"><strong>${escapeHtml(activationIssueLabel)}:</strong> ${escapeHtml(activationError)}</p>` : ''}
+                        ${activationProgressPanel}
                         ${isActive ? `<div class="db-cred-inline" id="dbCredInline-${escapeAttr(domId)}" style="display:none;"></div>` : ''}
                     </div>
                     <div class="db-request-actions" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px;">
@@ -2589,40 +4590,72 @@ async function loadDbRequests() {
                             <button class="btn-secondary btn-sm" onclick="toggleDbCredInline('${requestIdEsc}')"><i class="fas fa-key"></i> Login details</button>
                             <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-key"></i> Get login details</button>
                         ` : ''}
-                        ${req.status === 'approved' ? `
+                        ${req.status === 'approved' && activationRetryable ? `
+                            <button class="btn-secondary btn-sm" onclick="openDbExternalToolModal('${requestIdEsc}')"><i class="fas fa-spinner fa-spin"></i> Preparing access...</button>
+                        ` : ''}
+                        ${canCancelProcessing ? `
+                            <button class="btn-danger btn-sm" onclick="cancelDbProcessing('${requestIdEsc}')"><i class="fas fa-ban"></i> Cancel Processing</button>
+                        ` : ''}
+                        ${req.status === 'approved' && !activationRetryable ? `
                             <button class="btn-secondary btn-sm" onclick="retryDbActivation('${requestIdEsc}')"><i class="fas fa-rotate-right"></i> Activate</button>
                         ` : ''}
                         ${canApprove(req) ? `
-                        <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> Approve</button>
+                        <button class="btn-primary btn-sm" onclick="approveDbRequest('${requestIdEsc}')"><i class="fas fa-check"></i> ${isPendingSelfApproval ? 'Self Approve' : 'Approve'}</button>
+                        ` : ''}
+                        ${canDeny(req) ? `
                         <button class="btn-danger btn-sm" onclick="denyDbRequest('${requestIdEsc}')"><i class="fas fa-times"></i> Reject</button>
                         ` : ''}
                         ${canDeleteRequest(req) ? `
-                        <button class="btn-danger btn-sm" onclick="deleteDbRequest('${requestIdEsc}')"><i class="fas fa-trash"></i> Delete</button>
+                        <button class="btn-danger btn-sm" onclick="deleteDbRequest('${requestIdEsc}')"><i class="fas fa-trash"></i> ${canDeleteStaleApproved ? 'Delete Stale Request' : 'Delete'}</button>
                         ` : ''}
                     </div>
                 </div>
             </details>`;
         }).join('');
+        list.innerHTML = `<div class="db-requests-table-shell">${tableHeader}${tableRows}</div>`;
         syncDbBulkSelectionToDom();
         renderDbBulkDeleteToolbar();
+        clearDbRequestsRefreshPoll();
     } catch (e) {
+        if (loadSeq !== dbRequestsLoadSeq) return;
         const list = document.getElementById('dbRequestsList');
-        if (list) list.innerHTML = `<div class="db-requests-empty">Error loading requests</div>`;
+        if (list) list.innerHTML = `<div class="db-requests-empty">${escapeHtml(safeUserFacingErrorMessage(e) || 'Error loading requests')}</div>`;
+        databaseRequestsCache = [];
         dbVisibleBulkDeleteIds = [];
         renderDbBulkDeleteToolbar();
+        clearDbRequestsRefreshPoll();
     }
 }
 
 async function denyDbRequest(requestId) {
-    const reason = prompt('Enter reason for rejection (required):');
-    if (!reason || reason.length < 3) {
-        alert('Please enter a reason (at least 3 characters).');
-        return;
+    let reason = '';
+    if (typeof promptAppAction === 'function') {
+        reason = await promptAppAction(
+            'Provide a reason for rejecting this request.',
+            {
+                title: 'Reject request',
+                submitLabel: 'Reject request',
+                cancelLabel: 'Cancel',
+                variant: 'warning',
+                placeholder: 'Enter rejection reason (required)',
+                helperText: 'This reason is stored for audit and emailed to the requester.',
+                minLength: 3,
+                required: true,
+            }
+        );
+        if (reason === null) return;
+    } else {
+        reason = prompt('Enter reason for rejection (required):');
+        if (!reason || reason.length < 3) {
+            alert('Please enter a reason (at least 3 characters).');
+            return;
+        }
     }
     try {
         const res = await fetch(`${DB_API_BASE}/api/request/${requestId}/deny`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
             body: JSON.stringify({ reason: reason })
         });
         const data = await res.json();
@@ -2636,11 +4669,28 @@ async function denyDbRequest(requestId) {
 }
 
 async function deleteDbRequest(requestId) {
-    if (!confirm('Delete this old request from your list?')) return;
-    const userEmail = localStorage.getItem('userEmail') || '';
+    const row = Array.isArray(databaseRequestsCache)
+        ? databaseRequestsCache.find(item => String(item?.request_id || '').trim() === String(requestId || '').trim())
+        : null;
+    const staleApproved = isDbApprovedStaleRequest(row);
+    const promptMessage = staleApproved
+        ? 'Delete this stale approved request from your list? Any partial provisioning cleanup will be attempted first.'
+        : 'Delete this old request from your list?';
+    if (typeof confirmAppAction === 'function') {
+        const confirmed = await confirmAppAction(promptMessage, {
+            title: 'Delete request',
+            confirmLabel: 'Delete',
+            variant: 'warning'
+        });
+        if (!confirmed) return;
+    } else if (!confirm(promptMessage)) {
+        return;
+    }
     try {
-        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/delete?user_email=${encodeURIComponent(userEmail)}`, {
-            method: 'DELETE'
+        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/delete`, {
+            method: 'DELETE',
+            headers: getDbRequestHeaders(),
+            credentials: 'include'
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
@@ -2653,20 +4703,56 @@ async function deleteDbRequest(requestId) {
 }
 
 async function approveDbRequest(requestId) {
-    if (!confirm('Approve this database access request?')) return;
-    const role = (prompt('Approve as which role? (manager, db_owner, ciso)', 'manager') || '').trim().toLowerCase();
-    if (!role) return;
+    if (typeof confirmAppAction === 'function') {
+        const confirmed = await confirmAppAction('Approve this database access request?', {
+            title: 'Approve request',
+            confirmLabel: 'Approve',
+            variant: 'info'
+        });
+        if (!confirmed) return;
+    } else if (!confirm('Approve this database access request?')) {
+        return;
+    }
     try {
+        clearDbRequestsRefreshPoll();
+        if (typeof setRequestsFlowMode === 'function') {
+            try { setRequestsFlowMode('mine'); } catch (_) {}
+        } else {
+            requestsFlowMode = 'mine';
+        }
+        if (typeof currentRequestsCategory !== 'undefined') currentRequestsCategory = 'databases';
+        if (typeof currentRequestsStatus !== 'undefined') currentRequestsStatus = 'approved';
+        focusDbRequestsStatus('approved');
+        if (typeof showPage === 'function') {
+            try { showPage('requests'); } catch (_) {}
+        }
+        setDbRequestsLoadingState('Approving request and preparing access...');
+        setDbRequestsStatusBanner('Approving request and preparing access...', 'info');
         const res = await fetch(`${DB_API_BASE}/api/approve/${requestId}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ approver_role: role })
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({})
         });
         const data = await res.json();
         const status = String(data.status || '').toLowerCase();
+        const activationRetryable = data.activation_retryable === true;
         if (data.error && status !== 'approved') throw new Error(data.error);
-        alert(data.message || '✅ Approved');
-        focusDbRequestsStatus(data.status || 'approved');
+        if (data.error && status === 'approved') {
+            if (activationRetryable) {
+                setDbRequestsStatusBanner(data.message || 'Approved. We are still preparing access in the background.', 'info');
+            } else {
+                alert(`${data.message || 'Approved.'} ${safeUserFacingErrorMessage({ message: data.error })}`);
+            }
+        } else {
+            alert(data.message || '✅ Approved');
+        }
+        if (typeof setRequestsFlowMode === 'function') {
+            try { setRequestsFlowMode('mine'); } catch (_) {}
+        } else {
+            requestsFlowMode = 'mine';
+        }
+        focusDbRequestsStatus(status === 'active' ? 'active' : (data.status || 'approved'));
         loadDbRequests();
         refreshApprovedDatabases();
         if (typeof loadRequests === 'function') loadRequests();
@@ -2677,22 +4763,68 @@ async function approveDbRequest(requestId) {
 
 async function retryDbActivation(requestId) {
     if (!requestId) return;
-    const userEmail = localStorage.getItem('userEmail') || '';
     try {
         const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/activate`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_email: userEmail })
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({})
         });
         const data = await res.json();
-        if (data.error) {
-            // `error` is sanitized server-side; still run client-side safety sanitizer.
+        const status = String(data.status || '').toLowerCase();
+        const activationRetryable = data.activation_retryable === true;
+        if (data.error && status !== 'approved') {
             throw new Error(data.error);
         }
-        alert(data.message || 'Activation requested.');
-        focusDbRequestsStatus(data.status || 'active');
+        if (data.error && status === 'approved') {
+            if (activationRetryable) {
+                setDbRequestsStatusBanner(data.message || 'Access is still being prepared.', 'info');
+            } else {
+                alert(`${data.message || 'Activation is still pending.'} ${safeUserFacingErrorMessage({ message: data.error })}`);
+            }
+        } else {
+            alert(data.message || 'Activation requested.');
+        }
+        focusDbRequestsStatus(status === 'active' ? 'active' : (data.status || 'approved'));
         loadDbRequests();
         refreshApprovedDatabases();
+    } catch (e) {
+        alert('Failed: ' + safeUserFacingErrorMessage(e));
+    }
+}
+
+async function cancelDbProcessing(requestId) {
+    if (!requestId) return;
+    const confirmationMessage = 'Are you sure you want to cancel the processing? If it is canceled, you need to go with request and approvals again.';
+    let confirmed = false;
+    if (typeof confirmAppAction === 'function') {
+        confirmed = await confirmAppAction(confirmationMessage, {
+            title: 'Cancel processing',
+            confirmLabel: 'Cancel Processing',
+            variant: 'warning'
+        });
+    } else {
+        confirmed = window.confirm(confirmationMessage);
+    }
+    if (!confirmed) return;
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(requestId)}/cancel-processing`, {
+            method: 'POST',
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
+            body: JSON.stringify({})
+        });
+        const data = await res.json().catch(function() { return {}; });
+        if (!res.ok || data.error) {
+            throw new Error((data && data.error) || 'Failed to cancel request processing.');
+        }
+        const message = data.message || 'Provisioning cancelled. Submit a new request and complete approvals again to retry.';
+        setDbRequestsStatusBanner(message, 'info');
+        alert(message);
+        clearDbRequestsRefreshPoll();
+        loadDbRequests();
+        refreshApprovedDatabases();
+        if (typeof loadRequests === 'function') loadRequests();
     } catch (e) {
         alert('Failed: ' + safeUserFacingErrorMessage(e));
     }
@@ -2757,8 +4889,9 @@ async function fetchDbCredentials(requestId, opts = {}) {
         if (Date.now() - (dbCredCache[rid].fetchedAt || 0) < 60 * 1000) return cached;
     }
 
-    const userEmail = localStorage.getItem('userEmail') || '';
-    const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(rid)}/credentials?user_email=${encodeURIComponent(userEmail)}`);
+    const res = await fetch(`${DB_API_BASE}/api/databases/request/${encodeURIComponent(rid)}/credentials`, {
+        credentials: 'include'
+    });
     const data = await res.json();
     if (data.error) {
         const msg = [data.error, data.message].filter(Boolean).join(' ').trim() || data.error;
@@ -2805,7 +4938,110 @@ function parseMysqlOptionValue(command, optName) {
 function normalizeIamLocalInstructions(rawInstructions, fallback = {}) {
     const src = (rawInstructions && typeof rawInstructions === 'object') ? rawInstructions : {};
     const out = { ...src };
+    const service = String(out.service || fallback.service || '').trim().toLowerCase();
+    if (typeof out.available !== 'boolean') {
+        out.available = !!(fallback && fallback.hostname && fallback.username);
+    }
     if (!out.available) return out;
+    if (service === 'redshift') {
+        const hostname = String(out.hostname || fallback.hostname || '').trim();
+        const username = String(out.username || fallback.username || '').trim();
+        const region = String(out.region || fallback.region || '').trim() || 'ap-south-1';
+        const database = String(out.database || fallback.database || '').trim() || 'dev';
+        const clusterIdentifier = String(out.cluster_identifier || fallback.cluster_identifier || '').trim();
+        let port = String(out.port || fallback.port || 5439).trim();
+        if (!port || !/^\d+$/.test(port)) port = '5439';
+        out.service = 'redshift';
+        out.token_command_label = out.token_command_label || 'Fetch temporary Redshift credentials:';
+        out.connect_command_label = out.connect_command_label || 'Connect with psql:';
+        if (hostname) out.hostname = hostname;
+        if (username) out.username = username;
+        out.region = region;
+        out.database = database;
+        if (clusterIdentifier) out.cluster_identifier = clusterIdentifier;
+        out.port = parseInt(port, 10);
+        if (Array.isArray(out.steps) && out.steps.length) {
+            out.steps = [
+                '1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).',
+                '2. Run the Redshift credentials command below. It fetches, exports, and prints temporary DbUser and DbPassword values valid for about 15 minutes.',
+                '3. Use the printed values or the exported shell variables in your SQL client.',
+                '4. Re-run the command whenever the temporary password expires.'
+            ];
+        }
+        return out;
+    }
+    if (service === 'postgres') {
+        const cliCmd = String(out.cli_command || '');
+        const connectCmd = String(out.connect_command || '');
+        const hostname = String(
+            out.hostname ||
+            parseCliFlagValue(cliCmd, 'hostname') ||
+            fallback.hostname ||
+            ''
+        ).trim();
+        const username = String(
+            out.username ||
+            parseCliFlagValue(cliCmd, 'username') ||
+            fallback.username ||
+            ''
+        ).trim();
+        const database = String(out.database || fallback.database || 'postgres').trim() || 'postgres';
+        const region = String(
+            out.region ||
+            parseCliFlagValue(cliCmd, 'region') ||
+            fallback.region ||
+            'ap-south-1'
+        ).trim() || 'ap-south-1';
+        let port = String(
+            out.port ||
+            parseCliFlagValue(cliCmd, 'port') ||
+            fallback.port ||
+            5432
+        ).trim();
+        if (!port || !/^\d+$/.test(port)) port = '5432';
+
+        if (hostname && username) {
+            out.cli_command = [
+                'aws rds generate-db-auth-token',
+                `--hostname ${hostname}`,
+                `--port ${port}`,
+                `--username ${username}`,
+                `--region ${region}`
+            ].join(' ');
+            out.token_command = [
+                'TOKEN="$(aws rds generate-db-auth-token \\',
+                `  --hostname ${hostname} \\`,
+                `  --port ${port} \\`,
+                `  --username ${username} \\`,
+                `  --region ${region})"`,
+                "printf 'IAM Token Password: %s\\n' \"$TOKEN\""
+            ].join('\n');
+            out.connect_command = [
+                'PGPASSWORD="$TOKEN" psql \\',
+                `  "host=${hostname} port=${port} dbname=${database} user=${username} sslmode=require"`
+            ].join('\n');
+            out.hostname = hostname;
+            out.port = parseInt(port, 10);
+            out.username = username;
+            out.region = region;
+            out.database = database;
+        } else if (connectCmd) {
+            out.connect_command = connectCmd.trim();
+        }
+        if (Array.isArray(out.steps) && out.steps.length) {
+            out.steps = [
+                '1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).',
+                '2. Generate token using the command below (token is valid ~15 minutes).',
+                '3. Copy the printed IAM Token Password.',
+                '4. Connect with psql/DBeaver PostgreSQL and regenerate token when it expires.'
+            ];
+        }
+        out.service = 'postgres';
+        out.token_command_label = out.token_command_label || 'Save token in shell variable and print password:';
+        out.connect_command_label = out.connect_command_label || 'Connect with psql:';
+        out.workbench_steps = [];
+        return out;
+    }
 
     const cliCmd = String(out.cli_command || '');
     const mysqlCmd = String(out.mysql_connect_command || '');
@@ -2850,11 +5086,13 @@ function normalizeIamLocalInstructions(rawInstructions, fallback = {}) {
         ].join(' ');
 
         out.token_command = [
+            'export LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1',
             'TOKEN="$(aws rds generate-db-auth-token \\',
             `  --hostname ${hostname} \\`,
             `  --port ${port} \\`,
             `  --username ${username} \\`,
-            `  --region ${region || 'ap-south-1'})"`
+            `  --region ${region || 'ap-south-1'})"`,
+            "printf 'IAM Token Password: %s\\n' \"$TOKEN\""
         ].join('\n');
 
         out.mysql_connect_command = [
@@ -2862,23 +5100,29 @@ function normalizeIamLocalInstructions(rawInstructions, fallback = {}) {
             `  --host ${hostname} \\`,
             `  --port ${port} \\`,
             `  --user ${username} \\`,
-            '  --ssl \\',
+            '  --enable-cleartext-plugin \\',
+            '  --ssl-mode=REQUIRED \\',
             '  --protocol=TCP'
         ].join('\n');
+        out.connect_command = out.mysql_connect_command;
+        out.connect_command_label = out.connect_command_label || 'Connect with MySQL CLI:';
         out.hostname = hostname;
         out.port = parseInt(port, 10);
         out.username = username;
         out.region = region || 'ap-south-1';
     } else if (mysqlCmd) {
-        // Minimum safety fallback: remove obsolete flags when backend returns legacy command text.
+        // Minimum safety fallback: preserve cleartext plugin for proxy IAM auth and enforce TLS/TCP.
         let sanitized = mysqlCmd
-            .replace(/LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1\s*/g, '')
-            .replace(/\s--ssl-mode=REQUIRED\b/g, '')
-            .replace(/\s--enable-cleartext-plugin\b/g, '')
             .trim();
-        if (!/\s--ssl(\s|$)/.test(sanitized)) sanitized += ' --ssl';
+        if (!/LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1/.test(sanitized)) {
+            sanitized = `LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1 ${sanitized}`.trim();
+        }
+        if (!/\s--enable-cleartext-plugin\b/.test(sanitized)) sanitized += ' --enable-cleartext-plugin';
+        if (!/\s--ssl-mode=REQUIRED\b/.test(sanitized)) sanitized += ' --ssl-mode=REQUIRED';
         if (!/\s--protocol=TCP(\s|$)/.test(sanitized)) sanitized += ' --protocol=TCP';
         out.mysql_connect_command = sanitized;
+        out.connect_command = sanitized;
+        out.connect_command_label = out.connect_command_label || 'Connect with MySQL CLI:';
     }
 
     if (Array.isArray(out.steps) && out.steps.length) {
@@ -2889,6 +5133,11 @@ function normalizeIamLocalInstructions(rawInstructions, fallback = {}) {
             '4. For DBeaver/Workbench, use the generated token as password and reconnect when token expires.'
         ];
     }
+
+    out.service = service || 'mysql';
+    out.token_command_label = out.token_command_label || 'Save token in shell variable:';
+    out.connect_command = out.connect_command || out.mysql_connect_command || '';
+    out.connect_command_label = out.connect_command_label || 'Connect with MySQL CLI:';
 
     return out;
 }
@@ -2926,6 +5175,36 @@ function renderDbPreparingHtml(secondsElapsed, details) {
             <div class="db-step-hint" style="margin-top:2px; opacity:0.85;">Elapsed: ${sec}s</div>
         </div>
     `;
+}
+
+function createDbPreparingTicker(renderFn, initialDetail) {
+    const startedAt = Date.now();
+    let latestDetail = initialDetail || null;
+    let stopped = false;
+    let timerId = null;
+
+    const repaint = () => {
+        if (stopped) return;
+        const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        renderFn(elapsedSec, latestDetail);
+    };
+
+    repaint();
+    timerId = window.setInterval(repaint, 1000);
+
+    return {
+        update(detail) {
+            latestDetail = detail || latestDetail;
+            repaint();
+        },
+        stop() {
+            stopped = true;
+            if (timerId) {
+                window.clearInterval(timerId);
+                timerId = null;
+            }
+        }
+    };
 }
 
 async function fetchDbCredentialsWithPreparation(requestId, opts = {}) {
@@ -2971,15 +5250,23 @@ function renderDbCredentialsInline(containerEl, creds) {
     const proxyHost = creds.proxy_host || '—';
     const proxyPort = creds.proxy_port || '—';
     const username = creds.db_username || '—';
-    const expires = creds.expires_at ? new Date(creds.expires_at).toLocaleString() : '—';
+    const endpointLabel = getDbEndpointLabel(creds.connect_endpoint_mode);
+    const expires = formatDbDateTime(creds.expires_at);
     const password = creds.password || creds.vault_token || '';
     const isIam = String(creds.effective_auth || '').toLowerCase() === 'iam';
-    const tokenExpires = creds.iam_token_expires_at ? new Date(creds.iam_token_expires_at).toLocaleString() : '';
+    const tokenExpires = formatDbDateTime(creds.iam_token_expires_at) === '—' ? '' : formatDbDateTime(creds.iam_token_expires_at);
     const localInstr = normalizeIamLocalInstructions(creds.local_token_instructions, {
         username,
-        region: ''
+        region: '',
+        service:
+            (String(creds.resource_kind || '').toLowerCase() === 'redshift_cluster' || String(creds.engine || '').toLowerCase() === 'redshift')
+                ? 'redshift'
+                : (String(creds.engine || '').toLowerCase().includes('postgres') ? 'postgres' : 'mysql'),
+        database: creds.database || ''
     });
     const inlineId = escapeAttr(containerEl.dataset.reqid || '');
+    const tokenCommandId = `dbCredTokenCmd-${inlineId}`;
+    const connectCommand = localInstr.connect_command || localInstr.mysql_connect_command || '';
     const localBlock = (localInstr && localInstr.available && Array.isArray(localInstr.steps))
         ? `
         <details class="db-cred-local-instr" style="margin-top:14px;border:1px solid var(--border-color);border-radius:10px;overflow:hidden;">
@@ -2987,10 +5274,9 @@ function renderDbCredentialsInline(containerEl, creds) {
                 <i class="fas fa-laptop-code"></i> ${escapeHtml(localInstr.heading || 'Generate IAM token on your machine')}
             </summary>
             <div style="padding:12px 14px;font-size:13px;">
-                <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (SSO or access key), then run:</p>
-                <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command || '')}</pre>
-                ${localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Save token in shell variable:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
-                ${localInstr.mysql_connect_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Connect with MySQL CLI:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.mysql_connect_command)}</pre>` : ''}
+                ${localInstr.cli_command ? `<p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (SSO or access key), then run:</p><pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command || '')}</pre>` : ''}
+                ${localInstr.service !== 'redshift' && localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">${escapeHtml(localInstr.token_command_label || 'Save token in shell variable:')}</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
+                ${connectCommand ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">${escapeHtml(localInstr.connect_command_label || 'Connect with CLI:')}</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(connectCommand)}</pre>` : ''}
                 <ol style="margin:8px 0 0 0;padding-left:18px;">
                     ${(localInstr.steps || []).map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}
                 </ol>
@@ -3002,17 +5288,19 @@ function renderDbCredentialsInline(containerEl, creds) {
 
     const iamPasswordInfo = isIam
         ? `
-        <div class="db-cred-password">
-            <div class="db-cred-k">IAM Token Password</div>
+            <div class="db-cred-password">
+            <div class="db-cred-k">${escapeHtml(localInstr.service === 'redshift' ? 'Temporary DB Password' : 'IAM Token Password')}</div>
             <div class="db-cred-note">
-                Generate token locally with your own AWS Identity Center credentials, then use that token as password.
+                ${escapeHtml(localInstr.service === 'redshift'
+                    ? 'Run the command below to fetch, export, and print temporary Redshift credentials, then use REDSHIFT_DB_PASSWORD as the password.'
+                    : 'Generate token locally with your own AWS Identity Center credentials, then use that token as password.')}
                 ${tokenExpires ? `Token valid until ${escapeHtml(tokenExpires)}.` : ''}
             </div>
             ${localInstr && localInstr.token_command ? `
             <div class="db-cred-password-row" style="margin-top:8px;">
-                <input id="dbCredTokenCmd-${inlineId}" type="text" value="${escapeAttr(localInstr.token_command)}" readonly>
-                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('dbCredTokenCmd-${inlineId}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
-                    <i class="fas fa-copy"></i> Copy token command
+                <textarea id="${escapeAttr(tokenCommandId)}" readonly style="flex:1;min-width:240px;min-height:92px;padding:10px 12px;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);font-family:var(--font-mono, monospace);font-size:12px;resize:vertical;">${escapeHtml(localInstr.token_command)}</textarea>
+                <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('${escapeAttr(tokenCommandId)}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                    <i class="fas fa-copy"></i> ${escapeHtml(localInstr.service === 'redshift' ? 'Copy credentials command' : 'Copy token command')}
                 </button>
             </div>` : ''}
         </div>`
@@ -3032,8 +5320,8 @@ function renderDbCredentialsInline(containerEl, creds) {
 
     containerEl.innerHTML = `
         <div class="db-cred-inline-grid">
-            <div><div class="db-cred-k">Proxy Host</div><div class="db-cred-v"><code>${escapeHtml(proxyHost)}</code></div></div>
-            <div><div class="db-cred-k">Proxy Port</div><div class="db-cred-v"><code>${escapeHtml(String(proxyPort))}</code></div></div>
+            <div><div class="db-cred-k">${escapeHtml(endpointLabel)} Host</div><div class="db-cred-v"><code>${escapeHtml(proxyHost)}</code></div></div>
+            <div><div class="db-cred-k">${escapeHtml(endpointLabel)} Port</div><div class="db-cred-v"><code>${escapeHtml(String(proxyPort))}</code></div></div>
             <div>
                 <div class="db-cred-k">DB Username</div>
                 <div class="db-cred-v">
@@ -3065,22 +5353,26 @@ async function toggleDbCredInline(requestId) {
     }
 
     el.style.display = 'block';
-    el.innerHTML = renderDbPreparingHtml(0);
     el.dataset.reqid = domId;
+    const ticker = createDbPreparingTicker((elapsedSec, detail) => {
+        if (el.style.display === 'block') {
+            el.innerHTML = renderDbPreparingHtml(
+                elapsedSec,
+                detail || { message: 'Waiting for DB user and permissions to finish provisioning.' }
+            );
+        }
+    }, { message: 'Waiting for DB user and permissions to finish provisioning.' });
 
     try {
         const creds = await fetchDbCredentialsWithPreparation(rid, {
             onPreparing: (info) => {
-                if (el.style.display === 'block') {
-                    el.innerHTML = renderDbPreparingHtml(
-                        info.elapsedSec,
-                        info.detail || { message: 'Waiting for DB user and permissions to finish provisioning.' }
-                    );
-                }
+                ticker.update(info.detail || { message: 'Waiting for DB user and permissions to finish provisioning.' });
             }
         });
+        ticker.stop();
         renderDbCredentialsInline(el, creds);
     } catch (e) {
+        ticker.stop();
         el.innerHTML = `<div class="db-cred-error">Failed to load credentials: ${escapeHtml(safeUserFacingErrorMessage(e))}</div>`;
     }
 }
@@ -3108,48 +5400,65 @@ async function openDbExternalToolModal(requestId) {
       </div>
     `;
     document.body.appendChild(modal);
+    const ticker = createDbPreparingTicker((elapsedSec, detail) => {
+        const body = document.getElementById('dbExternalToolModalBody');
+        if (!body) return;
+        body.innerHTML = renderDbPreparingHtml(
+            elapsedSec,
+            detail || { message: 'Preparing DB access and credentials. This may take a few minutes.' }
+        );
+    }, 'Preparing DB access and credentials. This may take a few minutes.');
 
     try {
         const data = await fetchDbCredentialsWithPreparation(requestId, {
             onPreparing: (info) => {
-                const body = document.getElementById('dbExternalToolModalBody');
-                if (!body) return;
-                body.innerHTML = renderDbPreparingHtml(
-                    info.elapsedSec,
-                    info.detail || { message: 'Waiting for DB user, policy assignment, and credential activation.' }
-                );
+                ticker.update(info.detail || { message: 'Waiting for DB user, policy assignment, and credential activation.' });
             }
         });
+        ticker.stop();
 
-        const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
+        const expires = formatDbDateTime(data.expires_at);
         const proxyHost = data.proxy_host || '—';
         const proxyPort = data.proxy_port || '—';
+        const endpointLabel = getDbEndpointLabel(data.connect_endpoint_mode);
         const username = data.db_username || '—';
         const dbName = data.database || 'default';
         const isIam = String(data.effective_auth || '').toLowerCase() === 'iam';
         const usernameFieldId = `dbModalUsername-${domIdFromRequestId(String(requestId))}`;
 
-        const tokenExpires = data.iam_token_expires_at ? new Date(data.iam_token_expires_at).toLocaleString() : '';
+        const tokenExpires = formatDbDateTime(data.iam_token_expires_at) === '—' ? '' : formatDbDateTime(data.iam_token_expires_at);
         const localInstr = normalizeIamLocalInstructions(data.local_token_instructions, {
+            hostname: proxyHost,
+            port: proxyPort,
             username,
-            region: ''
+            region: data.region || '',
+            service:
+                (String(data.resource_kind || '').toLowerCase() === 'redshift_cluster' || String(data.engine || '').toLowerCase() === 'redshift')
+                    ? 'redshift'
+                    : (String(data.engine || '').toLowerCase().includes('postgres') ? 'postgres' : 'mysql'),
+            database: dbName || ''
         });
+        const modalTokenCommandId = `dbModalTokenCommand-${domIdFromRequestId(String(requestId))}`;
+        const connectCommand = localInstr.connect_command || localInstr.mysql_connect_command || '';
         const tokenField = isIam ? `
             <div class="db-modal-grid" style="margin-top:14px;">
                 <div style="grid-column: 1 / -1;">
-                    <strong>IAM Token Password</strong>
+                    <strong>${escapeHtml(localInstr.service === 'redshift' ? 'Temporary DB Password' : 'IAM Token Password')}</strong>
                     <div class="db-step-hint" style="margin-top:6px;">
-                        Generate token locally with your own AWS Identity Center session and paste it as password in your DB client.
+                        ${escapeHtml(localInstr.service === 'redshift'
+                            ? 'Run the command below to fetch, export, and print temporary Redshift credentials, then use REDSHIFT_DB_PASSWORD as the password in your SQL client.'
+                            : 'Generate token locally with your own AWS Identity Center session and paste it as password in your DB client.')}
                         ${tokenExpires ? `Token valid until <strong>${escapeHtml(tokenExpires)}</strong>.` : ''}
                     </div>
                     ${localInstr.token_command ? `
-                    <div class="db-step-hint" style="margin-top:8px;">Token command:</div>
+                    <div class="db-step-hint" style="margin-top:8px;">${escapeHtml(localInstr.token_command_label || 'Token command:')}</div>
                     <pre style="margin:6px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>
-                    <button class="btn-primary btn-sm" onclick="(async function(){const ok=await copyToClipboard(${JSON.stringify(localInstr.token_command)}); alert(ok?'Copied':'Copy failed');})()">
-                        <i class="fas fa-copy"></i> Copy token command
+                    <textarea id="${escapeAttr(modalTokenCommandId)}" readonly style="position:fixed;left:-9999px;top:-9999px;opacity:0;">${escapeHtml(localInstr.token_command)}</textarea>
+                    <button class="btn-primary btn-sm" onclick="(async function(){const el=document.getElementById('${escapeAttr(modalTokenCommandId)}'); if(!el) return; const ok=await copyToClipboard(el.value); alert(ok?'Copied':'Copy failed');})()">
+                        <i class="fas fa-copy"></i> ${escapeHtml(localInstr.service === 'redshift' ? 'Copy credentials command' : 'Copy token command')}
                     </button>` : ''}
                     <small class="db-step-hint" style="display:block;margin-top:8px;">
-                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (proxy only). Access expires automatically.
+                        Use <strong>${escapeHtml(proxyHost)}:${escapeHtml(String(proxyPort))}</strong> (${escapeHtml(endpointLabel.toLowerCase())}). Access expires automatically.
                     </small>
                 </div>
             </div>
@@ -3182,8 +5491,8 @@ async function openDbExternalToolModal(requestId) {
                 <div style="padding:12px 14px;font-size:13px;">
                     <p class="db-step-hint" style="margin-bottom:10px;">Configure AWS credentials (e.g. <code>aws sso login</code> or access key), then run:</p>
                     <pre style="margin:8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.cli_command)}</pre>
-                    ${localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Save token in shell variable:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
-                    ${localInstr.mysql_connect_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">Connect with MySQL CLI:</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.mysql_connect_command)}</pre>` : ''}
+                    ${localInstr.token_command ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">${escapeHtml(localInstr.token_command_label || 'Save token in shell variable:')}</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(localInstr.token_command)}</pre>` : ''}
+                    ${connectCommand ? `<div class="db-step-hint" style="margin:8px 0 6px 0;">${escapeHtml(localInstr.connect_command_label || 'Connect with CLI:')}</div><pre style="margin:0 0 8px 0;padding:12px;background:var(--bg-primary);border-radius:8px;overflow-x:auto;font-size:12px;">${escapeHtml(connectCommand)}</pre>` : ''}
                     ${Array.isArray(localInstr.steps) && localInstr.steps.length ? `<ol style="margin:8px 0 0 0;padding-left:18px;">${localInstr.steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol>` : ''}
                     ${Array.isArray(localInstr.dbeaver_steps) && localInstr.dbeaver_steps.length ? `<div style="margin-top:10px;"><strong>DBeaver</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.dbeaver_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
                     ${Array.isArray(localInstr.workbench_steps) && localInstr.workbench_steps.length ? `<div style="margin-top:10px;"><strong>MySQL Workbench</strong><ol style="margin:6px 0 0 0;padding-left:18px;">${localInstr.workbench_steps.map(s => `<li style="margin:4px 0;">${escapeHtml(s)}</li>`).join('')}</ol></div>` : ''}
@@ -3224,6 +5533,7 @@ async function openDbExternalToolModal(requestId) {
           </div>
         `;
     } catch (e) {
+        ticker.stop();
         const body = document.getElementById('dbExternalToolModalBody');
         const msg = safeUserFacingErrorMessage(e);
         if (body) {
@@ -3244,7 +5554,9 @@ async function openDbExternalToolModal(requestId) {
 async function viewDbRequestDetails(requestId) {
     if (!requestId) return;
     try {
-        const res = await fetch(`${DB_API_BASE}/api/request/${encodeURIComponent(requestId)}`);
+        const res = await fetch(`${DB_API_BASE}/api/request/${encodeURIComponent(requestId)}`, {
+            credentials: 'include'
+        });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
@@ -3258,18 +5570,36 @@ async function viewDbRequestDetails(requestId) {
             ? data.query_types.map(s => String(s || '').trim()).filter(Boolean)
             : [];
         const actionsText = queryTypes.length ? queryTypes.join(', ') : permsText;
-        const created = data.created_at ? new Date(data.created_at).toLocaleString() : '—';
-        const expires = data.expires_at ? new Date(data.expires_at).toLocaleString() : '—';
+        const created = formatDbDateTime(data.created_at);
+        const expires = formatDbDateTime(data.expires_at);
         const status = String(data.status || 'pending');
         const role = getDbRoleLabel(String(data.role || 'custom'));
         const justification = String(data.justification || '').trim() || '—';
+        const workflowName = String(data.approval_workflow_name || '').trim() || '—';
+        const approvalNote = String(data.approval_note || '').trim() || '—';
+        const requestApproverEmail = String(data.request_approver_email || '').trim() || '—';
+        const dbOwnerEmail = String(data.db_owner_email || '').trim() || '—';
+        const securityLeadEmail = String(data.security_lead_email || '').trim() || '—';
+        const pendingExpiryText = formatDbDateTime(data.pending_expires_at);
+        const pendingStage = String(data.pending_stage || '').trim() || '—';
+        const pendingApprovers = Array.isArray(data.pending_approvers)
+            ? data.pending_approvers.map(item => String(item || '').trim()).filter(Boolean).join(', ')
+            : '';
+        const approvalHistory = Array.isArray(data.approval_history) ? data.approval_history : [];
         const dbNames = dbs.map(d => d?.name).filter(Boolean).join(', ') || '—';
         const accountId = String(data.account_id || '').trim();
         const accountName = String(data.account_name || '').trim();
         const accountText = accountName
             ? (accountId ? `${accountName} (${accountId})` : accountName)
             : (accountId || '—');
-        const instanceText = String(data.db_instance_id || db.id || '—').trim() || '—';
+        const instanceText = String(data.requested_instance_input || data.db_instance_id || db.id || '—').trim() || '—';
+        const scopeMeta = getDbRequestScopeMeta(data.engine || db.engine || '');
+        const schemaText = String(data.requested_schema_name || '').trim() || '—';
+        const tableText = String(data.requested_table_name || '').trim()
+            || (Array.isArray(data.requested_tables) && data.requested_tables.length ? data.requested_tables.join(', ') : '—');
+        const detailText = String(data.requested_column_name || '').trim() || '—';
+        const accessTypeText = String(data.requested_access_type || '').trim() || actionsText;
+        const endpointLabel = getDbEndpointLabel(data.connect_endpoint_mode);
         const proxyEndpoint = (data.proxy_host && data.proxy_port)
             ? `${data.proxy_host}:${data.proxy_port}`
             : ((db.host && db.port) ? `${db.host}:${db.port}` : (db.host || '—'));
@@ -3292,11 +5622,21 @@ async function viewDbRequestDetails(requestId) {
               <div class="db-modal-grid">
                 <div><strong>Status:</strong> <span class="badge">${escapeHtml(status)}</span></div>
                 <div><strong>Engine:</strong> ${escapeHtml(String(db.engine || data.engine || '—'))}</div>
-                <div><strong>Proxy Endpoint:</strong> <code>${escapeHtml(proxyEndpoint)}</code></div>
+                <div><strong>Workflow:</strong> ${escapeHtml(workflowName)}</div>
+                <div><strong>Approver Email:</strong> ${escapeHtml(requestApproverEmail)}</div>
+                <div><strong>DB Owner Email:</strong> ${escapeHtml(dbOwnerEmail)}</div>
+                <div><strong>SecOps Lead:</strong> ${escapeHtml(securityLeadEmail)}</div>
+                <div><strong>Pending Stage:</strong> ${escapeHtml(pendingStage)}</div>
+                <div><strong>Pending Expires:</strong> ${escapeHtml(pendingExpiryText)}</div>
+                <div><strong>${escapeHtml(endpointLabel)}:</strong> <code>${escapeHtml(proxyEndpoint)}</code></div>
                 <div><strong>AWS Account:</strong> ${escapeHtml(accountText)}</div>
-                <div><strong>RDS Instance:</strong> <code>${escapeHtml(instanceText)}</code></div>
+                <div><strong>${escapeHtml(getDbTargetLabel(data.engine || db.engine || '', data.resource_kind || ''))}:</strong> <code>${escapeHtml(instanceText)}</code></div>
                 <div><strong>Database(s):</strong> ${escapeHtml(dbNames)}</div>
+                ${scopeMeta.schemaVisible ? `<div><strong>${escapeHtml(scopeMeta.schemaLabel)}:</strong> ${escapeHtml(schemaText)}</div>` : ''}
+                <div><strong>${escapeHtml(scopeMeta.objectPluralLabel)}:</strong> ${escapeHtml(tableText)}</div>
+                <div><strong>${escapeHtml(scopeMeta.detailLabel)}:</strong> ${escapeHtml(detailText)}</div>
                 <div><strong>Actions:</strong> ${escapeHtml(actionsText)}</div>
+                <div><strong>Access Type:</strong> ${escapeHtml(accessTypeText)}</div>
                 <div><strong>Role:</strong> ${escapeHtml(role)}</div>
                 <div><strong>Duration:</strong> ${escapeHtml(String(data.duration_hours || 2))}h</div>
                 <div><strong>Created:</strong> ${escapeHtml(created)}</div>
@@ -3306,6 +5646,24 @@ async function viewDbRequestDetails(requestId) {
                 <div class="db-modal-justification-label"><strong>Justification</strong></div>
                 <div class="db-modal-justification-text">${escapeHtml(justification)}</div>
               </div>
+              <div class="db-modal-justification">
+                <div class="db-modal-justification-label"><strong>Approval Summary</strong></div>
+                <div class="db-modal-justification-text">${escapeHtml(approvalNote)}</div>
+                ${pendingApprovers ? `<div class="db-modal-justification-text" style="margin-top:8px;"><strong>Current Approvers:</strong> ${escapeHtml(pendingApprovers)}</div>` : ''}
+              </div>
+              ${approvalHistory.length ? `
+              <div class="db-modal-justification">
+                <div class="db-modal-justification-label"><strong>Approval History</strong></div>
+                <div class="db-modal-justification-text">${approvalHistory.map(function(item) {
+                    const stage = String(item.stage_name || 'Approval').trim();
+                    const decision = String(item.decision || '').trim() || 'pending';
+                    const actor = String(item.actor_email || '').trim() || 'system';
+                    const reason = String(item.reason || '').trim();
+                    const actedAt = formatDbDateTime(item.acted_at);
+                    const actedAtText = actedAt === '—' ? '' : actedAt;
+                    return escapeHtml(`${stage}: ${decision} by ${actor}${actedAtText ? ' on ' + actedAtText : ''}${reason ? ' - ' + reason : ''}`);
+                }).join('<br>')}</div>
+              </div>` : ''}
             </div>
           </div>
         `;
@@ -3315,12 +5673,82 @@ async function viewDbRequestDetails(requestId) {
     }
 }
 
+async function cloneDbRequest(requestId) {
+    if (!requestId) return;
+    try {
+        const res = await fetch(`${DB_API_BASE}/api/request/${encodeURIComponent(requestId)}`, {
+            credentials: 'include'
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to load request.');
+        const status = String(data.status || '').toLowerCase();
+        if (!['completed', 'expired', 'revoked'].includes(status)) {
+            alert('Only completed requests can be cloned.');
+            return;
+        }
+        const dbs = Array.isArray(data.databases) ? data.databases : [];
+        const firstDb = dbs[0] || {};
+        const engineLabel = String(data.engine || firstDb.engine || selectedEngine?.label || 'Database');
+        const engineKey = String(firstDb.engine || selectedEngine?.engine || 'mysql').toLowerCase();
+        selectedEngine = { id: `clone-${engineKey}`, label: engineLabel, engine: engineKey };
+        selectedDatabases = dbs.length ? dbs.map(function(db) {
+            return {
+                id: String(data.db_instance_id || data.requested_instance_input || db.id || '').trim(),
+                name: String(db.name || data.requested_database_name || '').trim(),
+                engine: String(db.engine || engineKey).trim()
+            };
+        }) : [{
+            id: String(data.db_instance_id || data.requested_instance_input || '').trim(),
+            name: String(data.requested_database_name || '').trim(),
+            engine: engineKey
+        }];
+        dbRequestDraft = {
+            account_id: String(data.account_id || '').trim(),
+            _selectedInstance: {
+                id: String(data.db_instance_id || data.requested_instance_input || '').trim(),
+                name: String(data.requested_database_name || '').trim(),
+                engine: engineKey,
+                region: String(data.db_region || '').trim()
+            },
+            requested_instance_input: String(data.requested_instance_input || data.db_instance_id || '').trim(),
+            requested_database_name: String(data.requested_database_name || '').trim(),
+            requested_schema_name: String(data.requested_schema_name || '').trim(),
+            requested_table_name: String(data.requested_table_name || '').trim(),
+            requested_column_name: String(data.requested_column_name || '').trim(),
+            requested_tables: Array.isArray(data.requested_tables) ? data.requested_tables.slice() : [],
+            requested_access_type: String(data.requested_access_type || '').trim(),
+            permissions: Array.isArray(data.permissions) ? data.permissions.slice() : [],
+            query_types: Array.isArray(data.query_types) ? data.query_types.slice() : [],
+            role: String(data.role || 'custom').trim(),
+            duration_hours: parseInt(data.duration_hours || 2, 10) || 2,
+            justification: String(data.justification || '').trim(),
+            request_approver_email: String(data.request_approver_email || '').trim().toLowerCase(),
+            db_owner_email: String(data.db_owner_email || '').trim().toLowerCase()
+        };
+        dbApproverEmailManuallyEdited = !!dbRequestDraft.request_approver_email;
+        dbOwnerEmailManuallyEdited = !!dbRequestDraft.db_owner_email;
+        dbStructuredPermissions = Array.isArray(data.permissions) ? data.permissions.map(function(item) { return String(item || '').trim().toUpperCase(); }).filter(Boolean) : [];
+        syncDbApproverEmail(dbRequestDraft.request_approver_email || '');
+        syncDbOwnerEmail(dbRequestDraft.db_owner_email || '');
+        if (typeof showPage === 'function') showPage('databases');
+        transitionToDbStructuredUI();
+        hydrateStructuredSummary();
+        setDbSubmitStatus('dbStructuredSubmitStatus', 'Previous request cloned. Review and edit the fields before submitting.', 'info');
+    } catch (error) {
+        alert('Failed to clone request: ' + safeUserFacingErrorMessage(error));
+    }
+}
+
 async function editDbRequestDurationModal(requestId) {
-    const hrs = prompt('New duration (1-24 hours):', '2');
+    const current = Array.isArray(databaseRequestsCache)
+        ? databaseRequestsCache.find(item => String(item?.request_id || '').trim() === String(requestId || '').trim())
+        : null;
+    const maxDurationHours = String(current?.account_env || '').trim().toLowerCase() === 'prod' ? 72 : 120;
+    const hrs = prompt(`New duration (1-${maxDurationHours} hours):`, String(current?.duration_hours || 2));
     if (!hrs) return;
     const h = parseInt(hrs, 10);
-    if (h < 1 || h > 24) {
-        alert('Duration must be 1-24 hours');
+    if (h < 1 || h > maxDurationHours) {
+        alert(`Duration must be 1-${maxDurationHours} hours`);
         return;
     }
     try {
@@ -3360,38 +5788,64 @@ async function refreshApprovedDatabases() {
     const tbody = document.getElementById('approvedDatabasesTableBody');
     if (!tbody) return;
     try {
-        const userEmail = localStorage.getItem('userEmail') || 'satish@nykaa.com';
-        const res = await fetch(`${DB_API_BASE}/api/databases/approved?user_email=${encodeURIComponent(userEmail)}`);
+        const res = await fetch(`${DB_API_BASE}/api/databases/approved`, {
+            credentials: 'include'
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || 'Error loading approved databases');
+        }
         const data = await res.json();
         if (!data.databases?.length) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">No approved databases</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">No approved databases found</td></tr>';
             return;
         }
-        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMX)' })[r || 'custom'] || (r || 'Custom (NPAMX)');
+        const roleLabel = r => ({ read_only: 'Read-only', read_limited_write: 'Limited Write', read_full_write: 'Full Write', admin: 'Admin', custom: 'Custom (NPAMx)' })[r || 'custom'] || (r || 'Custom (NPAMx)');
         tbody.innerHTML = data.databases.map(db => {
             const requestId = (db.request_id || '').replace(/'/g, "\\'");
             const dbName = (db.db_name || db.engine || '').replace(/'/g, "\\'");
             const effectiveAuth = String(db.effective_auth || 'password').toLowerCase();
+            const lifecycle = String(db.status || '').toLowerCase();
+            const isExpired = lifecycle === 'expired' || Boolean(db.is_expired);
+            const activationError = String(db.activation_error || '').trim();
+            const isReady = lifecycle === 'active' && !activationError && !isExpired;
+            const endpointLabel = getDbEndpointLabel(db.connect_endpoint_mode);
+            const expires = formatDbDateTime(db.expires_at);
+            const lifecycleBadge = isReady
+                ? '<span class="badge">Active</span>'
+                : (isExpired
+                    ? '<span class="badge badge-secondary">Expired</span>'
+                    : (activationError
+                        ? '<span class="badge badge-danger">Activation failed</span>'
+                        : '<span class="badge">Approved</span>'));
             const userDisplay = effectiveAuth === 'iam'
                 ? `<span class="badge">IAM</span> <code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`
                 : `<code title="Username is masked for safety">${escapeHtml(db.masked_username || '')}</code>`;
-            const actionBtn = `
-                <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> Get login details</button>
-                <button class="btn-secondary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
-            `;
+            const actionBtn = isReady
+                ? `
+                    <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> Get login details</button>
+                    <button class="btn-secondary btn-sm" onclick="connectToDatabase('${db.host}', '${db.port}', '${db.engine}', '${requestId}', '${dbName}')"><i class="fas fa-terminal"></i> PAM Terminal</button>
+                `
+                : `
+                    <button class="btn-primary btn-sm" onclick="openDbExternalToolModal('${requestId}')"><i class="fas fa-key"></i> View request</button>
+                    <span style="display:block;margin-top:6px;font-size:12px;color:${isExpired ? '#b42318' : '#8a5a00'};">${isExpired ? 'Access expired. Raise a new request or renew from My Requests.' : 'Access not active yet. Retry activation from My Requests.'}</span>
+                `;
             return `<tr>
                 <td>${db.engine}</td>
-                <td><strong>${db.host}:${db.port}</strong></td>
+                <td>
+                    <strong>${escapeHtml(endpointLabel)}:</strong> ${escapeHtml(db.host)}:${escapeHtml(String(db.port))}
+                    ${activationError ? `<div style="margin-top:6px;color:#b42318;font-size:12px;">${escapeHtml(activationError)}</div>` : ''}
+                </td>
                 <td>${userDisplay}</td>
-                <td><span class="badge">${roleLabel(db.role)}</span></td>
-                <td>${new Date(db.expires_at).toLocaleString()}</td>
+                <td>${lifecycleBadge} <span class="badge">${roleLabel(db.role)}</span></td>
+                <td>${escapeHtml(expires)}</td>
                 <td>
                     ${actionBtn}
                 </td>
             </tr>`;
         }).join('');
     } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">Error loading</td></tr>';
+        tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; padding: 40px; color: #999;">${escapeHtml(safeUserFacingErrorMessage(e) || 'Error loading approved databases')}</td></tr>`;
     }
 }
 
@@ -3458,14 +5912,13 @@ async function executeQuery() {
     if (!query || !window.dbConn) return;
     appendOutput(`\n> ${query}\n`);
     document.getElementById('dbQuery').value = '';
-    const userEmail = localStorage.getItem('userEmail') || '';
     try {
         const res = await fetch(`${DB_API_BASE}/api/databases/execute-query`, {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
+            headers: getDbRequestHeaders(),
+            credentials: 'include',
             body: JSON.stringify({
                 request_id: window.dbConn.requestId,
-                user_email: userEmail,
                 query,
                 dbName: window.dbConn.dbName
             })
@@ -3496,3 +5949,8 @@ function disconnectDatabase() {
     if (c) c.innerHTML = `<div class="db-terminal-placeholder"><i class="fas fa-database"></i><p>No active connection</p><p class="hint">Click Connect on an approved database</p></div>`;
     window.dbConn = null;
 }
+
+window.openStructuredDatabaseAccess = openStructuredDatabaseAccess;
+window.setDbAccessMode = setDbAccessMode;
+window.closeDbStructuredPanel = closeDbStructuredPanel;
+window.loadDatabases = loadDatabases;

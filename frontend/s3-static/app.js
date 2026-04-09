@@ -3,6 +3,10 @@ function redirectByRole(role) {
   else window.location.href = "/static/index.html";
 }
 
+function redirectToPrimaryLogin() {
+  window.location.href = "/index.html";
+}
+
 async function api(url, method="GET", body) {
   const r = await fetch(url, {
     method,
@@ -11,7 +15,7 @@ async function api(url, method="GET", body) {
     body: body ? JSON.stringify(body) : undefined
   });
   if (r.status === 401) {
-    window.location.href = "/static/login.html";
+    redirectToPrimaryLogin();
     return;
   }
   if (!r.ok) {
@@ -73,7 +77,7 @@ async function verify() {
 
 async function logout() {
   await api("/api/logout", "POST");
-  window.location.href = "/static/login.html";
+  redirectToPrimaryLogin();
 }
 
 async function submitNewPassword() {
@@ -98,7 +102,7 @@ async function submitNewPassword() {
       window.location.href = "/static/mfa.html";
       return;
     }
-    window.location.href = "/static/login.html";
+    redirectToPrimaryLogin();
   } catch(e) {
     msg.textContent = e.message;
     msg.className = "error";

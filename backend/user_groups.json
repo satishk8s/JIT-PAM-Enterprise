@@ -4,9 +4,7 @@
       "id": "networking_team",
       "name": "Networking Team",
       "description": "Network infrastructure team",
-      "members": [
-        "satish-test@nykaa.com"
-      ]
+      "members": []
     },
     {
       "id": "security_team",

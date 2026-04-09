@@ -10,7 +10,7 @@ class StrictPolicies:
     """
     
     # Configuration file path
-    _config_file = 'policy_config.json'
+    _config_file = os.path.join(os.path.dirname(__file__), 'policy_config.json')
     
     # Default configuration
     _default_config = {

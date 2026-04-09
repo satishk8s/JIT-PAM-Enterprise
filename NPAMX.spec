@@ -1,0 +1,51 @@
+# -*- mode: python ; coding: utf-8 -*-
+
+
+a = Analysis(
+    ['/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/desktop_agent/npamx_agent.py'],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='NPAMX',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=['/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/build/npamx-agent.icns'],
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='NPAMX',
+)
+app = BUNDLE(
+    coll,
+    name='NPAMX.app',
+    icon='/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/build/npamx-agent.icns',
+    bundle_identifier='com.nykaa.npamx.desktop-agent',
+)

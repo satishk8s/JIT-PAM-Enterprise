@@ -1,5 +1,20 @@
 // Policy Builder Functions
 
+function escapePolicyBuilderHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function getPolicyBuilderApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
 function toggleStep(stepId) {
     const step = document.getElementById(stepId);
     step.classList.toggle('active');
@@ -96,14 +111,22 @@ function showSyncFromAD() {
     const config = prompt('Enter AD Configuration (JSON format):\n\nExample:\n{\n  "domain": "company.local",\n  "ldap_url": "ldap://dc.company.local",\n  "bind_dn": "CN=Service,OU=Users,DC=company,DC=local",\n  "bind_password": "password",\n  "user_base_dn": "OU=Users,DC=company,DC=local",\n  "group_base_dn": "OU=Groups,DC=company,DC=local"\n}');
     
     if (!config) return;
+    var parsedConfig;
+    try {
+        parsedConfig = JSON.parse(config);
+    } catch (e) {
+        alert('❌ Invalid JSON. Please enter a valid JSON object.');
+        return;
+    }
     
     alert('🔄 Syncing from Active Directory...\n\nThis will:\n✓ Import all users from AD\n✓ Import all groups from AD\n✓ Only AD users can access cloud\n\nSync in progress...');
     
     // Call backend API
-    fetch('http://127.0.0.1:5000/api/admin/sync-from-ad', {
+    fetch(`${getPolicyBuilderApiBase()}/admin/sync-from-ad`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: config
+        credentials: 'include',
+        body: JSON.stringify(parsedConfig)
     })
     .then(res => res.json())
     .then(data => {
@@ -126,11 +149,11 @@ function showSyncFromIdentityCenter() {
             if (!res.ok) {
                 return res.text().then(function(body) {
                     var preview = (body && body.substring(0, 80)) || '';
-                    throw new Error('HTTP ' + res.status + '. Backend returned non-JSON (got HTML?). API URL: ' + url + ' If Flask runs on port 5000, set window.API_BASE = "' + (window.location.origin + ':5000/api') + '";');
+                    throw new Error('HTTP ' + res.status + '. Backend returned non-JSON (got HTML?). API URL: ' + url + ' Check that window.API_BASE points to the correct /api origin.');
                 });
             }
             if (!ct.includes('application/json')) {
-                throw new Error('Backend returned non-JSON at ' + url + '. Ensure /api is proxied to Flask or set API_BASE to your backend (e.g. http://52.66.172.182:5000/api).');
+                throw new Error('Backend returned non-JSON at ' + url + '. Ensure /api is proxied to Flask or set API_BASE to your backend origin on port 5000.');
             }
             return res.json();
         })
@@ -185,7 +208,7 @@ function exportConfiguration() {
 }
 
 function getApiBase() {
-    return typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.port === '5000' ? (window.location.protocol + '//' + window.location.hostname + ':5000/api') : (window.location.origin + '/api')));
+    return typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.origin + '/api'));
 }
 
 function showManagementICTab(tab) {
@@ -199,7 +222,7 @@ function showManagementICTab(tab) {
 
 function loadManagementIdentityCenterLists() {
     var apiBase = getApiBase();
-    var errMsg = 'Check backend is running and API_BASE points to it. If Flask is on port 5000, set window.API_BASE = "' + (window.location.origin.replace(/:\d+$/, '') + ':5000/api') + '";';
+    var errMsg = 'Check backend is running and API_BASE points to the correct same-origin /api path.';
     function safeJson(res) {
         var ct = (res.headers.get('Content-Type') || '').toLowerCase();
         if (!res.ok)
@@ -211,7 +234,7 @@ function loadManagementIdentityCenterLists() {
     function showListError(panelId, bodyId, msg) {
         var body = document.getElementById(bodyId);
         if (!body) return;
-        body.innerHTML = '<tr><td colspan="10" class="text-muted">' + (msg || 'Failed to load. ' + errMsg) + '</td></tr>';
+        body.innerHTML = '<tr><td colspan="10" class="text-muted">' + escapePolicyBuilderHtml(msg || 'Failed to load. ' + errMsg) + '</td></tr>';
     }
     function showUsers(data) {
         var body = document.getElementById('mgmtICUsersBody');
@@ -220,7 +243,7 @@ function loadManagementIdentityCenterLists() {
         var list = Array.isArray(data) ? data : (data && data.users) ? data.users : [];
         if (list.length === 0) { body.innerHTML = '<tr><td colspan="4" class="text-muted">No users returned.</td></tr>'; return; }
         body.innerHTML = list.map(function(u) {
-            return '<tr><td>' + (u.username || u.user_name || '-') + '</td><td>' + (u.email || '-') + '</td><td>' + (u.display_name || '-') + '</td><td>' + (u.first_name || '') + ' ' + (u.last_name || '') + '</td></tr>';
+            return '<tr><td>' + escapePolicyBuilderHtml(u.username || u.user_name || '-') + '</td><td>' + escapePolicyBuilderHtml(u.email || '-') + '</td><td>' + escapePolicyBuilderHtml(u.display_name || '-') + '</td><td>' + escapePolicyBuilderHtml((u.first_name || '') + ' ' + (u.last_name || '')) + '</td></tr>';
         }).join('');
     }
     function showGroups(data) {
@@ -230,7 +253,7 @@ function loadManagementIdentityCenterLists() {
         var list = Array.isArray(data) ? data : (data && data.groups) ? data.groups : [];
         if (list.length === 0) { body.innerHTML = '<tr><td colspan="3" class="text-muted">No groups returned.</td></tr>'; return; }
         body.innerHTML = list.map(function(g) {
-            return '<tr><td>' + (g.display_name || g.DisplayName || '-') + '</td><td>' + (g.description || g.Description || '-') + '</td><td>' + (g.group_id || g.GroupId || '-') + '</td></tr>';
+            return '<tr><td>' + escapePolicyBuilderHtml(g.display_name || g.DisplayName || '-') + '</td><td>' + escapePolicyBuilderHtml(g.description || g.Description || '-') + '</td><td>' + escapePolicyBuilderHtml(g.group_id || g.GroupId || '-') + '</td></tr>';
         }).join('');
     }
     function showPermissionSets(data) {
@@ -242,7 +265,7 @@ function loadManagementIdentityCenterLists() {
         body.innerHTML = list.map(function(p) {
             var name = p.name || p.Name || p.permission_set_name || '-';
             var arn = p.arn || p.Arn || p.permission_set_arn || '-';
-            return '<tr><td>' + name + '</td><td style="word-break:break-all;">' + arn + '</td></tr>';
+            return '<tr><td>' + escapePolicyBuilderHtml(name) + '</td><td style="word-break:break-all;">' + escapePolicyBuilderHtml(arn) + '</td></tr>';
         }).join('');
     }
     fetch(apiBase + '/admin/identity-center/users', { method: 'GET' })

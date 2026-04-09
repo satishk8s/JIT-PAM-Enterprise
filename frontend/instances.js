@@ -1,21 +1,44 @@
 // EC2 Instances Management
 
-const INSTANCES_API_BASE = (typeof API_BASE !== 'undefined') ? API_BASE.replace('/api', '') : (window.location.port === '80' || window.location.port === '443' || window.location.port === '' ? window.location.origin : `${window.location.protocol}//${window.location.hostname}:5000`);
+const INSTANCES_API_BASE = (typeof API_BASE !== 'undefined')
+    ? API_BASE.replace('/api', '')
+    : ((window.API_BASE ? String(window.API_BASE).replace(/\/api$/, '') : '') || window.location.origin);
 
 let selectedInstances = [];
 let currentAccount = '';
 let allInstancesData = [];
 
+function getInstancesUserEmail() {
+    return String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+}
+
+function escapeInstancesAttr(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function escapeInstancesHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Load accounts for dropdown and approved instances
 async function loadInstances() {
     try {
-        const response = await fetch(`${INSTANCES_API_BASE}/api/accounts`);
+        const response = await fetch(`${INSTANCES_API_BASE}/api/accounts`, { credentials: 'include' });
         const accounts = await response.json();
         
         const accountSelect = document.getElementById('instanceAccountSelect');
         accountSelect.innerHTML = '<option value="">-- Select Account --</option>' + 
             Object.values(accounts).map(acc => 
-                `<option value="${acc.id}">${acc.name} (${acc.id})</option>`
+                `<option value="${escapeInstancesAttr(acc.id)}">${escapeInstancesHtml(acc.name)} (${escapeInstancesHtml(acc.id)})</option>`
             ).join('');
         
         // Load approved instances
@@ -49,7 +72,7 @@ async function loadInstancesByAccount() {
     document.getElementById('selectAllInstances').checked = false;
     
     try {
-        const response = await fetch(`${INSTANCES_API_BASE}/api/instances?account_id=${accountId}`);
+        const response = await fetch(`${INSTANCES_API_BASE}/api/instances?account_id=${encodeURIComponent(accountId)}`, { credentials: 'include' });
         const data = await response.json();
         
         allInstancesData = data.instances || [];
@@ -59,7 +82,7 @@ async function loadInstancesByAccount() {
         console.error('Error loading instances:', error);
         document.getElementById('instancesTableBody').innerHTML = `
             <tr><td colspan="5" style="text-align: center; padding: 40px; color: #f44336;">
-                Error loading instances: ${error.message}
+                Error loading instances: ${escapeInstancesHtml(error.message)}
             </td></tr>`;
     }
 }
@@ -81,11 +104,11 @@ function renderInstances(instances) {
         
         return `
             <tr>
-                <td><input type="checkbox" value="${instance.id}" data-name="${instance.name || 'No name'}" data-ip="${instance.private_ip || 'N/A'}" data-public-ip="${instance.public_ip || ''}" onchange="toggleInstanceSelection()"></td>
-                <td><code style="font-size: 12px;">${instance.id}</code></td>
-                <td>${instance.name || '-'}</td>
-                <td>${instance.private_ip || 'N/A'}</td>
-                <td><span style="color: ${stateColor}; font-weight: 600;">●</span> ${instance.state}</td>
+                <td><input type="checkbox" value="${escapeInstancesAttr(instance.id)}" data-name="${escapeInstancesAttr(instance.name || 'No name')}" data-ip="${escapeInstancesAttr(instance.private_ip || 'N/A')}" data-public-ip="${escapeInstancesAttr(instance.public_ip || '')}" onchange="toggleInstanceSelection()"></td>
+                <td><code style="font-size: 12px;">${escapeInstancesHtml(instance.id)}</code></td>
+                <td>${escapeInstancesHtml(instance.name || '-')}</td>
+                <td>${escapeInstancesHtml(instance.private_ip || 'N/A')}</td>
+                <td><span style="color: ${stateColor}; font-weight: 600;">●</span> ${escapeInstancesHtml(instance.state)}</td>
             </tr>
         `;
     }).join('');
@@ -132,6 +155,11 @@ function showInstanceAccessModal() {
         alert('Please select at least one instance');
         return;
     }
+    const activeUserEmail = getInstancesUserEmail();
+    if (!activeUserEmail) {
+        alert('Unable to determine the signed-in user email. Please sign in again.');
+        return;
+    }
     
     const modal = document.createElement('div');
     modal.className = 'modal-overlay show';
@@ -153,19 +181,19 @@ function showInstanceAccessModal() {
                 
                 <div class="form-group" id="userEmailGroup">
                     <label>User Email</label>
-                    <input type="email" id="userEmail" value="satish.korra@nykaa.com" readonly style="width: 100%; padding: 8px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary, #333); border: 1px solid var(--border-color, #ddd); border-radius: 4px;">
+                    <input type="email" id="userEmail" value="${escapeInstancesAttr(activeUserEmail)}" readonly style="width: 100%; padding: 8px; background: var(--bg-secondary, #f5f5f5); color: var(--text-primary, #333); border: 1px solid var(--border-color, #ddd); border-radius: 4px;">
                 </div>
                 
                 <div class="form-group" id="othersEmailGroup" style="display: none;">
                     <label>User Email(s)</label>
-                    <input type="text" id="othersEmail" placeholder="user@nykaa.com" style="width: 100%; padding: 8px; background: var(--bg-primary, white); color: var(--text-primary, #333); border: 1px solid var(--border-color, #ddd); border-radius: 4px;">
+                    <input type="text" id="othersEmail" placeholder="user@example.com" style="width: 100%; padding: 8px; background: var(--bg-primary, white); color: var(--text-primary, #333); border: 1px solid var(--border-color, #ddd); border-radius: 4px;">
                     <small style="color: #666; font-size: 11px;">Comma-separated for multiple users</small>
                 </div>
                 
                 <div class="form-group">
                     <label>Selected Instances</label>
                     <div style="background: var(--bg-secondary, #f8f9fa); padding: 10px; border-radius: 4px; font-size: 12px; max-height: 100px; overflow-y: auto; color: var(--text-primary, #333);">
-                        ${selectedInstances.map(i => `<div>• ${i.id} - ${i.name}</div>`).join('')}
+                        ${selectedInstances.map(i => `<div>• ${escapeInstancesHtml(i.id)} - ${escapeInstancesHtml(i.name)}</div>`).join('')}
                     </div>
                 </div>
                 
@@ -221,12 +249,12 @@ function toggleRequestForOthers() {
 async function submitInstanceAccessRequest() {
     const requestFor = document.getElementById('requestFor').value;
     let userEmail = requestFor === 'myself' ? 
-        (localStorage.getItem('userEmail') || 'satish@nykaa.com') : 
+        getInstancesUserEmail() : 
         document.getElementById('othersEmail').value;
     
-    // Ensure email is never empty
     if (!userEmail || userEmail.trim() === '') {
-        userEmail = 'satish@nykaa.com';
+        alert('Unable to determine the request user email. Please sign in again or provide a valid email.');
+        return;
     }
     const duration = document.getElementById('instanceDuration').value;
     const sudoAccess = document.getElementById('sudoAccess').checked;
@@ -246,6 +274,7 @@ async function submitInstanceAccessRequest() {
         const response = await fetch(`${INSTANCES_API_BASE}/api/instances/request-access`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify({
                 instances: selectedInstances,
                 account_id: currentAccount,
@@ -293,8 +322,18 @@ async function submitInstanceAccessRequest() {
 async function refreshApprovedInstances() {
     console.log('🔄 Refreshing approved instances...');
     try {
-        const userEmail = localStorage.getItem('userEmail') || 'satish.korra@nykaa.com';
-        const response = await fetch(`${INSTANCES_API_BASE}/api/instances/approved?user_email=${encodeURIComponent(userEmail)}`);
+        const userEmail = getInstancesUserEmail();
+        if (!userEmail) {
+            const tbodies = document.querySelectorAll('#approvedInstancesTableBody');
+            tbodies.forEach(tbody => {
+                tbody.innerHTML = `
+                    <tr><td colspan="5" style="text-align: center; padding: 40px; color: #999;">
+                        Sign in to view approved instances.
+                    </td></tr>`;
+            });
+            return;
+        }
+        const response = await fetch(`${INSTANCES_API_BASE}/api/instances/approved?user_email=${encodeURIComponent(userEmail)}`, { credentials: 'include' });
         
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -318,12 +357,12 @@ async function refreshApprovedInstances() {
             </td></tr>` : 
             data.instances.map(inst => `
             <tr>
-                <td><code style="font-size: 12px;">${inst.instance_id}</code></td>
-                <td>${inst.instance_name || '-'}</td>
-                <td>${inst.private_ip || 'N/A'}</td>
-                <td>${new Date(inst.expires_at).toLocaleString()}</td>
+                <td><code style="font-size: 12px;">${escapeInstancesHtml(inst.instance_id)}</code></td>
+                <td>${escapeInstancesHtml(inst.instance_name || '-')}</td>
+                <td>${escapeInstancesHtml(inst.private_ip || 'N/A')}</td>
+                <td>${escapeInstancesHtml(new Date(inst.expires_at).toLocaleString())}</td>
                 <td>
-                    <button class="btn-primary btn-sm" onclick="connectToTerminal('${inst.instance_id}', '${inst.instance_name}', '${inst.public_ip || inst.private_ip}')">
+                    <button class="btn-primary btn-sm" onclick="connectToTerminal('${escapeInstancesAttr(inst.instance_id)}', '${escapeInstancesAttr(inst.instance_name || '')}', '${escapeInstancesAttr(inst.public_ip || inst.private_ip || '')}')">
                         <i class="fas fa-terminal"></i> Connect
                     </button>
                 </td>
@@ -343,7 +382,7 @@ async function refreshApprovedInstances() {
         tbodies.forEach(tbody => {
             tbody.innerHTML = `
                 <tr><td colspan="5" style="text-align: center; padding: 40px; color: #f44336;">
-                    Error: ${error.message}
+                    Error: ${escapeInstancesHtml(error.message)}
                 </td></tr>`;
         });
     }
@@ -351,26 +390,29 @@ async function refreshApprovedInstances() {
 
 // Connect to terminal
 function connectToTerminal(instanceId, instanceName, privateIp) {
+    const safeInstanceId = escapeInstancesAttr(instanceId);
+    const safeInstanceName = escapeInstancesAttr(instanceName);
+    const safePrivateIp = escapeInstancesAttr(privateIp);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay show';
     modal.innerHTML = `
         <div class="modal show" style="max-width: 500px; background: var(--bg-primary, white); color: var(--text-primary, #333);">
             <div class="modal-header">
-                <h3><i class="fas fa-terminal"></i> Connect to ${instanceName || instanceId}</h3>
+                <h3><i class="fas fa-terminal"></i> Connect to ${escapeInstancesHtml(instanceName || instanceId)}</h3>
                 <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">&times;</button>
             </div>
             <div class="modal-body" style="padding: 20px;">
                 <p style="margin-bottom: 20px; color: var(--text-secondary);">Choose connection method:</p>
                 
                 <button class="btn-primary" style="width: 100%; margin-bottom: 15px; padding: 15px;" 
-                    onclick="connectViaSSM('${instanceId}'); this.closest('.modal-overlay').remove();">
+                    onclick="connectViaSSM('${safeInstanceId}'); this.closest('.modal-overlay').remove();">
                     <i class="fas fa-aws" style="margin-right: 8px;"></i>
                     AWS Session Manager
                     <div style="font-size: 12px; margin-top: 5px; opacity: 0.8;">Opens in AWS Console</div>
                 </button>
                 
                 <button class="btn-secondary" style="width: 100%; padding: 15px;" 
-                    onclick="showSSHCredentialsModal('${instanceId}', '${instanceName}', '${privateIp}'); this.closest('.modal-overlay').remove();">
+                    onclick="showSSHCredentialsModal('${safeInstanceId}', '${safeInstanceName}', '${safePrivateIp}'); this.closest('.modal-overlay').remove();">
                     <i class="fas fa-terminal" style="margin-right: 8px;"></i>
                     SSH Terminal
                     <div style="font-size: 12px; margin-top: 5px; opacity: 0.8;">Browser-based SSH with credentials</div>
@@ -382,6 +424,9 @@ function connectToTerminal(instanceId, instanceName, privateIp) {
 }
 
 function showSSHCredentialsModal(instanceId, instanceName, privateIp) {
+    const safeInstanceId = escapeInstancesAttr(instanceId);
+    const safeInstanceName = escapeInstancesAttr(instanceName);
+    const safePrivateIp = escapeInstancesAttr(privateIp);
     const modal = document.createElement('div');
     modal.className = 'modal-overlay show';
     modal.innerHTML = `
@@ -393,8 +438,8 @@ function showSSHCredentialsModal(instanceId, instanceName, privateIp) {
             <div class="modal-body" style="padding: 20px;">
                 <div style="background: var(--bg-secondary, #f5f5f5); padding: 12px; border-radius: 4px; margin-bottom: 20px;">
                     <div style="font-size: 12px; color: var(--text-secondary, #666);">Connecting to:</div>
-                    <div style="font-weight: 600; margin-top: 4px;">${instanceName || instanceId}</div>
-                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-top: 2px;">${privateIp}</div>
+                    <div style="font-weight: 600; margin-top: 4px;">${escapeInstancesHtml(instanceName || instanceId)}</div>
+                    <div style="font-size: 12px; color: var(--text-secondary, #666); margin-top: 2px;">${escapeInstancesHtml(privateIp)}</div>
                 </div>
                 
                 <div class="form-group">
@@ -411,7 +456,7 @@ function showSSHCredentialsModal(instanceId, instanceName, privateIp) {
                 
                 <div class="modal-actions" style="margin-top: 20px;">
                     <button class="btn-secondary" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-                    <button class="btn-primary" onclick="connectInstanceWithCredentials('${instanceId}', '${instanceName}', '${privateIp}')">
+                    <button class="btn-primary" onclick="connectInstanceWithCredentials('${safeInstanceId}', '${safeInstanceName}', '${safePrivateIp}')">
                         <i class="fas fa-sign-in-alt"></i> Connect
                     </button>
                 </div>
@@ -471,7 +516,7 @@ function showSSHTerminal(instanceId, instanceName, privateIp, username, password
     terminalContainer.innerHTML = `
         <div style="background: #1e1e1e; border-radius: 6px; padding: 15px;">
             <div style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #444; color: #fff;">
-                <strong>SSH Terminal:</strong> ${username}@${instanceName || instanceId} (${privateIp})
+                <strong>SSH Terminal:</strong> ${escapeInstancesHtml(username)}@${escapeInstancesHtml(instanceName || instanceId)} (${escapeInstancesHtml(privateIp)})
                 <button onclick="disconnectTerminal()" style="float: right; background: #d32f2f; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer;">
                     <i class="fas fa-times"></i> Disconnect
                 </button>

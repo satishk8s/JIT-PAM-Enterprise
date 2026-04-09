@@ -1,4 +1,15 @@
 // S3 Explorer Integration - Show metrics for admins, file browser for users
+const S3_EXPLORER_BASE = (window.location.origin || '') + '/s3';
+
+function escapeS3ExplorerHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 function loadS3Buckets() {
     const userRole = localStorage.getItem('userRole') || 'user';
     console.log('S3 Tab - userRole:', userRole);
@@ -85,14 +96,14 @@ function loadS3Buckets() {
         loadS3AdminMetrics();
     } else {
         // Show S3 file browser for normal users
-        container.innerHTML = '<iframe src="http://127.0.0.1:8001" style="position: fixed; top: 60px; left: 260px; right: 0; bottom: 0; width: calc(100% - 260px); height: calc(100vh - 60px); border: none;"></iframe>';
+        container.innerHTML = '<iframe src="' + S3_EXPLORER_BASE + '/" style="position: fixed; top: 60px; left: 260px; right: 0; bottom: 0; width: calc(100% - 260px); height: calc(100vh - 60px); border: none;"></iframe>';
     }
 }
 
 // Load S3 admin metrics
 async function loadS3AdminMetrics() {
     try {
-        const response = await fetch('http://127.0.0.1:8001/api/admin/bucket-permissions', {
+        const response = await fetch(`${S3_EXPLORER_BASE}/api/admin/bucket-permissions`, {
             credentials: 'include'
         });
         const data = await response.json();
@@ -126,7 +137,7 @@ async function loadS3AdminMetrics() {
             const stats = bucketMap[bucket];
             tbody.innerHTML += `
                 <tr>
-                    <td><i class="fas fa-bucket" style="color: var(--primary-color); margin-right: 8px;"></i>${bucket}</td>
+                    <td><i class="fas fa-bucket" style="color: var(--primary-color); margin-right: 8px;"></i>${escapeS3ExplorerHtml(bucket)}</td>
                     <td>${stats.users.size}</td>
                     <td>${stats.read}</td>
                     <td>${stats.upload}</td>

@@ -1,6 +1,6 @@
 # Deploy NPAMX/JIT PAM on a new EC2 instance
 
-Use these steps on a **brand new** Amazon Linux 2 or Ubuntu EC2. Replace `YOUR_DOMAIN_OR_IP` with your EC2 public IP or domain (e.g. `http://3.110.xx.xx` or `https://pam.yourcompany.com`).
+Use these steps on a **brand new** Amazon Linux 2 or Ubuntu EC2. Replace `YOUR_DOMAIN_OR_IP` with your PAM hostname. Current target domain: `https://npamx.nyk00-int.network`.
 
 ---
 
@@ -40,7 +40,7 @@ sudo -u npamx git clone https://github.com/YOUR_ORG/sso.git /opt/npamx/app
 **Option B – Copy from your machine (run from your laptop):**
 ```bash
 # From your laptop (replace EC2_IP and key)
-scp -i your-key.pem -r /Users/satish.korra/Desktop/sso/* ec2-user@EC2_IP:/tmp/sso-upload/
+scp -i your-key.pem -r /path/to/sso/* ec2-user@EC2_IP:/tmp/sso-upload/
 # Then on EC2:
 sudo mv /tmp/sso-upload/* /opt/npamx/app/
 sudo chown -R npamx:npamx /opt/npamx/app
@@ -49,7 +49,7 @@ sudo chown -R npamx:npamx /opt/npamx/app
 **Option C – Zip and copy:**
 ```bash
 # On your laptop
-cd /Users/satish.korra/Desktop
+cd /path/to
 zip -r sso-deploy.zip sso -x "*.git*" -x "*__pycache__*" -x "*.pyc"
 
 scp -i your-key.pem sso-deploy.zip ec2-user@EC2_IP:/tmp/
@@ -81,8 +81,9 @@ FLASK_ENV=production
 FLASK_SECRET_KEY=CHANGE_THIS_TO_A_LONG_RANDOM_STRING
 PORT=5000
 
-# Frontend URL (for CORS) – use your EC2 public IP or domain
-CORS_ORIGINS=http://YOUR_DOMAIN_OR_IP,http://YOUR_DOMAIN_OR_IP:80
+# Frontend URL (for CORS) – use your PAM domain
+CORS_ORIGINS=https://npamx.nyk00-int.network
+APP_BASE_URL=https://npamx.nyk00-int.network
 
 # Optional: if frontend is on same host, you can use:
 # CORS_ORIGINS=http://localhost,http://YOUR_EC2_PUBLIC_IP
@@ -95,7 +96,7 @@ CORS_ORIGINS=http://YOUR_DOMAIN_OR_IP,http://YOUR_DOMAIN_OR_IP:80
 EOF
 ```
 
-**Important:** Replace `CHANGE_THIS_TO_A_LONG_RANDOM_STRING` with a random secret (e.g. `openssl rand -hex 32`) and `YOUR_DOMAIN_OR_IP` with your EC2 IP or domain.
+**Important:** Replace `CHANGE_THIS_TO_A_LONG_RANDOM_STRING` with a random secret (e.g. `openssl rand -hex 32`). For this environment, use `https://npamx.nyk00-int.network` for both `CORS_ORIGINS` and `APP_BASE_URL`.
 
 ---
 
@@ -201,8 +202,8 @@ In **AWS Console → EC2 → Security Groups → your instance’s SG**:
 
 Edit `/opt/npamx/app/backend/.env` and set:
 
-- `CORS_ORIGINS=http://YOUR_EC2_PUBLIC_IP` (or `https://your-domain.com` if you use a domain).
-- If you use a domain and HTTPS, set `APP_BASE_URL=https://your-domain.com` (used for SAML ACS URL).
+- `CORS_ORIGINS=https://npamx.nyk00-int.network`
+- `APP_BASE_URL=https://npamx.nyk00-int.network` (used for SAML ACS URL and entity ID)
 
 Then restart the app:
 
@@ -238,8 +239,8 @@ sudo apt install -y certbot python3-certbot-nginx
 # Amazon Linux 2
 sudo yum install -y certbot python3-certbot-nginx
 
-# Get certificate (replace your-domain.com)
-sudo certbot --nginx -d your-domain.com
+# Get certificate (replace if your final domain changes)
+sudo certbot --nginx -d npamx.nyk00-int.network
 ```
 
-Then set in `.env`: `CORS_ORIGINS=https://your-domain.com` and `APP_BASE_URL=https://your-domain.com`, and restart `npamx`.
+Then set in `.env`: `CORS_ORIGINS=https://npamx.nyk00-int.network` and `APP_BASE_URL=https://npamx.nyk00-int.network`, and restart `npamx`.

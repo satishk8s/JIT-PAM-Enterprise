@@ -1,6 +1,7 @@
 # User Sync Engine - Sync users and groups from AD or AWS Identity Center
 
 import boto3
+import os
 from datetime import datetime
 
 class UserSyncEngine:
@@ -10,13 +11,24 @@ class UserSyncEngine:
     """
     
     @staticmethod
+    def _identity_center_region():
+        return (
+            str(os.getenv('IDENTITY_CENTER_REGION') or '').strip()
+            or str(os.getenv('IAM_IDENTITY_CENTER_REGION') or '').strip()
+            or str(os.getenv('SSO_REGION') or '').strip()
+            or str(os.getenv('AWS_REGION') or '').strip()
+            or str(os.getenv('AWS_DEFAULT_REGION') or '').strip()
+            or 'ap-south-1'
+        )
+
+    @staticmethod
     def sync_from_identity_center(identity_store_id):
         """
         Sync users and groups from AWS Identity Center
         Returns: (users, groups, sync_status)
         """
         try:
-            identitystore = boto3.client('identitystore', region_name='ap-south-1')
+            identitystore = boto3.client('identitystore', region_name=UserSyncEngine._identity_center_region())
             
             # Sync Users
             users = []
@@ -176,7 +188,7 @@ class UserSyncEngine:
         Push manually created users/groups to AWS Identity Center
         """
         try:
-            identitystore = boto3.client('identitystore', region_name='ap-south-1')
+            identitystore = boto3.client('identitystore', region_name=UserSyncEngine._identity_center_region())
             
             created_users = []
             created_groups = []

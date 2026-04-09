@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import sqlite3
 import time
 from collections import defaultdict
 from threading import Lock
@@ -13,12 +14,45 @@ from threading import Lock
 # Rate limit: in-memory (per process). For multi-worker use Redis in production.
 _RATE_LIMIT_STORE = defaultdict(list)
 _RATE_LIMIT_LOCK = Lock()
+_RATE_LIMIT_BACKEND = str(
+    os.getenv("RATE_LIMIT_BACKEND")
+    or ("sqlite" if os.getenv("FLASK_ENV", "").lower() == "production" else "memory")
+).strip().lower()
+_RATE_LIMIT_DB_PATH = os.getenv("RATE_LIMIT_DB_PATH") or os.path.join(
+    os.path.dirname(__file__), "data", "npamx_rate_limits.db"
+)
 
 # Limits: (max_requests, window_seconds)
-RATE_LIMIT_AUTH = (10, 60)       # login/SAML: 10 per minute per IP
+RATE_LIMIT_AUTH = (10, 60)       # SSO/login redirects: 10 per minute per IP
+RATE_LIMIT_BREAK_GLASS = (5, 300)  # password auth: 5 attempts per 5 minutes per IP
 RATE_LIMIT_SENSITIVE = (30, 60) # approve/deny/revoke, request-access: 30/min
-RATE_LIMIT_GLOBAL = (200, 60)   # general API: 200/min per IP
-RATE_LIMIT_PER_USER = (100, 60) # per authenticated user: 100/min (in addition to IP)
+RATE_LIMIT_GLOBAL = (1200, 60)   # general API: 1200/min per IP
+RATE_LIMIT_PER_USER = (300, 60)  # per authenticated user: 300/min
+
+
+def _init_rate_limit_db():
+    if _RATE_LIMIT_BACKEND != "sqlite":
+        return
+    os.makedirs(os.path.dirname(_RATE_LIMIT_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_RATE_LIMIT_DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                bucket_key TEXT NOT NULL,
+                event_ts REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rate_limit_events_key_ts ON rate_limit_events(bucket_key, event_ts)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_init_rate_limit_db()
 
 
 def _get_client_ip():
@@ -43,6 +77,28 @@ def _rate_limit_key(prefix: str = "", user: str = None):
 def _check_rate_limit(key: str, max_requests: int, window_seconds: int) -> bool:
     """Return True if allowed, False if rate limited."""
     now = time.time()
+    if _RATE_LIMIT_BACKEND == "sqlite":
+        cutoff = now - window_seconds
+        with _RATE_LIMIT_LOCK:
+            conn = sqlite3.connect(_RATE_LIMIT_DB_PATH, timeout=10, isolation_level=None)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM rate_limit_events WHERE bucket_key = ? AND event_ts < ?", (key, cutoff))
+                current = conn.execute(
+                    "SELECT COUNT(*) FROM rate_limit_events WHERE bucket_key = ?",
+                    (key,),
+                ).fetchone()
+                if int((current or [0])[0]) >= max_requests:
+                    conn.rollback()
+                    return False
+                conn.execute(
+                    "INSERT INTO rate_limit_events(bucket_key, event_ts) VALUES (?, ?)",
+                    (key, now),
+                )
+                conn.commit()
+                return True
+            finally:
+                conn.close()
     with _RATE_LIMIT_LOCK:
         times = _RATE_LIMIT_STORE[key]
         times[:] = [t for t in times if now - t < window_seconds]
@@ -60,17 +116,47 @@ def rate_limit_exempt(view):
 
 def apply_security_headers(app):
     """Add security headers to all responses."""
+    default_csp = (
+        "default-src 'self'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'; "
+        "object-src 'none'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data: https://fonts.gstatic.com https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com; "
+        "script-src 'self' https://cdnjs.cloudflare.com; "
+        "script-src-elem 'self' https://cdnjs.cloudflare.com; "
+        "script-src-attr 'unsafe-inline'; "
+        "connect-src 'self' https: ws: wss:"
+    )
+
     @app.after_request
     def _security_headers(response):
+        from flask import request
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if os.environ.get("FLASK_ENV", "").lower() == "production":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         # CSP: allow same origin and common CDNs; no inline scripts in production
-        csp = os.environ.get("CONTENT_SECURITY_POLICY", "").strip()
-        if csp:
-            response.headers["Content-Security-Policy"] = csp
+        csp = os.environ.get("CONTENT_SECURITY_POLICY", "").strip() or default_csp
+        response.headers["Content-Security-Policy"] = csp
+        path = (request.path or "").strip()
+        if (
+            path in ("/", "/index.html", "/login", "/user-login.html", "/login-new.html", "/index-bundled.html")
+            or path.startswith("/saml/")
+            or path.startswith("/api/auth/")
+            or path.startswith("/api/login")
+            or path.startswith("/api/saml/profile")
+        ):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         return response
     return app
 
@@ -86,22 +172,35 @@ def init_rate_limit(app):
         path = request.path or ""
         ip = _get_client_ip()
         user = _get_current_user_for_rate_limit()
+        if request.method == "GET" and path in {"/api/features", "/api/settings", "/api/auth/bootstrap-status"}:
+            return None
         key_global = _rate_limit_key("global", user=None)
-        if path.startswith("/api/login") or path.startswith("/saml/") or path == "/login":
+        enforce_global = not (user and path.startswith("/api/"))
+        if path.startswith("/api/auth/break-glass-login"):
+            key = _rate_limit_key("break_glass_auth", user=None)
+            max_r, window = RATE_LIMIT_BREAK_GLASS
+        elif path.startswith("/api/auth/bootstrap"):
+            key = _rate_limit_key("bootstrap_auth", user=None)
+            max_r, window = RATE_LIMIT_BREAK_GLASS
+        elif path.startswith("/api/login") or path.startswith("/saml/") or path == "/login":
             key = _rate_limit_key("auth", user=None)
             max_r, window = RATE_LIMIT_AUTH
         elif any(path.startswith(p) for p in ("/api/approve/", "/api/request/", "/api/databases/request-access", "/api/request-access", "/api/request-for-others")):
             key = _rate_limit_key("sensitive", user=user)
             max_r, window = RATE_LIMIT_SENSITIVE
         else:
-            key = key_global
-            max_r, window = RATE_LIMIT_GLOBAL
+            if user and path.startswith("/api/"):
+                key = _rate_limit_key("user", user=user)
+                max_r, window = RATE_LIMIT_PER_USER
+            else:
+                key = key_global
+                max_r, window = RATE_LIMIT_GLOBAL
         if not _check_rate_limit(key, max_r, window):
             return jsonify({"error": "Too many requests"}), 429
-        if key != key_global and not _check_rate_limit(key_global, RATE_LIMIT_GLOBAL[0], RATE_LIMIT_GLOBAL[1]):
+        if enforce_global and key != key_global and not _check_rate_limit(key_global, RATE_LIMIT_GLOBAL[0], RATE_LIMIT_GLOBAL[1]):
             return jsonify({"error": "Too many requests"}), 429
         # Per-user limit for authenticated requests (so one user cannot exhaust IP quota)
-        if user and path.startswith("/api/"):
+        if user and path.startswith("/api/") and not key.startswith("user:"):
             key_user = _rate_limit_key("user", user=user)
             if not _check_rate_limit(key_user, RATE_LIMIT_PER_USER[0], RATE_LIMIT_PER_USER[1]):
                 return jsonify({"error": "Too many requests"}), 429
@@ -115,6 +214,10 @@ CSRF_EXEMPT_PATHS = frozenset([
     "/login", "/api/login", "/api/v1/auth/login",
     "/api/admin/check-pam-admin",
     "/api/auth/break-glass-login",
+    "/api/auth/bootstrap-break-glass",
+    "/api/auth/bootstrap-break-glass/verify",
+    "/api/agent/v1/register",
+    "/api/agent/v1/heartbeat",
 ])
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_COOKIE = "XSRF-TOKEN"
@@ -129,7 +232,7 @@ def init_csrf(app):
         if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
             return None
         path = (request.path or "").rstrip("/")
-        if path in CSRF_EXEMPT_PATHS or any(path.startswith(p.rstrip("/")) for p in ("/saml/", "/api/login", "/api/v1/auth/login", "/api/auth/break-glass-login")):
+        if path in CSRF_EXEMPT_PATHS or any(path.startswith(p.rstrip("/")) for p in ("/saml/", "/api/login", "/api/v1/auth/login", "/api/auth/break-glass-login", "/api/auth/bootstrap", "/api/agent/")):
             return None
         if request.path.startswith("/api/admin/check-pam-admin"):
             return None

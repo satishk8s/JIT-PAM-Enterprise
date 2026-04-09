@@ -3,7 +3,7 @@
 - **Break-glass users:** login with **username and password** (emergency admin).
 - **All other users:** login through **AWS IAM Identity Center** (SSO).
 
-Use your EC2 public IP or domain everywhere you see `YOUR_EC2_IP` or `YOUR_DOMAIN`.
+Use `https://npamx.nyk00-int.network` as the public PAM URL anywhere this guide refers to `YOUR_EC2_IP` or `YOUR_DOMAIN`.
 
 ---
 
@@ -11,7 +11,7 @@ Use your EC2 public IP or domain everywhere you see `YOUR_EC2_IP` or `YOUR_DOMAI
 
 Code is in a repo; you push from your machine and **pull on EC2**. No SCP or zip. All commands below run **on the Ubuntu 24 EC2** (SSH in as `ubuntu` or your admin user).
 
-Replace `YOUR_REPO_URL` (e.g. `https://github.com/your-org/sso.git` or `git@github.com:your-org/sso.git`), `YOUR_EC2_IP`, and other placeholders. For a **private repo**, either use an HTTPS URL with a personal access token, or configure an SSH key on the EC2 for `git@...` URLs.
+Replace `YOUR_REPO_URL` (e.g. `https://github.com/your-org/sso.git` or `git@github.com:your-org/sso.git`) and other placeholders. For this environment, use `https://npamx.nyk00-int.network` as the public PAM URL. For a **private repo**, either use an HTTPS URL with a personal access token, or configure an SSH key on the EC2 for `git@...` URLs.
 
 ```bash
 # 1) System update and packages
@@ -40,8 +40,8 @@ sudo -u npamx tee /opt/npamx/app/backend/.env << ENVEOF
 FLASK_ENV=production
 FLASK_SECRET_KEY=$SECRET
 PORT=5000
-CORS_ORIGINS=http://YOUR_EC2_IP
-APP_BASE_URL=http://YOUR_EC2_IP
+CORS_ORIGINS=https://npamx.nyk00-int.network
+APP_BASE_URL=https://npamx.nyk00-int.network
 PAM_SUPER_ADMIN_SEED_EMAIL=break-glass-admin@yourcompany.com
 SSO_INSTANCE_ARN=arn:aws:sso:::instance/ssoins-XXXXXXXX
 IDENTITY_STORE_ID=d-XXXXXXXXXXXXXXXXX
@@ -110,7 +110,7 @@ Then:
 
 1. **Edit .env** with your real values:  
    `sudo -u npamx nano /opt/npamx/app/backend/.env`  
-   Set `YOUR_EC2_IP`, break-glass email, and SSO ARN / Identity Store ID / start URL.
+   Set the PAM URL to `https://npamx.nyk00-int.network`, plus the break-glass email and SSO ARN / Identity Store ID / start URL.
 2. **Create the break-glass user** (full-access admin; they will assign IdC users as admins/roles):  
    `cd /opt/npamx/app/backend && sudo -u npamx python3 add_break_glass_user.py`  
    Enter email and password when prompted. This user logs in with **Login with Password** and has full access.
@@ -119,7 +119,7 @@ Then:
    Then: `echo '{"pam_admins":[{"email":"sso-admin@company.com","role":"SuperAdmin"}]}' | sudo -u npamx tee /opt/npamx/app/backend/data/pam_admins.json`  
    Restart: `sudo systemctl restart npamx`.
 4. **Security group:** allow inbound HTTP (port 80) from `0.0.0.0/0` (or your IP).
-5. Open **http://YOUR_EC2_IP** — **Login with Password** = break-glass (full access). **Login with SSO** = Identity Center users. Break-glass user can add IdC users as admins/roles from Admin panel.
+5. Open **https://npamx.nyk00-int.network** — **Login with Password** = break-glass (full access). **Login with SSO** = Identity Center users. Break-glass user can add IdC users as admins/roles from Admin panel.
 
 ---
 
@@ -191,7 +191,7 @@ Break-glass uses env for the seed admin. Everyone else uses AWS Identity Center 
 openssl rand -hex 32
 ```
 
-**Create the env file** (replace `YOUR_SECRET_KEY`, `YOUR_EC2_IP`, and AWS/SSO values):
+**Create the env file** (replace `YOUR_SECRET_KEY` and AWS/SSO values):
 
 ```bash
 sudo -u npamx tee /opt/npamx/app/backend/.env << 'EOF'
@@ -200,11 +200,11 @@ FLASK_ENV=production
 FLASK_SECRET_KEY=YOUR_SECRET_KEY
 PORT=5000
 
-# Frontend URL (CORS) — use http://YOUR_EC2_IP or https://your-domain.com
-CORS_ORIGINS=http://YOUR_EC2_IP
+# Frontend URL (CORS)
+CORS_ORIGINS=https://npamx.nyk00-int.network
 
-# Base URL of this app (for SAML ACS callback). Use https if you add SSL later.
-APP_BASE_URL=http://YOUR_EC2_IP
+# Base URL of this app (for SAML ACS callback and audience)
+APP_BASE_URL=https://npamx.nyk00-int.network
 
 # === Break-glass: only this user can log in with username/password ===
 # Set to the email of your emergency admin (e.g. super-admin@company.com)
@@ -234,8 +234,8 @@ sudo -u npamx nano /opt/npamx/app/backend/.env
 Set at least:
 
 - `FLASK_SECRET_KEY` (paste the output of `openssl rand -hex 32`)
-- `CORS_ORIGINS=http://YOUR_EC2_IP`
-- `APP_BASE_URL=http://YOUR_EC2_IP`
+- `CORS_ORIGINS=https://npamx.nyk00-int.network`
+- `APP_BASE_URL=https://npamx.nyk00-int.network`
 - `PAM_SUPER_ADMIN_SEED_EMAIL` (break-glass admin email)
 - `SSO_INSTANCE_ARN`, `IDENTITY_STORE_ID`, `SSO_START_URL` (from your AWS IAM Identity Center / SSO setup)
 
@@ -248,14 +248,14 @@ Set at least:
 - **Break-glass users** = admins who can log in with username/password (when that flow is enabled); their email is the seed in `.env`.
 - **Other users** = log in via **AWS Identity Center (SSO)**. To let an SSO user see the Admin panel, add their email to the PAM admins list (via Admin → Users & Groups after first admin is in, or by adding it to the file below).
 
-**On EC2, after editing `.env` with your real `PAM_SUPER_ADMIN_SEED_EMAIL` (e.g. `satish.korra@nykaa.com`):**
+**On EC2, after editing `.env` with your real `PAM_SUPER_ADMIN_SEED_EMAIL` (for example, `admin@example.com`):**
 
 ```bash
 # Create data dir and initial PAM admins file (use the same email as PAM_SUPER_ADMIN_SEED_EMAIL)
 sudo mkdir -p /opt/npamx/app/backend/data
 sudo chown npamx:npamx /opt/npamx/app/backend/data
 
-# Replace YOUR_ADMIN_EMAIL with the break-glass/SSO admin email (e.g. satish.korra@nykaa.com)
+# Replace YOUR_ADMIN_EMAIL with the break-glass/SSO admin email (for example, admin@example.com)
 ADMIN_EMAIL="YOUR_ADMIN_EMAIL"
 echo '{"pam_admins":[{"email":"'$ADMIN_EMAIL'","role":"SuperAdmin"}]}' | sudo -u npamx tee /opt/npamx/app/backend/data/pam_admins.json
 ```
@@ -535,7 +535,7 @@ From another EC2 or bastion in the same VPC run: `curl -s -o /dev/null -w "%{htt
 
 ## 11. Verify
 
-- Open: **http://YOUR_EC2_IP**
+- Open: **https://npamx.nyk00-int.network**
 - You should see the login page with:
   - **Login with SSO** → AWS Identity Center (normal users).
   - **Login with Password** → only for the break-glass user (email set in `PAM_SUPER_ADMIN_SEED_EMAIL`).
@@ -561,5 +561,7 @@ sudo systemctl restart npamx
 | Break-glass (full access) | Email + password      | Created **manually on EC2** with `python3 add_break_glass_user.py`; stored in `backend/data/npamx_break_glass.db`. They assign Identity Center users as admins/roles from the Admin panel. |
 | All other users        | AWS IAM Identity Center (SSO) | `SSO_*` and `APP_BASE_URL` in `.env`; IdP metadata in `backend/saml/idp_metadata.xml`. PAM admins/roles are assigned by the break-glass user (or in `backend/data/pam_admins.json`). |
 
-Ensure in **Identity Center** the application (SP) is configured with ACS URL:  
-`http://YOUR_EC2_IP/saml/acs` (or `https://...` if you add SSL).
+Ensure in **Identity Center** the application (SP) is configured with:
+
+- ACS URL: `https://npamx.nyk00-int.network/saml/acs`
+- Audience / Entity ID: `https://npamx.nyk00-int.network/saml/metadata`

@@ -1,22 +1,161 @@
-from flask import Flask, request, jsonify, session, redirect
+from flask import Flask, request, jsonify, session, redirect, Response, make_response, stream_with_context
+import csv
+from collections import Counter, defaultdict
 from flask_cors import CORS
 import boto3
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, EndpointConnectionError
+import base64
+import copy
+import html
+import io
+import hmac
+import hashlib
 import json
+import mimetypes
+import math
 from datetime import datetime, timedelta, timezone
 import uuid
 import os
+import secrets
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import re
+import socket
+import ssl
 import threading
 import time
+import qrcode
+import ipaddress
+import urllib.request
+import urllib.error
+from urllib.parse import urlparse, urlencode, quote
+from email.message import EmailMessage
+from email.utils import formataddr
+from werkzeug.middleware.proxy_fix import ProxyFix
 from strict_policies import StrictPolicies
 from ai_validator import AIValidator
 from user_sync_engine import UserSyncEngine
 from enforcement_engine import EnforcementEngine
 from persistence import NpamxStore
+from approval_workflows import (
+    load_workflows as load_approval_workflows,
+    upsert_workflow as save_approval_workflow,
+    delete_workflow as delete_approval_workflow,
+    load_default_approvers as load_approval_workflow_default_approvers,
+    save_default_approvers as save_approval_workflow_default_approvers,
+    resolve_workflow as resolve_approval_workflow,
+    build_runtime_state as build_approval_runtime_state,
+    current_stage as current_approval_stage,
+    workflow_requires_requester_primary_email,
+    workflow_has_self_approval_stage,
+    workflow_missing_required_contacts,
+)
 
 load_dotenv()
+
+_APP_SECRET_CACHE = {}
+_APP_SECRET_CACHE_LOCK = threading.Lock()
+EMAIL_RE = re.compile(r'^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$', re.IGNORECASE)
+NPAMX_NOTIFICATION_FOOTER_DEFAULT = 'Please do not reply to this email. For support, please contact Nykaa SecOps team.'
+NYKAA_EMAIL_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/0/00/Nykaa_New_Logo.svg'
+
+
+def _aws_region_for_runtime() -> str:
+    return (
+        str(os.getenv('AWS_REGION') or '').strip()
+        or str(os.getenv('AWS_DEFAULT_REGION') or '').strip()
+        or 'ap-south-1'
+    )
+
+
+def _identity_center_region() -> str:
+    configured = globals().get('CONFIG')
+    config_region = ''
+    if isinstance(configured, dict):
+        config_region = str(
+            configured.get('identity_center_region')
+            or configured.get('sso_region')
+            or ''
+        ).strip()
+    return (
+        str(os.getenv('IDENTITY_CENTER_REGION') or '').strip()
+        or str(os.getenv('IAM_IDENTITY_CENTER_REGION') or '').strip()
+        or str(os.getenv('SSO_REGION') or '').strip()
+        or config_region
+        or _aws_region_for_runtime()
+    )
+
+
+def _get_runtime_secret(secret_id: str) -> str:
+    secret_name = str(secret_id or '').strip()
+    if not secret_name:
+        return ''
+    with _APP_SECRET_CACHE_LOCK:
+        cached = _APP_SECRET_CACHE.get(secret_name)
+        if cached is not None:
+            return cached
+    sm = boto3.client('secretsmanager', region_name=_aws_region_for_runtime(), config=Config(connect_timeout=3, read_timeout=5))
+    response = sm.get_secret_value(SecretId=secret_name) or {}
+    secret_value = str(response.get('SecretString') or '').strip()
+    if not secret_value:
+        raise RuntimeError(f'Secrets Manager secret {secret_name} is empty')
+    with _APP_SECRET_CACHE_LOCK:
+        _APP_SECRET_CACHE[secret_name] = secret_value
+    return secret_value
+
+
+def _env_or_secret(name: str, *aliases: str, required: bool = False) -> str:
+    keys = [name, *aliases]
+    for key in keys:
+        value = str(os.getenv(key) or '').strip()
+        if value:
+            return value
+    secret_keys = [f'{name}_SECRET_NAME', *(f'{alias}_SECRET_NAME' for alias in aliases)]
+    for key in secret_keys:
+        secret_name = str(os.getenv(key) or '').strip()
+        if secret_name:
+            return _get_runtime_secret(secret_name)
+    if required:
+        raise RuntimeError(f'{name} must be set directly or via {name}_SECRET_NAME')
+    return ''
+
+
+def _identity_center_username_candidates(email: str) -> list[tuple[str, str]]:
+    base_email = str(email or '').strip()
+    if not base_email:
+        return []
+    username_part = base_email.split('@')[0] if '@' in base_email else base_email
+    suffixes = []
+    raw_suffixes = str(
+        os.getenv('IDENTITY_STORE_USERNAME_SUFFIXES')
+        or os.getenv('PAM_IDENTITY_STORE_USERNAME_SUFFIXES')
+        or ''
+    ).strip()
+    if raw_suffixes:
+        suffixes = [s.strip() for s in raw_suffixes.split(',') if s.strip()]
+
+    candidates = [
+        ('Emails.Value', base_email),
+        ('UserName', base_email),
+        ('UserName', username_part),
+    ]
+    for suffix in suffixes:
+        for variant in (username_part, username_part.lower(), username_part.title()):
+            candidates.append(('UserName', f'{variant}{suffix}'))
+
+    deduped = []
+    seen = set()
+    for attr_path, attr_value in candidates:
+        value = str(attr_value or '').strip()
+        if not value:
+            continue
+        sig = f'{attr_path}:{value.lower()}'
+        if sig in seen:
+            continue
+        seen.add(sig)
+        deduped.append((attr_path, value))
+    return deduped
 
 # Break-glass users: SQLite on EC2; full access and assign IdC users as admins/roles
 try:
@@ -24,6 +163,17 @@ try:
         init_db as init_break_glass_db,
         verify_break_glass_user,
         get_user_by_email as get_break_glass_user_by_email,
+        upgrade_password_hash as upgrade_break_glass_password_hash,
+        generate_totp_secret,
+        set_totp_secret as set_break_glass_totp_secret,
+        verify_totp_code as verify_break_glass_totp_code,
+        enable_mfa as enable_break_glass_mfa,
+        clear_totp_secret as clear_break_glass_totp_secret,
+        update_last_login as update_break_glass_last_login,
+        count_break_glass_users,
+        is_bootstrap_required as is_break_glass_bootstrap_required,
+        get_pending_bootstrap_user,
+        add_user as add_break_glass_user_record,
     )
     init_break_glass_db()
     _BREAK_GLASS_AVAILABLE = True
@@ -31,8 +181,21 @@ except Exception:
     _BREAK_GLASS_AVAILABLE = False
     verify_break_glass_user = None
     get_break_glass_user_by_email = None
+    upgrade_break_glass_password_hash = None
+    generate_totp_secret = None
+    set_break_glass_totp_secret = None
+    verify_break_glass_totp_code = None
+    enable_break_glass_mfa = None
+    clear_break_glass_totp_secret = None
+    update_break_glass_last_login = None
+    count_break_glass_users = None
+    is_break_glass_bootstrap_required = None
+    get_pending_bootstrap_user = None
+    add_break_glass_user_record = None
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+app.config['PREFERRED_URL_SCHEME'] = 'https' if os.environ.get('FLASK_ENV', '').lower() == 'production' else 'http'
 
 # CORS: in production set CORS_ORIGINS (comma-separated). Strict allowlist only.
 _cors_origins = os.environ.get('CORS_ORIGINS', '').strip()
@@ -41,9 +204,18 @@ if os.environ.get('FLASK_ENV', '').lower() == 'production' and not _cors_origins
 if _cors_origins:
     CORS(app, origins=[o.strip() for o in _cors_origins.split(',') if o.strip()], supports_credentials=True)
 else:
-    CORS(app, supports_credentials=True)
+    CORS(
+        app,
+        origins=[
+            'http://localhost',
+            'http://127.0.0.1',
+            'http://localhost:3000',
+            'http://127.0.0.1:3000',
+        ],
+        supports_credentials=True
+    )
 
-_secret = os.environ.get('FLASK_SECRET_KEY', 'change-this-in-production')
+_secret = _env_or_secret('FLASK_SECRET_KEY') or 'change-this-in-production'
 if _secret == 'change-this-in-production' and os.environ.get('FLASK_ENV', '').lower() == 'production':
     raise RuntimeError(
         'Refusing to start in production with default FLASK_SECRET_KEY. '
@@ -55,6 +227,7 @@ app.secret_key = _secret
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = (os.environ.get('FLASK_ENV', '').lower() == 'production')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=int(os.environ.get('SESSION_TTL_HOURS', '12')))
 
 # Security: headers, rate limiting, CSRF (production-grade)
 try:
@@ -74,34 +247,259 @@ except ImportError:
 
 
 def prepare_flask_request(request):
+    settings = _load_app_settings()
+    configured_base = str(
+        settings.get('app_base_url')
+        or os.environ.get('APP_BASE_URL')
+        or ''
+    ).strip().rstrip('/')
+    if configured_base:
+        parsed = urlparse(configured_base)
+        https_enabled = str(parsed.scheme or '').strip().lower() == 'https'
+        host = str(parsed.hostname or parsed.netloc or '').strip()
+        port = parsed.port or (443 if https_enabled else 80)
+    else:
+        forwarded_proto = str(request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+        https_enabled = request.is_secure or forwarded_proto == 'https'
+        host = str(
+            request.headers.get('X-Forwarded-Host')
+            or request.headers.get('Host')
+            or request.host
+            or ''
+        ).split(',')[0].strip()
+        if https_enabled and host.endswith(':443'):
+            host = host[:-4]
+        elif (not https_enabled) and host.endswith(':80'):
+            host = host[:-3]
+        forwarded_port = str(request.headers.get('X-Forwarded-Port') or '').split(',')[0].strip()
+        try:
+            port = int(forwarded_port or 0) if forwarded_port else 0
+        except Exception:
+            port = 0
+        if port <= 0:
+            try:
+                parsed_port = int(str(request.environ.get('SERVER_PORT') or '').strip())
+            except Exception:
+                parsed_port = 0
+            port = parsed_port if parsed_port > 0 else (443 if https_enabled else 80)
     return {
-        'https': 'on' if request.is_secure else 'off',
-        'http_host': request.host,
-        'server_port': request.environ.get('SERVER_PORT'),
+        'https': 'on' if https_enabled else 'off',
+        'http_host': host,
+        'server_port': str(port),
         'script_name': request.path,
         'get_data': request.args.copy(),
         'post_data': request.form.copy(),
     }
 
 
-def init_saml_auth(req):
-    base_path = os.path.join(os.path.dirname(__file__), 'saml')
-    metadata_path = os.path.join(base_path, 'idp_metadata.xml')
+def _is_production():
+    return os.environ.get('FLASK_ENV', '').lower() == 'production'
+
+
+@app.before_request
+def _enforce_https_in_production():
+    if not _is_production() or request.method == 'OPTIONS':
+        return None
+    path = (request.path or '').strip()
+    if path in ('/health', '/api/health', '/api/v1/health'):
+        return None
+    forwarded_proto = str(request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    if request.is_secure or forwarded_proto == 'https':
+        return None
+    host = request.headers.get('Host') or request.host or ''
+    target = request.full_path if request.query_string else request.path
+    return redirect(f'https://{host}{target.rstrip("?")}', code=301)
+
+
+def _resolve_app_base_url(req):
+    settings = _load_app_settings()
+    configured = str(
+        settings.get('app_base_url')
+        or os.environ.get('APP_BASE_URL')
+        or ''
+    ).strip().rstrip('/')
+    if configured:
+        return configured
+    if _is_production():
+        raise RuntimeError('APP_BASE_URL must be set in production for SAML.')
+    scheme = 'https' if str(req.get('https') or '').lower() == 'on' else 'http'
+    host = str(req.get('http_host') or '').strip()
+    if host:
+        return f'{scheme}://{host}'
+    return 'http://localhost:5000'
+
+
+def _support_contact_text() -> str:
+    return str(
+        os.getenv('SUPPORT_CONTACT_TEXT')
+        or os.getenv('PAM_SUPPORT_CONTACT_TEXT')
+        or 'Please contact your PAM administrator.'
+    ).strip() or 'Please contact your PAM administrator.'
+
+
+def _load_saml_idp_metadata_xml() -> str:
+    settings = _load_app_settings()
+    xml = str(settings.get('saml_idp_metadata_xml') or '').strip()
+    if xml:
+        return xml
+    xml = _env_or_secret('SAML_IDP_METADATA_XML', 'PAM_SAML_IDP_METADATA_XML')
+    if xml:
+        return xml
+    metadata_path = str(
+        os.getenv('SAML_IDP_METADATA_PATH')
+        or os.getenv('PAM_SAML_IDP_METADATA_PATH')
+        or os.path.join(os.path.dirname(__file__), 'saml', 'idp_metadata.xml')
+    ).strip()
+    if not metadata_path or not os.path.exists(metadata_path):
+        raise RuntimeError('SAML IdP metadata is not configured')
     with open(metadata_path, 'r') as f:
-        idp_data = OneLogin_Saml2_IdPMetadataParser.parse(f.read())
+        metadata_xml = f.read().strip()
+    if not metadata_xml or '<REPLACE_WITH_REAL_IDP_METADATA>' in metadata_xml:
+        raise RuntimeError('SAML IdP metadata is not configured')
+    return metadata_xml
+
+
+def init_saml_auth(req):
+    idp_data = OneLogin_Saml2_IdPMetadataParser.parse(_load_saml_idp_metadata_xml())
     settings = idp_data.copy()
-    settings['strict'] = False
+    settings['strict'] = True
     settings['debug'] = os.environ.get('SAML_DEBUG', 'false').strip().lower() in ('1', 'true', 'yes')
     settings.setdefault('sp', {})
-    settings['sp']['entityId'] = 'pam-flask-app'
-    # ACS URL from env for production (e.g. APP_BASE_URL=https://pam.example.com)
-    acs_base = os.environ.get('APP_BASE_URL', '').strip().rstrip('/') or 'http://52.66.172.182'
+    acs_base = _resolve_app_base_url(req)
+    settings['sp']['entityId'] = f'{acs_base}/saml/metadata'
     acs_url = f'{acs_base}/saml/acs'
     settings['sp']['assertionConsumerService'] = {
         'url': acs_url,
         'binding': 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
     }
     return OneLogin_Saml2_Auth(req, settings)
+
+
+_BREAK_GLASS_ATTEMPTS = {}
+_BREAK_GLASS_ATTEMPTS_LOCK = threading.Lock()
+_BREAK_GLASS_MAX_ATTEMPTS = max(3, int(os.environ.get('BREAK_GLASS_MAX_ATTEMPTS', '5')))
+_BREAK_GLASS_ATTEMPT_WINDOW_SEC = max(60, int(os.environ.get('BREAK_GLASS_ATTEMPT_WINDOW_SEC', '900')))
+_BREAK_GLASS_LOCKOUT_SEC = max(60, int(os.environ.get('BREAK_GLASS_LOCKOUT_SEC', '900')))
+
+
+def _request_client_ip():
+    return (
+        request.headers.get('X-Real-IP')
+        or request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+        or request.remote_addr
+        or 'unknown'
+    )
+
+
+def _break_glass_allowed_networks():
+    raw = str(
+        os.getenv('BREAK_GLASS_ALLOWED_CIDRS')
+        or os.getenv('PAM_BREAK_GLASS_ALLOWED_CIDRS')
+        or ''
+    ).strip()
+    networks = []
+    for item in raw.split(','):
+        candidate = str(item or '').strip()
+        if not candidate:
+            continue
+        try:
+            if '/' not in candidate:
+                candidate = f'{candidate}/32'
+            networks.append(ipaddress.ip_network(candidate, strict=False))
+        except Exception:
+            continue
+    return networks
+
+
+def _is_break_glass_request_allowed():
+    networks = _break_glass_allowed_networks()
+    if not networks:
+        return True
+    raw_ip = str(_request_client_ip() or '').strip()
+    try:
+        client_ip = ipaddress.ip_address(raw_ip)
+    except Exception:
+        return False
+    return any(client_ip in network for network in networks)
+
+
+def _break_glass_access_denied_response():
+    return jsonify({'error': 'Break-glass access is not available from this network.'}), 403
+
+
+def _break_glass_attempt_key(email):
+    normalized_email = str(email or "").strip().lower()
+    return normalized_email or _request_client_ip()
+
+
+def _break_glass_lock_state(email):
+    now = time.time()
+    key = _break_glass_attempt_key(email)
+    with _BREAK_GLASS_ATTEMPTS_LOCK:
+        state = _BREAK_GLASS_ATTEMPTS.get(key) or {'attempts': [], 'locked_until': 0.0}
+        state['attempts'] = [ts for ts in state.get('attempts', []) if now - ts < _BREAK_GLASS_ATTEMPT_WINDOW_SEC]
+        locked_until = float(state.get('locked_until') or 0.0)
+        if locked_until <= now:
+            state['locked_until'] = 0.0
+        _BREAK_GLASS_ATTEMPTS[key] = state
+        retry_after = max(0, int(state.get('locked_until') or 0.0) - int(now))
+        return key, state, retry_after
+
+
+def _record_break_glass_failure(email):
+    now = time.time()
+    key, _, _ = _break_glass_lock_state(email)
+    with _BREAK_GLASS_ATTEMPTS_LOCK:
+        state = _BREAK_GLASS_ATTEMPTS.get(key) or {'attempts': [], 'locked_until': 0.0}
+        state['attempts'] = [ts for ts in state.get('attempts', []) if now - ts < _BREAK_GLASS_ATTEMPT_WINDOW_SEC]
+        state['attempts'].append(now)
+        if len(state['attempts']) >= _BREAK_GLASS_MAX_ATTEMPTS:
+            state['locked_until'] = now + _BREAK_GLASS_LOCKOUT_SEC
+        _BREAK_GLASS_ATTEMPTS[key] = state
+        return max(0, int(state.get('locked_until') or 0.0) - int(now))
+
+
+def _clear_break_glass_failures(email):
+    key = _break_glass_attempt_key(email)
+    with _BREAK_GLASS_ATTEMPTS_LOCK:
+        _BREAK_GLASS_ATTEMPTS.pop(key, None)
+
+
+def _break_glass_mfa_issuer():
+    return str(os.getenv('BREAK_GLASS_MFA_ISSUER') or 'NPAMX Break-Glass').strip() or 'NPAMX Break-Glass'
+
+
+def _break_glass_provisioning_uri(email, secret):
+    import pyotp
+
+    return pyotp.TOTP(secret).provisioning_uri(name=str(email or '').strip().lower(), issuer_name=_break_glass_mfa_issuer())
+
+
+def _qr_data_uri(value):
+    try:
+        img = qrcode.make(value)
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode('ascii')
+    except Exception as exc:
+        try:
+            print(f"Break-glass QR generation failed: {exc}", flush=True)
+        except Exception:
+            pass
+        return ''
+
+
+def _break_glass_bootstrap_payload(email, secret):
+    provisioning_uri = _break_glass_provisioning_uri(email, secret)
+    qr_code_data_uri = _qr_data_uri(provisioning_uri)
+    return {
+        'email': str(email or '').strip().lower(),
+        'totp_secret': secret,
+        'provisioning_uri': provisioning_uri,
+        'qr_code_data_uri': qr_code_data_uri,
+        'qr_code_available': bool(qr_code_data_uri),
+        'issuer': _break_glass_mfa_issuer(),
+    }
 
 def load_org_policies():
     """Load organizational policies from config file"""
@@ -114,12 +512,12 @@ def load_org_policies():
 
 # Configuration - populated from env when set, else from AWS (fallback avoids blocking on first request)
 CONFIG = {
-    'accounts': {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}},
-    'permission_sets': [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}],
+    'accounts': {},
+    'permission_sets': [],
     'organization': {},
-    'sso_instance_arn': os.environ.get('SSO_INSTANCE_ARN') or os.environ.get('PAM_SSO_INSTANCE_ARN') or 'arn:aws:sso:::instance/ssoins-65955f0870d9f06f',
-    'identity_store_id': os.environ.get('IDENTITY_STORE_ID') or os.environ.get('PAM_IDENTITY_STORE_ID') or 'd-9f677136b2',
-    'sso_start_url': os.environ.get('SSO_START_URL') or os.environ.get('PAM_SSO_START_URL') or 'https://nykaa.awsapps.com/start',
+    'sso_instance_arn': _env_or_secret('SSO_INSTANCE_ARN', 'PAM_SSO_INSTANCE_ARN'),
+    'identity_store_id': _env_or_secret('IDENTITY_STORE_ID', 'PAM_IDENTITY_STORE_ID'),
+    'sso_start_url': _env_or_secret('SSO_START_URL', 'PAM_SSO_START_URL'),
 }
 
 # Short timeout so expired AWS creds don't hang the app
@@ -138,15 +536,78 @@ _IDC_ASSUMED_CREDS = {
     'exp_epoch': 0.0,
 }
 _IDC_ASSUMED_LOCK = threading.Lock()
+_RESOURCE_ASSUMED_CREDS = {}
+_RESOURCE_ASSUMED_LOCK = threading.Lock()
 
 
 def _idc_assume_role_arn() -> str:
+    settings = _load_app_settings()
     # Read dynamically so env changes after startup can still be picked up.
     return str(
-        os.getenv('IDC_ASSUME_ROLE_ARN')
+        settings.get('idc_assume_role_arn')
+        or os.getenv('IDC_ASSUME_ROLE_ARN')
         or os.getenv('PAM_IDC_ROLE_ARN')
         or _IDC_ASSUME_ROLE_ARN
         or ''
+    ).strip()
+
+
+def _idc_assume_role_session_name() -> str:
+    settings = _load_app_settings()
+    return str(
+        settings.get('idc_assume_role_session_name')
+        or os.getenv('IDC_ASSUME_ROLE_SESSION_NAME')
+        or 'npam-idc'
+    ).strip()
+
+
+def _resource_assume_role_arn(account_id: str = '') -> str:
+    settings = _load_app_settings()
+    mappings = _normalize_role_mappings(settings.get('resource_role_mappings'))
+    acct = re.sub(r'[^0-9]', '', str(account_id or '').strip())
+    role_name_template = str(
+        settings.get('resource_assume_role_name_template')
+        or os.getenv('RESOURCE_ASSUME_ROLE_NAME_TEMPLATE')
+        or os.getenv('PAM_RESOURCE_ROLE_NAME_TEMPLATE')
+        or ''
+    ).strip()
+    fallback_role = str(
+        settings.get('resource_assume_role_arn')
+        or os.getenv('RESOURCE_ASSUME_ROLE_ARN')
+        or os.getenv('PAM_RESOURCE_ROLE_ARN')
+        or _idc_assume_role_arn()
+        or ''
+    ).strip()
+    if acct:
+        for item in mappings:
+            if item.get('account_id') == acct and str(item.get('role_arn') or '').strip():
+                return str(item.get('role_arn') or '').strip()
+        for key in (f'RESOURCE_ASSUME_ROLE_ARN_{acct}', f'PAM_RESOURCE_ROLE_ARN_{acct}'):
+            value = str(os.getenv(key) or '').strip()
+            if value:
+                return value
+        if role_name_template:
+            return f'arn:aws:iam::{acct}:role/{role_name_template}'
+        role_match = re.match(r'^arn:aws:iam::(\d{12}):role/(.+)$', fallback_role)
+        if role_match:
+            fallback_account = str(role_match.group(1) or '').strip()
+            fallback_role_name = str(role_match.group(2) or '').strip()
+            if fallback_role_name and acct != fallback_account:
+                return f'arn:aws:iam::{acct}:role/{fallback_role_name}'
+        org_master_account_id = re.sub(r'[^0-9]', '', str((CONFIG.get('organization') or {}).get('master_account_id') or '').strip())
+        if org_master_account_id and acct == org_master_account_id:
+            management_role = _idc_assume_role_arn()
+            if management_role:
+                return management_role
+    return fallback_role
+
+
+def _resource_assume_role_session_name() -> str:
+    settings = _load_app_settings()
+    return str(
+        settings.get('resource_assume_role_session_name')
+        or os.getenv('RESOURCE_ASSUME_ROLE_SESSION_NAME')
+        or 'npam-resource'
     ).strip()
 
 
@@ -173,7 +634,7 @@ def _get_idc_assumed_creds():
 
         params = {
             'RoleArn': role_arn,
-            'RoleSessionName': str(os.getenv('IDC_ASSUME_ROLE_SESSION_NAME') or 'npam-idc').strip() or 'npam-idc',
+            'RoleSessionName': _idc_assume_role_session_name(),
         }
         ext_id = str(os.getenv('IDC_ASSUME_ROLE_EXTERNAL_ID') or '').strip()
         if ext_id:
@@ -208,6 +669,65 @@ def _get_idc_assumed_creds():
         }
 
 
+def _get_resource_assumed_creds(account_id: str = ''):
+    role_arn = _resource_assume_role_arn(account_id)
+    if not role_arn:
+        return None
+
+    now = time.time()
+    with _RESOURCE_ASSUMED_LOCK:
+        cached = _RESOURCE_ASSUMED_CREDS.get(role_arn) or {}
+        if (
+            cached.get('access_key')
+            and cached.get('secret_key')
+            and cached.get('session_token')
+            and float(cached.get('exp_epoch') or 0) > (now + 120)
+        ):
+            return {
+                'aws_access_key_id': cached['access_key'],
+                'aws_secret_access_key': cached['secret_key'],
+                'aws_session_token': cached['session_token'],
+            }
+
+        params = {
+            'RoleArn': role_arn,
+            'RoleSessionName': _resource_assume_role_session_name(),
+        }
+        ext_id = str(os.getenv('RESOURCE_ASSUME_ROLE_EXTERNAL_ID') or '').strip()
+        if ext_id:
+            params['ExternalId'] = ext_id
+
+        sts = boto3.client('sts', config=AWS_CONFIG)
+        resp = sts.assume_role(**params)
+        creds = (resp or {}).get('Credentials') or {}
+
+        access_key = str(creds.get('AccessKeyId') or '').strip()
+        secret_key = str(creds.get('SecretAccessKey') or '').strip()
+        session_token = str(creds.get('SessionToken') or '').strip()
+        exp = creds.get('Expiration')
+        exp_epoch = now + 900
+        try:
+            if exp is not None:
+                exp_epoch = float(exp.timestamp())
+        except Exception:
+            pass
+        if not (access_key and secret_key and session_token):
+            raise RuntimeError('AssumeRole returned empty resource credentials')
+
+        _RESOURCE_ASSUMED_CREDS[role_arn] = {
+            'access_key': access_key,
+            'secret_key': secret_key,
+            'session_token': session_token,
+            'exp_epoch': exp_epoch,
+        }
+
+        return {
+            'aws_access_key_id': access_key,
+            'aws_secret_access_key': secret_key,
+            'aws_session_token': session_token,
+        }
+
+
 def _aws_client(service_name, *, region_name=None, assume_idc_role=False):
     kwargs = {'config': AWS_CONFIG}
     if region_name:
@@ -219,16 +739,1810 @@ def _aws_client(service_name, *, region_name=None, assume_idc_role=False):
     return boto3.client(service_name, **kwargs)
 
 
+def _resource_client(service_name, *, region_name=None, account_id=''):
+    kwargs = {'config': AWS_CONFIG}
+    if region_name:
+        kwargs['region_name'] = region_name
+    assumed = _get_resource_assumed_creds(account_id)
+    if not assumed:
+        assumed = _get_idc_assumed_creds()
+    if assumed:
+        kwargs.update(assumed)
+    return boto3.client(service_name, **kwargs)
+
+
+def _assume_role_for_test(role_arn: str, session_name: str):
+    role = str(role_arn or '').strip()
+    if not role:
+        raise ValueError('Role ARN is required')
+    params = {
+        'RoleArn': role,
+        'RoleSessionName': str(session_name or '').strip() or 'npamx-test',
+    }
+    sts = boto3.client('sts', region_name=_aws_region_for_runtime(), config=AWS_CONFIG)
+    resp = sts.assume_role(**params)
+    creds = (resp or {}).get('Credentials') or {}
+    access_key = str(creds.get('AccessKeyId') or '').strip()
+    secret_key = str(creds.get('SecretAccessKey') or '').strip()
+    session_token = str(creds.get('SessionToken') or '').strip()
+    if not (access_key and secret_key and session_token):
+        raise RuntimeError('AssumeRole returned empty credentials')
+    return {
+        'aws_access_key_id': access_key,
+        'aws_secret_access_key': secret_key,
+        'aws_session_token': session_token,
+    }, str(((resp or {}).get('AssumedRoleUser') or {}).get('Arn') or '').strip()
+
+
+def _run_aws_integration_check(title, callback):
+    try:
+        details = callback() or {}
+        return {
+            'name': title,
+            'status': 'success',
+            'message': str(details.get('message') or 'Passed').strip() or 'Passed',
+        }
+    except Exception as exc:
+        return {
+            'name': title,
+            'status': 'error',
+            'message': str(exc or 'Check failed').strip() or 'Check failed',
+        }
+
+
+def _test_management_role(settings):
+    role_arn = str(settings.get('idc_assume_role_arn') or '').strip()
+    session_name = str(settings.get('idc_assume_role_session_name') or '').strip() or 'npam-idc'
+    identity_store_id = (
+        str(settings.get('identity_store_id') or '').strip()
+        or str(CONFIG.get('identity_store_id') or '').strip()
+    )
+    result = {
+        'scope': 'management',
+        'label': 'Management role',
+        'configured': bool(role_arn),
+        'role_arn': role_arn,
+        'session_name': session_name,
+        'checks': [],
+        'ok': False,
+    }
+    if not role_arn:
+        result['checks'].append({
+            'name': 'Assume role',
+            'status': 'skipped',
+            'message': 'Management role ARN is not configured.',
+        })
+        return result
+
+    try:
+        assumed, assumed_role_arn = _assume_role_for_test(role_arn, session_name)
+        result['assumed_role_arn'] = assumed_role_arn
+    except Exception as exc:
+        result['checks'].append({
+            'name': 'Assume role',
+            'status': 'error',
+            'message': str(exc or 'AssumeRole failed').strip() or 'AssumeRole failed',
+        })
+        return result
+
+    def _client(service_name, region_name=None):
+        kwargs = dict(assumed)
+        kwargs['config'] = AWS_CONFIG
+        if region_name:
+            kwargs['region_name'] = region_name
+        return boto3.client(service_name, **kwargs)
+
+    checks = [
+        _run_aws_integration_check('Assume role', lambda: {'message': 'AssumeRole succeeded.'}),
+        _run_aws_integration_check(
+            'Organizations access',
+            lambda: (
+                _client('organizations').describe_organization() and
+                {'message': 'Organizations access verified.'}
+            ),
+        ),
+        _run_aws_integration_check(
+            'Organization roots',
+            lambda: (
+                _client('organizations').list_roots() and
+                {'message': 'Organization hierarchy access verified.'}
+            ),
+        ),
+        _run_aws_integration_check(
+            'Identity Center instances',
+            lambda: (
+                _client('sso-admin', region_name=_identity_center_region()).list_instances() and
+                {'message': 'IAM Identity Center access verified.'}
+            ),
+        ),
+    ]
+    if identity_store_id:
+        checks.append(
+            _run_aws_integration_check(
+                'Identity Store users',
+                lambda: (
+                    _client('identitystore', region_name=_identity_center_region()).list_users(
+                        IdentityStoreId=identity_store_id,
+                        MaxResults=1,
+                    ) and {'message': f'Identity Store access verified for {identity_store_id}.'}
+                ),
+            )
+        )
+    else:
+        checks.append({
+            'name': 'Identity Store users',
+            'status': 'skipped',
+            'message': 'Identity Store ID is not configured, so user sync was not tested.',
+        })
+
+    result['checks'] = checks
+    result['ok'] = all(item.get('status') != 'error' for item in checks if item.get('status') != 'skipped')
+    return result
+
+
+def _test_resource_role(role_arn, session_name, *, label='', account_id=''):
+    acct = re.sub(r'[^0-9]', '', str(account_id or '').strip())
+    scope_label = str(label or '').strip() or ('Default resource role' if not acct else f'Account {acct}')
+    result = {
+        'scope': 'resource',
+        'label': scope_label,
+        'configured': bool(str(role_arn or '').strip()),
+        'role_arn': str(role_arn or '').strip(),
+        'session_name': str(session_name or '').strip() or 'npam-resource',
+        'account_id': acct,
+        'checks': [],
+        'ok': False,
+    }
+    if not result['role_arn']:
+        result['checks'].append({
+            'name': 'Assume role',
+            'status': 'skipped',
+            'message': 'Resource role ARN is not configured.',
+        })
+        return result
+
+    try:
+        assumed, assumed_role_arn = _assume_role_for_test(result['role_arn'], result['session_name'])
+        result['assumed_role_arn'] = assumed_role_arn
+    except Exception as exc:
+        result['checks'].append({
+            'name': 'Assume role',
+            'status': 'error',
+            'message': str(exc or 'AssumeRole failed').strip() or 'AssumeRole failed',
+        })
+        return result
+
+    def _client(service_name, region_name=None):
+        kwargs = dict(assumed)
+        kwargs['config'] = AWS_CONFIG
+        if region_name:
+            kwargs['region_name'] = region_name
+        return boto3.client(service_name, **kwargs)
+
+    checks = [
+        _run_aws_integration_check('Assume role', lambda: {'message': 'AssumeRole succeeded.'}),
+        _run_aws_integration_check(
+            'RDS discovery',
+            lambda: (
+                _client('rds', region_name=_aws_region_for_runtime()).describe_db_instances(MaxRecords=20) and
+                {'message': f'RDS access verified in {_aws_region_for_runtime()}.'}
+            ),
+        ),
+    ]
+    result['checks'] = checks
+    result['ok'] = all(item.get('status') != 'error' for item in checks if item.get('status') != 'skipped')
+    return result
+
+
+def _test_single_db_connect_proxy(host, port, *, allow_direct=False, label='DB connect endpoint', account_id='', account_name=''):
+    try:
+        port = int(port or 3306)
+    except Exception:
+        port = 3306
+
+    label_text = str(label or '').strip() or 'DB connect endpoint'
+    result = {
+        'scope': 'db_connect',
+        'label': label_text,
+        'configured': bool(str(host or '').strip()),
+        'host': str(host or '').strip(),
+        'port': port,
+        'allow_direct': bool(allow_direct),
+        'account_id': re.sub(r'[^0-9]', '', str(account_id or '').strip()),
+        'account_name': str(account_name or '').strip(),
+        'checks': [],
+        'ok': False,
+    }
+    if not result['host']:
+        result['checks'].append({
+            'name': 'Configuration',
+            'status': 'skipped',
+            'message': 'DB proxy host is not configured.',
+        })
+        if allow_direct:
+            result['checks'].append({
+                'name': 'Direct DB fallback',
+                'status': 'success',
+                'message': 'Direct DB connect fallback is enabled for nonprod.',
+            })
+            result['ok'] = True
+        return result
+
+    def _resolve_dns():
+        infos = socket.getaddrinfo(result['host'], port, type=socket.SOCK_STREAM)
+        addresses = sorted({str(item[4][0]) for item in infos if item and len(item) > 4 and item[4]})
+        return {'message': f'DNS resolved for {result["host"]}: {", ".join(addresses[:3])}'}
+
+    def _tcp_connect():
+        sock = socket.create_connection((result['host'], port), timeout=3)
+        try:
+            peer = sock.getpeername()
+            return {'message': f'TCP connectivity verified to {peer[0]}:{peer[1]}'}
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    checks = [
+        {
+            'name': 'Configuration',
+            'status': 'success',
+            'message': f'Proxy endpoint configured as {result["host"]}:{port}.',
+        },
+        _run_aws_integration_check('DNS resolution', _resolve_dns),
+        _run_aws_integration_check('TCP connectivity', _tcp_connect),
+    ]
+    if allow_direct:
+        checks.append({
+            'name': 'Direct DB fallback',
+            'status': 'success',
+            'message': 'Direct DB connect fallback is enabled for nonprod.',
+        })
+    else:
+        checks.append({
+            'name': 'Direct DB fallback',
+            'status': 'skipped',
+            'message': 'Direct DB connect fallback is disabled for nonprod.',
+        })
+
+    result['checks'] = checks
+    result['ok'] = all(item.get('status') != 'error' for item in checks if item.get('status') != 'skipped')
+    return result
+
+
+def _test_db_connect_proxy(settings):
+    allow_direct = _as_bool(settings.get('db_connect_allow_direct_nonprod'), False)
+    mappings = _normalize_db_proxy_mappings(settings.get('db_connect_proxy_mappings'))
+    if mappings:
+        return [
+            _test_single_db_connect_proxy(
+                item.get('proxy_host'),
+                item.get('proxy_port'),
+                allow_direct=allow_direct,
+                label=(str(item.get('account_name') or '').strip() or f"Account {item.get('account_id') or ''}").strip(),
+                account_id=item.get('account_id') or '',
+                account_name=item.get('account_name') or '',
+            )
+            for item in mappings
+        ]
+
+    host = str(settings.get('db_connect_proxy_host_nonprod') or '').strip()
+    port_raw = str(settings.get('db_connect_proxy_port_nonprod') or '').strip()
+    try:
+        port = int(port_raw) if port_raw else 3306
+    except Exception:
+        port = 3306
+    return _test_single_db_connect_proxy(
+        host,
+        port,
+        allow_direct=allow_direct,
+        label='Nonprod DB connect endpoint',
+    )
+
+
+def _build_aws_integration_test_payload(raw_settings):
+    base = _load_app_settings()
+    merged = dict(base)
+    if isinstance(raw_settings, dict):
+        merged.update(raw_settings)
+    settings = _normalize_app_settings(merged)
+    management = _test_management_role(settings)
+    db_connect = _test_db_connect_proxy(settings)
+    resources = []
+    seen = set()
+
+    default_role = str(settings.get('resource_assume_role_arn') or '').strip()
+    default_session_name = str(settings.get('resource_assume_role_session_name') or '').strip() or 'npam-resource'
+    if default_role:
+        resources.append(_test_resource_role(default_role, default_session_name, label='Default resource role'))
+        seen.add(f'default:{default_role}')
+
+    for item in _normalize_role_mappings(settings.get('resource_role_mappings')):
+        account_id = item.get('account_id') or ''
+        role_arn = str(item.get('role_arn') or '').strip()
+        sig = f'{account_id}:{role_arn}'
+        if not role_arn or sig in seen:
+            continue
+        seen.add(sig)
+        resources.append(
+            _test_resource_role(
+                role_arn,
+                default_session_name,
+                label=str(item.get('account_name') or item.get('label') or '').strip() or f'Account {account_id}',
+                account_id=account_id,
+            )
+        )
+
+    role_name_template = str(settings.get('resource_assume_role_name_template') or '').strip()
+    if role_name_template:
+        account_items = list((CONFIG.get('accounts') or {}).items())
+        account_items.sort(key=lambda pair: str((pair[1] or {}).get('name') or pair[0] or '').lower())
+        for account_id, account_meta in account_items[:20]:
+            acct = re.sub(r'[^0-9]', '', str(account_id or '').strip())
+            if not acct:
+                continue
+            role_arn = _resource_assume_role_arn(acct)
+            sig = f'{acct}:{role_arn}'
+            if not role_arn or sig in seen:
+                continue
+            seen.add(sig)
+            resources.append(
+                _test_resource_role(
+                    role_arn,
+                    default_session_name,
+                    label=str((account_meta or {}).get('name') or '').strip() or f'Account {acct}',
+                    account_id=acct,
+                )
+            )
+
+    passed = 0
+    failed = 0
+    skipped = 0
+    db_blocks = db_connect if isinstance(db_connect, list) else [db_connect]
+    for block in [management, *db_blocks, *resources]:
+        statuses = [str(item.get('status') or '').strip().lower() for item in (block.get('checks') or [])]
+        if any(status == 'error' for status in statuses):
+            failed += 1
+        elif any(status == 'success' for status in statuses):
+            passed += 1
+        else:
+            skipped += 1
+
+    return {
+        'status': 'success' if failed == 0 else 'error',
+        'results': {
+            'management': management,
+            'db_connect': db_connect,
+            'resources': resources,
+            'summary': {
+                'passed': passed,
+                'failed': failed,
+                'skipped': skipped,
+            },
+        },
+    }
+
+
+def _is_mysql_family_engine(engine_name):
+    engine = str(engine_name or '').strip().lower()
+    return any(token in engine for token in ('mysql', 'maria', 'aurora'))
+
+
+def _is_postgres_family_engine(engine_name):
+    engine = str(engine_name or '').strip().lower()
+    return 'postgres' in engine
+
+
+def _supports_live_db_connection_test(engine_name):
+    return _is_mysql_family_engine(engine_name) or _is_postgres_family_engine(engine_name)
+
+
+def _infer_vault_connection_engine(plugin_name):
+    plugin = str(plugin_name or '').strip().lower()
+    if 'redshift' in plugin:
+        return 'redshift'
+    if 'postgres' in plugin:
+        return 'postgresql'
+    if 'mysql' in plugin or 'maria' in plugin:
+        return 'mysql'
+    return plugin or 'unknown'
+
+
+def _extract_vault_connection_url(config):
+    if not isinstance(config, dict):
+        return ''
+    direct = str(config.get('connection_url') or '').strip()
+    if direct:
+        return direct
+    details = config.get('connection_details')
+    if isinstance(details, dict):
+        for key in ('connection_url', 'url', 'dsn'):
+            value = str(details.get(key) or '').strip()
+            if value:
+                return value
+    return ''
+
+
+def _extract_vault_connection_host_port(engine_name, connection_url):
+    engine = str(engine_name or '').strip().lower()
+    raw = str(connection_url or '').strip()
+    if not raw:
+        return '', ''
+    if _is_mysql_family_engine(engine):
+        match = re.search(r'@tcp\((?P<host>[^)]+)\)', raw, flags=re.IGNORECASE)
+        if match:
+            host_port = str(match.group('host') or '').strip()
+            if ':' in host_port:
+                host, port = host_port.rsplit(':', 1)
+                return host.strip(), port.strip() or '3306'
+            return host_port, '3306'
+        parsed = urlparse(raw if '://' in raw else f'mysql://{raw}')
+        if parsed.hostname:
+            return parsed.hostname, str(parsed.port or 3306)
+        return '', ''
+    parsed = urlparse(raw if '://' in raw else f'postgresql://{raw}')
+    return str(parsed.hostname or '').strip(), str(parsed.port or (5439 if 'redshift' in engine else 5432))
+
+
+def _extract_vault_connection_database_name(engine_name, connection_url):
+    engine = str(engine_name or '').strip().lower()
+    raw = str(connection_url or '').strip()
+    if not raw:
+        return 'postgres' if _is_postgres_family_engine(engine) else ''
+    if _is_mysql_family_engine(engine):
+        return ''
+    parsed = urlparse(raw if '://' in raw else f'postgresql://{raw}')
+    db_name = str(parsed.path or '').strip().lstrip('/')
+    return db_name or ('postgres' if _is_postgres_family_engine(engine) else '')
+
+
+def _format_allowed_roles_display(allowed_roles):
+    if isinstance(allowed_roles, list):
+        roles = [str(item or '').strip() for item in allowed_roles if str(item or '').strip()]
+        return ', '.join(roles) if roles else '(none)'
+    text = str(allowed_roles or '').strip()
+    return text or '(none)'
+
+
+def _admin_vault_connection_error_detail(err, *, phase='test'):
+    raw = str(err or '').strip()
+    low = raw.lower()
+    code = 'NPAMX-VCONN-099'
+    message = 'Vault connection validation failed. Review server logs for details.'
+
+    if phase == 'list':
+        code = 'NPAMX-VCONN-008'
+        message = 'Vault connection inventory could not be refreshed right now.'
+    elif phase == 'metadata':
+        code = 'NPAMX-VCONN-008'
+        message = 'Vault connection metadata could not be read for this connection.'
+    elif phase == 'unsupported':
+        code = 'NPAMX-VCONN-007'
+        message = 'This Vault connection uses an engine that the NPAMX tester does not support yet.'
+    elif phase == 'cleanup':
+        code = 'NPAMX-VCONN-006'
+        message = 'The test finished, but cleanup of the temporary Vault lease or role needs attention.'
+    elif phase == 'login':
+        code = 'NPAMX-VCONN-005'
+        message = 'Vault minted a temporary user, but the generated test login failed on the database.'
+    elif phase == 'mint':
+        code = 'NPAMX-VCONN-004'
+        message = 'Vault could not mint a temporary test credential for this connection.'
+    elif phase == 'push':
+        code = 'NPAMX-VCONN-009'
+        message = 'Vault connection push failed. Check connection inputs and backend access.'
+
+    if (
+        'vault http 403' in low
+        or 'preflight capability check returned 403' in low
+        or ('forbidden' in low and 'vault' in low)
+        or ('permission denied' in low and 'vault' in low and any(token in low for token in ('capab', 'policy', 'path "', 'token')))
+    ):
+        return ('NPAMX-VCONN-001', 'NPAMX could not access the Vault database connection with its current service permissions.')
+    if any(token in low for token in (
+        'connection refused',
+        'timed out',
+        'timeout expired',
+        'i/o timeout',
+        'no route to host',
+        'name or service not known',
+        'temporary failure in name resolution',
+        'dial tcp',
+        'lookup ',
+        'vault connection failed',
+    )):
+        return ('NPAMX-VCONN-002', 'Vault could not reach the configured database endpoint from the PAM backend.')
+    if any(token in low for token in (
+        'access denied',
+        'password authentication failed',
+        'authentication failed',
+        'login failed',
+        'invalid password',
+        'using password: yes',
+    )):
+        if phase == 'login':
+            return ('NPAMX-VCONN-005', 'Vault minted a temporary user, but that generated user could not log in to the database.')
+        return ('NPAMX-VCONN-003', 'Vault reached the database, but the configured admin credential was rejected.')
+    if any(token in low for token in (
+        'permission denied to grant role',
+        'sqlstate 42501',
+        'must be owner of relation',
+        'insufficient privilege',
+    )):
+        return ('NPAMX-VCONN-003', 'Vault reached the database, but the configured admin credential lacks required grants for role/user provisioning.')
+    if 'failed to find entry for connection with name' in low:
+        return ('NPAMX-VCONN-008', 'The selected Vault connection name does not exist. Use the mapped/actual connection name for this instance.')
+    if 'vault http 404' in low:
+        return ('NPAMX-VCONN-008', 'The selected Vault connection name does not exist in database/config for this plane.')
+    if 'not an allowed role' in low:
+        return ('NPAMX-VCONN-004', 'This Vault connection does not currently allow the NPAMX temporary audit role. Update the connection allowed_roles setting or permit NPAMX audit/test roles.')
+    if 'supports mysql-family engines only' in low or 'supports mysql and postgresql engines only' in low or 'supports mysql' in low:
+        return ('NPAMX-VCONN-007', 'This Vault connection uses an engine that the NPAMX tester does not support yet.')
+    if 'connection_url' in low or 'endpoint' in low or 'host' in low:
+        return ('NPAMX-VCONN-008', 'Vault connection metadata is incomplete, so NPAMX could not derive the test endpoint.')
+    return (code, message)
+
+
+def _normalize_vault_plane(raw_plane, default='nonprod'):
+    plane = str(raw_plane or '').strip().lower()
+    if not plane:
+        return str(default or 'nonprod').strip().lower() or 'nonprod'
+    if plane in ('prod', 'production'):
+        return 'prod'
+    if plane in ('sandbox',):
+        return 'sandbox'
+    if plane in ('nonprod', 'non-prod', 'non_prod', 'dev', 'staging', 'test'):
+        return 'nonprod'
+    return str(default or 'nonprod').strip().lower() or 'nonprod'
+
+
+def _vault_connection_map_settings_key(execution_plane: str = '') -> str:
+    plane = _normalize_vault_plane(execution_plane, 'nonprod')
+    if plane == 'prod':
+        return 'vault_db_connection_name_map_prod'
+    if plane == 'sandbox':
+        return 'vault_db_connection_name_map_sandbox'
+    return 'vault_db_connection_name_map_nonprod'
+
+
+def _vault_connection_map_keys(*, account_id: str = '', engine: str = '', db_instance_id: str = '') -> list[str]:
+    account = re.sub(r'[^0-9]', '', str(account_id or '').strip())
+    instance = str(db_instance_id or '').strip().lower()
+    eng = _normalize_db_engine_family(engine)
+    keys = []
+    if account and eng and instance:
+        keys.append(f'{account}:{eng}:{instance}')
+    if account and instance:
+        keys.append(f'{account}:instance:{instance}')
+        keys.append(f'{account}:{instance}')
+    if eng and instance:
+        keys.append(f'{eng}:{instance}')
+    if instance:
+        keys.append(f'instance:{instance}')
+        keys.append(instance)
+    # preserve order, drop duplicates
+    out = []
+    seen = set()
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _resolve_vault_connection_name_override(*, account_id: str = '', engine: str = '', db_instance_id: str = '', execution_plane: str = '') -> str:
+    plane = _normalize_vault_plane(execution_plane, 'nonprod')
+    map_key = _vault_connection_map_settings_key(plane)
+    settings = _load_app_settings()
+    mapping = _normalize_vault_connection_name_map(settings.get(map_key))
+    if not mapping:
+        return ''
+    for key in _vault_connection_map_keys(account_id=account_id, engine=engine, db_instance_id=db_instance_id):
+        value = str(mapping.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _vault_connection_name_exists(connection_name: str, *, plane: str) -> bool:
+    name = str(connection_name or '').strip()
+    if not name:
+        return False
+    try:
+        config = VaultManager.read_database_connection(name, plane=plane)
+    except Exception:
+        return False
+    return isinstance(config, dict) and bool(config)
+
+
+def _same_engine_family(lhs: str, rhs: str) -> bool:
+    l = _normalize_db_engine_family(lhs)
+    r = _normalize_db_engine_family(rhs)
+    if not l or not r:
+        return False
+    if l in ('mysql', 'maria', 'aurora') and r in ('mysql', 'maria', 'aurora'):
+        return True
+    return l == r
+
+
+def _resolve_best_vault_connection_for_instance(
+    *,
+    plane: str,
+    desired_engine: str,
+    endpoint_host: str,
+    db_instance_id: str,
+    explicit_connection_name: str,
+    mapped_connection_name: str,
+) -> tuple[str, str]:
+    explicit = str(explicit_connection_name or '').strip()
+    mapped = str(mapped_connection_name or '').strip()
+    instance_name = str(db_instance_id or '').strip()
+
+    # Priority 1: explicit/mapped/instance-id names that actually exist.
+    candidates = []
+    if explicit:
+        candidates.append(('explicit', explicit))
+    if mapped and mapped != explicit:
+        candidates.append(('mapped', mapped))
+    if instance_name and instance_name not in (explicit, mapped):
+        candidates.append(('instance', instance_name))
+    for source, candidate in candidates:
+        if _vault_connection_name_exists(candidate, plane=plane):
+            return candidate, source
+
+    # Priority 2: discover by endpoint host + engine from live Vault inventory.
+    host_l = str(endpoint_host or '').strip().lower()
+    engine_matches = []
+    try:
+        names = VaultManager.list_database_connections(plane=plane)
+    except Exception:
+        names = []
+    for name in names:
+        conn_name = str(name or '').strip()
+        if not conn_name:
+            continue
+        try:
+            config = VaultManager.read_database_connection(conn_name, plane=plane)
+        except Exception:
+            continue
+        plugin_engine = _infer_vault_connection_engine(str((config or {}).get('plugin_name') or '').strip())
+        if not _same_engine_family(desired_engine, plugin_engine):
+            continue
+        engine_matches.append(conn_name)
+        conn_url = _extract_vault_connection_url(config)
+        conn_host, _conn_port = _extract_vault_connection_host_port(plugin_engine, conn_url)
+        if host_l and str(conn_host or '').strip().lower() == host_l:
+            return conn_name, 'endpoint_match'
+
+    if len(engine_matches) == 1:
+        return engine_matches[0], 'engine_singleton'
+
+    # Fallback to whatever the user entered (may still fail with clear error).
+    fallback = explicit or mapped or instance_name
+    return fallback, 'fallback'
+
+
+def _resolve_request_vault_connection_name(req: dict, engine: str, plane: str) -> tuple[str, str]:
+    item = req if isinstance(req, dict) else {}
+    explicit_connection_name = str(
+        item.get('vault_connection_name')
+        or item.get('vault_db_connection_name')
+        or item.get('connection_name')
+        or ''
+    ).strip()
+    mapped_connection_name = _resolve_vault_connection_name_override(
+        account_id=str(item.get('account_id') or '').strip(),
+        engine=engine,
+        db_instance_id=str(item.get('db_instance_id') or '').strip(),
+        execution_plane=plane,
+    )
+    endpoint_host = ''
+    try:
+        endpoint_host = str(_resolve_db_user_connect_endpoint(item)[0] or '').strip()
+    except Exception:
+        endpoint_host = ''
+    connection_name, source = _resolve_best_vault_connection_for_instance(
+        plane=plane,
+        desired_engine=engine,
+        endpoint_host=endpoint_host,
+        db_instance_id=str(item.get('db_instance_id') or '').strip(),
+        explicit_connection_name=explicit_connection_name,
+        mapped_connection_name=mapped_connection_name,
+    )
+    return connection_name, source
+
+
+def _vault_plugin_for_engine(engine_family: str) -> str:
+    eng = _normalize_db_engine_family(engine_family)
+    if eng in ('postgres', 'redshift'):
+        return 'postgresql-database-plugin'
+    return 'mysql-rds-database-plugin'
+
+
+def _default_db_name_for_engine(engine_family: str) -> str:
+    eng = _normalize_db_engine_family(engine_family)
+    if eng == 'redshift':
+        return 'dev'
+    if eng == 'postgres':
+        return 'postgres'
+    return ''
+
+
+def _default_username_template_for_engine(engine_family: str) -> str:
+    eng = _normalize_db_engine_family(engine_family)
+    if eng == 'redshift':
+        return 'dwh-{{.RoleName}}-{{random 6}}'
+    return 'd-{{.RoleName}}-{{random 6}}'
+
+
+def _build_vault_connection_url(*, engine_family: str, host: str, port: int, db_name: str) -> str:
+    eng = _normalize_db_engine_family(engine_family)
+    if eng in ('postgres', 'redshift'):
+        safe_db = str(db_name or _default_db_name_for_engine(eng)).strip() or _default_db_name_for_engine(eng)
+        return f'postgresql://{{{{username}}}}:{{{{password}}}}@{host}:{int(port)}/{safe_db}?sslmode=require'
+    return f'{{{{username}}}}:{{{{password}}}}@tcp({host}:{int(port)})/'
+
+
+def _resolve_vault_admin_credentials_for_push(settings: dict, *, plane: str) -> tuple[str, str, str, int]:
+    source = settings if isinstance(settings, dict) else {}
+    admin_username = str(source.get('admin_username') or '').strip()
+    admin_password = str(source.get('admin_password') or '').strip()
+    admin_secret_ref = str(source.get('admin_secret_ref') or source.get('vault_admin_secret_ref') or '').strip()
+    kv_version_raw = source.get('admin_secret_kv_version')
+    if kv_version_raw in (None, ''):
+        kv_version_raw = source.get('kv_version')
+    kv_version = 2
+    try:
+        kv_version = int(kv_version_raw) if kv_version_raw not in (None, '') else 2
+    except Exception:
+        kv_version = 2
+    secret_user_key = str(source.get('admin_secret_username_key') or 'username').strip() or 'username'
+    secret_password_key = str(source.get('admin_secret_password_key') or 'password').strip() or 'password'
+
+    if admin_secret_ref:
+        try:
+            secret_data = VaultManager.read_kv_secret(secret_ref=admin_secret_ref, plane=plane, kv_version=kv_version)
+        except Exception as exc:
+            raise RuntimeError(f'Failed to read Vault KV secret_ref {admin_secret_ref}: {exc}') from exc
+        if not isinstance(secret_data, dict):
+            raise RuntimeError(f'Vault KV secret_ref {admin_secret_ref} returned invalid data')
+        if not admin_username:
+            admin_username = str(secret_data.get(secret_user_key) or '').strip()
+        if not admin_password:
+            admin_password = str(secret_data.get(secret_password_key) or '').strip()
+
+    if not admin_username:
+        raise ValueError('Provide admin_username or admin_secret_ref with username key.')
+    if not admin_password:
+        raise ValueError('Provide admin_password or admin_secret_ref with password key.')
+    return admin_username, admin_password, admin_secret_ref, kv_version
+
+
+def _build_vault_db_connection_push_payload(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    plane = _normalize_vault_plane(settings.get('plane'), 'nonprod')
+    push_mode = str(settings.get('push_mode') or settings.get('mode') or 'full').strip().lower()
+    account_id = re.sub(r'[^0-9]', '', str(settings.get('account_id') or '').strip())
+    db_instance_id = str(settings.get('db_instance_id') or settings.get('instance_id') or '').strip()
+    requested_engine = _normalize_db_engine_family(settings.get('engine'))
+    region = str(settings.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip() or 'ap-south-1'
+    connection_name = str(settings.get('connection_name') or db_instance_id).strip()
+    db_name_input = str(settings.get('db_name') or settings.get('database_name') or '').strip()
+    username_template = str(settings.get('username_template') or '').strip()
+    plugin_name = str(settings.get('plugin_name') or '').strip()
+    connection_url_override = str(settings.get('connection_url') or '').strip()
+    verify_connection = _as_bool(settings.get('verify_connection'), True)
+
+    allowed_roles_raw = settings.get('allowed_roles')
+    if isinstance(allowed_roles_raw, list):
+        allowed_roles = [str(item or '').strip() for item in allowed_roles_raw if str(item or '').strip()]
+        allowed_roles = allowed_roles if allowed_roles else ['*']
+    else:
+        allowed_roles_text = str(allowed_roles_raw or '*').strip() or '*'
+        if ',' in allowed_roles_text:
+            allowed_roles = [part.strip() for part in allowed_roles_text.split(',') if part.strip()]
+            if not allowed_roles:
+                allowed_roles = ['*']
+        else:
+            allowed_roles = allowed_roles_text
+
+    if not connection_name:
+        raise ValueError('connection_name is required.')
+
+    if push_mode in ('allowed_roles_only', 'roles_only', 'allowed_roles'):
+        # Connection-level allowed_roles update only. No DB admin credential path.
+        VaultManager.update_database_connection_allowed_roles(
+            connection_name=connection_name,
+            allowed_roles=allowed_roles,
+            plane=plane,
+        )
+        checks = [
+            {
+                'name': 'Vault connection selection',
+                'status': 'success',
+                'message': f"Using existing database/config/{connection_name} on {plane}.",
+            },
+            {
+                'name': 'Allowed roles update',
+                'status': 'success',
+                'message': f"Updated database/config/{connection_name} allowed_roles to {_format_allowed_roles_display(allowed_roles)}.",
+            },
+        ]
+        return {
+            'status': 'success',
+            'result': {
+                'scope': 'vault_database_connection_push',
+                'label': 'Vault DB Connection Push',
+                'ok': True,
+                'checks': checks,
+                'connection_name': connection_name,
+                'plane': plane,
+                'mode': 'allowed_roles_only',
+                'tested_by': str(tested_by or '').strip(),
+            },
+        }
+
+    if not account_id:
+        raise ValueError('account_id is required.')
+    if not db_instance_id:
+        raise ValueError('db_instance_id is required.')
+    if requested_engine not in ('mysql', 'maria', 'aurora', 'postgres', 'redshift'):
+        raise ValueError('engine must be one of mysql, postgres, or redshift.')
+    admin_username, admin_password, admin_secret_ref, admin_secret_kv_version = _resolve_vault_admin_credentials_for_push(
+        settings,
+        plane=plane,
+    )
+
+    if requested_engine == 'redshift':
+        endpoint = _describe_redshift_cluster_endpoint(cluster_id=db_instance_id, region=region, account_id=account_id)
+        resolved_engine = 'redshift'
+    else:
+        endpoint = _describe_rds_instance_endpoint(instance_id=db_instance_id, region=region, account_id=account_id)
+        resolved_engine = _normalize_db_engine_family(endpoint.get('engine') or requested_engine) or requested_engine
+
+    host = str(endpoint.get('address') or '').strip()
+    try:
+        port = int(endpoint.get('port') or (5439 if resolved_engine == 'redshift' else 5432 if resolved_engine == 'postgres' else 3306))
+    except Exception:
+        port = 5439 if resolved_engine == 'redshift' else 5432 if resolved_engine == 'postgres' else 3306
+    if not host:
+        raise RuntimeError('Database endpoint address is unavailable for the selected instance.')
+
+    if resolved_engine == 'redshift' and not db_name_input:
+        db_name_input = _default_db_name_for_engine(resolved_engine)
+    if resolved_engine == 'postgres' and not db_name_input:
+        db_name_input = _default_db_name_for_engine(resolved_engine)
+
+    final_plugin = plugin_name or _vault_plugin_for_engine(resolved_engine)
+    final_template = username_template or _default_username_template_for_engine(resolved_engine)
+    connection_url = connection_url_override or _build_vault_connection_url(
+        engine_family=resolved_engine,
+        host=host,
+        port=port,
+        db_name=db_name_input,
+    )
+
+    max_open_connections = settings.get('max_open_connections')
+    max_idle_connections = settings.get('max_idle_connections')
+    max_connection_lifetime = str(settings.get('max_connection_lifetime') or '0s').strip() or '0s'
+
+    VaultManager.upsert_database_connection(
+        connection_name=connection_name,
+        plugin_name=final_plugin,
+        connection_url=connection_url,
+        admin_username=admin_username,
+        admin_password=admin_password,
+        allowed_roles=allowed_roles,
+        username_template=final_template,
+        max_open_connections=max_open_connections if max_open_connections is not None else 4,
+        max_idle_connections=max_idle_connections if max_idle_connections is not None else 0,
+        max_connection_lifetime=max_connection_lifetime,
+        verify_connection=verify_connection,
+        plane=plane,
+    )
+
+    current_settings = _load_app_settings()
+    map_key = _vault_connection_map_settings_key(plane)
+    conn_map = _normalize_vault_connection_name_map(current_settings.get(map_key))
+    map_keys = _vault_connection_map_keys(account_id=account_id, engine=resolved_engine, db_instance_id=db_instance_id)
+    for key in map_keys:
+        conn_map[key] = connection_name
+    current_settings[map_key] = conn_map
+    _save_app_settings(current_settings)
+
+    checks = [
+        {
+            'name': 'AWS endpoint discovery',
+            'status': 'success',
+            'message': f"Resolved {host}:{port} for {db_instance_id} ({resolved_engine}).",
+        },
+        {
+            'name': 'Vault connection upsert',
+            'status': 'success',
+            'message': f"Saved database/config/{connection_name} with plugin {final_plugin}.",
+        },
+        {
+            'name': 'NPAMX connection mapping',
+            'status': 'success',
+            'message': 'Stored automatic instance-to-connection mapping for future activations.',
+        },
+    ]
+    if admin_secret_ref:
+        checks.insert(1, {
+            'name': 'Vault admin credential source',
+            'status': 'success',
+            'message': f"Loaded admin username/password from {admin_secret_ref} (kv v{admin_secret_kv_version}).",
+        })
+    return {
+        'status': 'success',
+        'result': {
+            'scope': 'vault_database_connection_push',
+            'label': 'Vault DB Connection Push',
+            'ok': True,
+            'checks': checks,
+            'connection_name': connection_name,
+            'plane': plane,
+            'engine': resolved_engine,
+            'plugin_name': final_plugin,
+            'host': host,
+            'port': port,
+            'db_name': db_name_input,
+            'username_template': final_template,
+            'admin_secret_ref': admin_secret_ref,
+            'mapping_keys': map_keys,
+            'tested_by': str(tested_by or '').strip(),
+        },
+    }
+
+
+def _plane_env_value(name: str, plane: str = '') -> str:
+    norm = str(plane or '').strip().lower()
+    candidates = []
+    if norm in ('nonprod', 'non-prod', 'non_prod', 'dev', 'staging', 'test'):
+        candidates.extend([f'{name}_NONPROD', f'{name}_NON_PROD', f'{name}_DEV'])
+    elif norm in ('prod', 'production'):
+        candidates.extend([f'{name}_PROD', f'{name}_PRODUCTION'])
+    elif norm == 'sandbox':
+        candidates.append(f'{name}_SANDBOX')
+    candidates.append(name)
+    for key in candidates:
+        value = str(os.getenv(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _plane_env_or_secret_value(name: str, plane: str = '') -> str:
+    direct = _plane_env_value(name, plane)
+    if direct:
+        return direct
+    norm = str(plane or '').strip().lower()
+    candidates = []
+    if norm in ('nonprod', 'non-prod', 'non_prod', 'dev', 'staging', 'test'):
+        candidates.extend([f'{name}_SECRET_NAME_NONPROD', f'{name}_SECRET_NAME_NON_PROD', f'{name}_SECRET_NAME_DEV'])
+    elif norm in ('prod', 'production'):
+        candidates.extend([f'{name}_SECRET_NAME_PROD', f'{name}_SECRET_NAME_PRODUCTION'])
+    elif norm == 'sandbox':
+        candidates.append(f'{name}_SECRET_NAME_SANDBOX')
+    candidates.append(f'{name}_SECRET_NAME')
+    for key in candidates:
+        secret_name = str(os.getenv(key) or '').strip()
+        if secret_name:
+            return _get_runtime_secret(secret_name)
+    return ''
+
+
+def _vault_db_helper_ssl_context(plane: str = ''):
+    if str(_plane_env_value('VAULT_DB_HELPER_SKIP_VERIFY', plane) or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        return ssl._create_unverified_context()
+    cacert = _plane_env_value('VAULT_DB_HELPER_CACERT', plane)
+    if cacert:
+        return ssl.create_default_context(cafile=cacert)
+    return None
+
+
+def _fetch_vault_db_user_inventory_via_helper(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    plane = _normalize_vault_plane(settings.get('plane'), 'nonprod')
+    helper_url = str(_plane_env_value('VAULT_DB_HELPER_URL', plane) or '').strip().rstrip('/')
+    if not helper_url:
+        return None
+    shared_token = str(_plane_env_or_secret_value('VAULT_DB_HELPER_SHARED_TOKEN', plane) or '').strip()
+    if not shared_token:
+        raise RuntimeError('Vault DB helper is configured, but VAULT_DB_HELPER_SHARED_TOKEN is missing.')
+    timeout = int(str(_plane_env_value('VAULT_DB_HELPER_TIMEOUT_SEC', plane) or '180').strip() or '180')
+    payload = {
+        'plane': plane,
+        'connection_names': [str(item or '').strip() for item in (settings.get('connection_names') or []) if str(item or '').strip()],
+        'tested_by': str(tested_by or '').strip(),
+    }
+    request_data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        url=helper_url + '/internal/db-user-audit/scan',
+        data=request_data,
+        headers={
+            'Content-Type': 'application/json',
+            'X-NPAMX-Internal-Token': shared_token,
+        },
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_vault_db_helper_ssl_context(plane)) as resp:
+            raw = resp.read().decode('utf-8')
+            result = json.loads(raw) if raw else {}
+            if not isinstance(result, dict):
+                raise RuntimeError('Vault DB helper returned an invalid payload.')
+            return result
+    except urllib.error.HTTPError as exc:
+        raw = ''
+        try:
+            raw = exc.read().decode('utf-8')
+        except Exception:
+            pass
+        raise RuntimeError(f'Vault DB helper HTTP {exc.code}: {raw or exc.reason}') from exc
+    except Exception as exc:
+        raise RuntimeError(f'Vault DB helper request failed: {exc}') from exc
+
+
+def _build_vault_db_connection_inventory_payload(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    plane = _normalize_vault_plane(settings.get('plane'), 'nonprod')
+    try:
+        names = VaultManager.list_database_connections(plane=plane)
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='list')
+        try:
+            print(f"Vault connection inventory refresh failed for plane {plane}: {exc}", flush=True)
+        except Exception:
+            pass
+        return {
+            'status': 'error',
+            'plane': plane,
+            'connections': [],
+            'error_code': code,
+            'error_message': message,
+            'tested_by': tested_by,
+        }
+
+    connections = []
+    for name in names:
+        item = {
+            'connection_name': name,
+            'plane': plane,
+            'plugin_name': '',
+            'engine': 'unknown',
+            'endpoint': '',
+            'allowed_roles': '',
+            'test_supported': False,
+            'status': 'limited',
+            'status_code': '',
+            'status_message': '',
+        }
+        try:
+            config = VaultManager.read_database_connection(name, plane=plane)
+            plugin_name = str(config.get('plugin_name') or '').strip()
+            engine = _infer_vault_connection_engine(plugin_name)
+            connection_url = _extract_vault_connection_url(config)
+            host, port = _extract_vault_connection_host_port(engine, connection_url)
+            item.update({
+                'plugin_name': plugin_name,
+                'engine': engine,
+                'endpoint': f'{host}:{port}' if host else '',
+                'allowed_roles': _format_allowed_roles_display(config.get('allowed_roles')),
+                'test_supported': _supports_live_db_connection_test(engine) and bool(host),
+            })
+            if item['test_supported']:
+                item['status'] = 'ready'
+                item['status_code'] = 'NPAMX-VCONN-READY'
+                item['status_message'] = 'Ready for live connection testing.'
+            elif _supports_live_db_connection_test(engine):
+                item['status'] = 'limited'
+                item['status_code'] = 'NPAMX-VCONN-008'
+                item['status_message'] = 'Connection metadata is incomplete, so NPAMX cannot derive the test endpoint yet.'
+            else:
+                item['status'] = 'limited'
+                item['status_code'] = 'NPAMX-VCONN-007'
+                item['status_message'] = 'Visible in inventory, but live testing is not implemented for this engine yet.'
+        except Exception as exc:
+            code, message = _admin_vault_connection_error_detail(exc, phase='metadata')
+            try:
+                print(f"Vault connection metadata read failed for {name} on plane {plane}: {exc}", flush=True)
+            except Exception:
+                pass
+            item.update({
+                'status': 'error',
+                'status_code': code,
+                'status_message': message,
+            })
+        connections.append(item)
+
+    return {
+        'status': 'success',
+        'plane': plane,
+        'connections': sorted(connections, key=lambda item: (str(item.get('connection_name') or '').lower(), str(item.get('plane') or '').lower())),
+        'tested_by': tested_by,
+    }
+
+
+def _build_vault_db_connection_inventory_test_payload(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    connection_name = str(settings.get('connection_name') or '').strip()
+    plane = _normalize_vault_plane(settings.get('plane'), 'nonprod')
+    if not connection_name:
+        raise ValueError('Vault connection name is required.')
+
+    try:
+        config = VaultManager.read_database_connection(connection_name, plane=plane)
+        plugin_name = str(config.get('plugin_name') or '').strip()
+        engine = _infer_vault_connection_engine(plugin_name)
+        connection_url = _extract_vault_connection_url(config)
+        host, port = _extract_vault_connection_host_port(engine, connection_url)
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='metadata')
+        try:
+            print(f"Vault connection metadata read failed during test for {connection_name} on plane {plane}: {exc}", flush=True)
+        except Exception:
+            pass
+        return {
+            'status': 'error',
+            'result': {
+                'scope': 'vault_database_connection_inventory_test',
+                'label': 'Vault DB Connection Test',
+                'connection_name': connection_name,
+                'plane': plane,
+                'plugin_name': '',
+                'engine': 'unknown',
+                'host': '',
+                'port': '',
+                'allowed_roles': '',
+                'checks': [
+                    {
+                        'name': 'Connection metadata',
+                        'status': 'error',
+                        'code': code,
+                        'message': message,
+                    }
+                ],
+                'ok': False,
+                'grants': [],
+            },
+        }
+
+    result = {
+        'scope': 'vault_database_connection_inventory_test',
+        'label': 'Vault DB Connection Test',
+        'connection_name': connection_name,
+        'plane': plane,
+        'plugin_name': plugin_name,
+        'engine': engine,
+        'host': host,
+        'port': port,
+        'allowed_roles': _format_allowed_roles_display(config.get('allowed_roles')),
+        'checks': [],
+        'ok': False,
+        'grants': [],
+    }
+    checks = [
+        {
+            'name': 'Vault connection selected',
+            'status': 'success',
+            'message': f'Using Vault connection {connection_name} on the {plane} plane.',
+        },
+        {
+            'name': 'Connection metadata',
+            'status': 'success',
+            'message': (
+                f"Plugin {plugin_name or 'unknown'}"
+                + (f", endpoint {host}:{port}." if host else '.')
+            ),
+        },
+    ]
+
+    if not _supports_live_db_connection_test(engine):
+        code, message = _admin_vault_connection_error_detail('unsupported engine', phase='unsupported')
+        checks.append({
+            'name': 'Engine support',
+            'status': 'error',
+            'code': code,
+            'message': message,
+        })
+        result['checks'] = checks
+        return {
+            'status': 'error',
+            'result': result,
+        }
+
+    if not host:
+        code, message = _admin_vault_connection_error_detail('connection_url missing host', phase='metadata')
+        checks.append({
+            'name': 'Connection metadata',
+            'status': 'error',
+            'code': code,
+            'message': message,
+        })
+        result['checks'] = checks
+        return {
+            'status': 'error',
+            'result': result,
+        }
+
+    test_session = None
+    revoke_error = ''
+    cleanup_error = ''
+    try:
+        test_session = VaultManager.create_database_connection_test_session(
+            request_id=str(uuid.uuid4()),
+            engine=engine,
+            requester=tested_by or 'admin',
+            connection_name=connection_name,
+            plane=plane,
+        )
+        result['tested_username'] = _mask_secret(test_session.get('db_username') or '', visible=3)
+        checks.append({
+            'name': 'Vault credential mint',
+            'status': 'success',
+            'message': f"Vault created a temporary read-only user {result['tested_username']} for this connection.",
+        })
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='mint')
+        try:
+            print(f"Vault connection test mint failed for {connection_name} on plane {plane}: {exc}", flush=True)
+        except Exception:
+            pass
+        checks.append({
+            'name': 'Vault credential mint',
+            'status': 'error',
+            'code': code,
+            'message': message,
+        })
+        result['checks'] = checks
+        return {
+            'status': 'error',
+            'result': result,
+        }
+
+    try:
+        if _is_postgres_family_engine(engine):
+            probe = inspect_postgres_connection(
+                host=host,
+                port=int(port or 5432),
+                username=str(test_session.get('db_username') or '').strip(),
+                password=str(test_session.get('vault_token') or '').strip(),
+                database=_extract_vault_connection_database_name(engine, connection_url) or 'postgres',
+            )
+        else:
+            probe = inspect_mysql_connection(
+                host=host,
+                port=int(port or 3306),
+                username=str(test_session.get('db_username') or '').strip(),
+                password=str(test_session.get('vault_token') or '').strip(),
+                database='',
+            )
+        if not probe.get('success'):
+            raise RuntimeError(str(probe.get('error') or 'Database login failed.').strip() or 'Database login failed.')
+
+        profile = probe.get('profile') if isinstance(probe.get('profile'), dict) else {}
+        current_user = str(profile.get('current_user') or '').strip()
+        session_user = str(profile.get('session_user') or '').strip()
+        checks.append({
+            'name': 'Database login',
+            'status': 'success',
+            'message': f'Vault minted credentials successfully and NPAMX logged in as {current_user or session_user or "the generated user"}.',
+        })
+
+        grants = []
+        for grant in (probe.get('grants') or []):
+            text = str(grant or '').strip()
+            if text:
+                grants.append(text)
+        result['grants'] = grants[:10]
+        checks.append({
+            'name': 'Privileges attached',
+            'status': 'success',
+            'message': f'Observed {len(grants)} grant statement(s) on the generated test user.',
+        })
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='login')
+        try:
+            print(f"Vault connection test login failed for {connection_name} on plane {plane}: {exc}", flush=True)
+        except Exception:
+            pass
+        checks.append({
+            'name': 'Database login',
+            'status': 'error',
+            'code': code,
+            'message': message,
+        })
+    finally:
+        if test_session:
+            lease_id = str(test_session.get('lease_id') or '').strip()
+            role_name = str(test_session.get('vault_role_name') or '').strip()
+            session_kind = str(test_session.get('session_kind') or '').strip().lower()
+            if lease_id:
+                try:
+                    VaultManager.revoke_lease(lease_id, plane=plane)
+                except Exception as exc:
+                    revoke_error = str(exc or '').strip()
+                    try:
+                        print(f"Vault connection test lease cleanup failed for {connection_name} on plane {plane}: {exc}", flush=True)
+                    except Exception:
+                        pass
+            if role_name and session_kind not in ('existing_role', 'static'):
+                try:
+                    VaultManager.delete_database_role(role_name, plane=plane)
+                except Exception as exc:
+                    cleanup_error = str(exc or '').strip()
+                    try:
+                        print(f"Vault connection test role cleanup failed for {connection_name} on plane {plane}: {exc}", flush=True)
+                    except Exception:
+                        pass
+
+    if test_session:
+        if revoke_error or cleanup_error:
+            code, message = _admin_vault_connection_error_detail(revoke_error or cleanup_error, phase='cleanup')
+            checks.append({
+                'name': 'Cleanup',
+                'status': 'error',
+                'code': code,
+                'message': message,
+            })
+        else:
+            checks.append({
+                'name': 'Cleanup',
+                'status': 'success',
+                'message': 'Temporary Vault lease and test role were revoked after validation.',
+            })
+
+    result['checks'] = checks
+    result['ok'] = all(item.get('status') != 'error' for item in checks if item.get('status') != 'skipped')
+    return {
+        'status': 'success' if result['ok'] else 'error',
+        'result': result,
+    }
+
+
+def _vault_db_user_origin_hint(username, *, connection_admin_username=''):
+    user = str(username or '').strip().lower()
+    admin_user = str(connection_admin_username or '').strip().lower()
+    if not user:
+        return 'unknown'
+    if user in {'mysql.sys', 'mysql.session', 'mysql.infoschema', 'rdsadmin', 'root'}:
+        return 'system'
+    if admin_user and user == admin_user:
+        return 'vault_connection_admin'
+    if user.startswith('d-') or user.startswith('dwh-'):
+        return 'vault_dynamic'
+    return 'manual_or_unknown'
+
+
+def _build_vault_db_user_inventory_payload(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    plane = _normalize_vault_plane(settings.get('plane'), 'nonprod')
+    helper_payload = _fetch_vault_db_user_inventory_via_helper(settings, tested_by=tested_by)
+    if isinstance(helper_payload, dict):
+        return helper_payload
+    requested_connections = [str(item or '').strip() for item in (settings.get('connection_names') or []) if str(item or '').strip()]
+    if requested_connections:
+        connection_names = sorted(dict.fromkeys(requested_connections))
+    else:
+        connection_names = sorted(VaultManager.list_database_connections(plane=plane) or [])
+    if not connection_names:
+        return {
+            'status': 'success',
+            'plane': plane,
+            'connections': [],
+            'rows': [],
+            'summary': {
+                'selected_connections': 0,
+                'processed_connections': 0,
+                'supported_connections': 0,
+                'unsupported_connections': 0,
+                'error_connections': 0,
+                'total_users': 0,
+                'vault_dynamic_users': 0,
+                'manual_or_unknown_users': 0,
+            },
+        }
+
+    connection_cards = []
+    rows = []
+    supported_connections = 0
+    unsupported_connections = 0
+    error_connections = 0
+
+    for connection_name in connection_names:
+        connection_card = {
+            'connection_name': connection_name,
+            'plane': plane,
+            'status': 'success',
+            'code': '',
+            'message': '',
+            'engine': '',
+            'plugin_name': '',
+            'host': '',
+            'port': '',
+            'user_count': 0,
+        }
+        audit_session = None
+        revoke_error = ''
+        cleanup_error = ''
+        try:
+            config = VaultManager.read_database_connection(connection_name, plane=plane)
+            plugin_name = str(config.get('plugin_name') or '').strip()
+            engine = _infer_vault_connection_engine(plugin_name)
+            connection_url = _extract_vault_connection_url(config)
+            host, port = _extract_vault_connection_host_port(engine, connection_url)
+            details = config.get('connection_details') if isinstance(config.get('connection_details'), dict) else {}
+            connection_admin_username = str(details.get('username') or '').strip()
+            connection_card.update({
+                'engine': engine,
+                'plugin_name': plugin_name,
+                'host': host,
+                'port': port,
+            })
+            if not _is_mysql_family_engine(engine):
+                code, message = _admin_vault_connection_error_detail('unsupported engine', phase='unsupported')
+                connection_card.update({'status': 'unsupported', 'code': code, 'message': message})
+                unsupported_connections += 1
+                connection_cards.append(connection_card)
+                continue
+            if not host:
+                raise RuntimeError('connection_url missing host')
+
+            audit_session = VaultManager.create_or_read_database_user_audit_session(
+                request_id=str(uuid.uuid4()),
+                engine=engine,
+                requester=tested_by or 'admin',
+                connection_name=connection_name,
+                plane=plane,
+            )
+            probe = list_mysql_database_users(
+                host=host,
+                port=int(port or 3306),
+                username=str(audit_session.get('db_username') or '').strip(),
+                password=str(audit_session.get('vault_token') or '').strip(),
+            )
+            if not probe.get('success'):
+                raise RuntimeError(str(probe.get('error') or 'Database user inventory failed.').strip() or 'Database user inventory failed.')
+
+            users = probe.get('users') if isinstance(probe.get('users'), list) else []
+            connection_card['user_count'] = len(users)
+            session_kind = str(audit_session.get('session_kind') or 'dynamic').strip().lower()
+            if session_kind == 'static':
+                connection_card['message'] = f'Retrieved {len(users)} user record(s) using the fixed NPAMX audit role.'
+            else:
+                connection_card['message'] = f'Retrieved {len(users)} user record(s) from mysql.user.'
+            supported_connections += 1
+            for item in users:
+                username = str((item or {}).get('username') or '').strip()
+                plugin = str((item or {}).get('plugin') or '').strip()
+                host_value = str((item or {}).get('host') or '').strip()
+                origin_hint = _vault_db_user_origin_hint(username, connection_admin_username=connection_admin_username)
+                rows.append({
+                    'connection_name': connection_name,
+                    'engine': engine,
+                    'host': host,
+                    'port': str(port or '3306'),
+                    'username': username,
+                    'db_host': host_value,
+                    'plugin': plugin,
+                    'origin_hint': origin_hint,
+                    'vault_managed': origin_hint == 'vault_dynamic',
+                })
+        except Exception as exc:
+            code, message = _admin_vault_connection_error_detail(exc, phase='login')
+            connection_card.update({'status': 'error', 'code': code, 'message': message})
+            error_connections += 1
+            try:
+                print(f"Vault DB user inventory failed for {connection_name} on plane {plane}: {exc}", flush=True)
+            except Exception:
+                pass
+        finally:
+            if audit_session and str(audit_session.get('session_kind') or 'dynamic').strip().lower() != 'static':
+                lease_id = str(audit_session.get('lease_id') or '').strip()
+                role_name = str(audit_session.get('vault_role_name') or '').strip()
+                if lease_id:
+                    try:
+                        VaultManager.revoke_lease(lease_id, plane=plane)
+                    except Exception as exc:
+                        revoke_error = str(exc or '').strip()
+                if role_name:
+                    try:
+                        VaultManager.delete_database_role(role_name, plane=plane)
+                    except Exception as exc:
+                        cleanup_error = str(exc or '').strip()
+                if (revoke_error or cleanup_error) and connection_card.get('status') == 'success':
+                    code, message = _admin_vault_connection_error_detail(revoke_error or cleanup_error, phase='cleanup')
+                    connection_card.update({'status': 'warning', 'code': code, 'message': message})
+        connection_cards.append(connection_card)
+
+    rows.sort(key=lambda item: ((item.get('connection_name') or '').lower(), (item.get('username') or '').lower(), (item.get('db_host') or '').lower()))
+    return {
+        'status': 'success',
+        'plane': plane,
+        'connections': connection_cards,
+        'rows': rows,
+        'summary': {
+            'selected_connections': len(connection_names),
+            'processed_connections': len(connection_cards),
+            'supported_connections': supported_connections,
+            'unsupported_connections': unsupported_connections,
+            'error_connections': error_connections,
+            'total_users': len(rows),
+            'vault_dynamic_users': sum(1 for item in rows if item.get('vault_managed')),
+            'system_users': sum(1 for item in rows if item.get('origin_hint') == 'system'),
+            'connection_admin_users': sum(1 for item in rows if item.get('origin_hint') == 'vault_connection_admin'),
+            'manual_or_unknown_users': sum(1 for item in rows if item.get('origin_hint') == 'manual_or_unknown'),
+        },
+    }
+
+
+def _build_db_connection_test_payload(raw_settings, *, tested_by=''):
+    settings = raw_settings if isinstance(raw_settings, dict) else {}
+    account_id = re.sub(r'[^0-9]', '', str(settings.get('account_id') or '').strip())
+    db_instance_id = str(settings.get('db_instance_id') or settings.get('rds_instance') or '').strip()
+    explicit_connection_name = str(settings.get('connection_name') or '').strip()
+    region = str(settings.get('region') or _aws_region_for_runtime()).strip() or _aws_region_for_runtime()
+    if not account_id:
+        raise ValueError('AWS account is required.')
+    if not db_instance_id:
+        raise ValueError('RDS instance is required.')
+
+    account_meta = (CONFIG.get('accounts') or {}).get(account_id) or {}
+    account_name = str(account_meta.get('name') or account_meta.get('account_name') or '').strip()
+    account_env = _resolve_account_environment(account_id)
+    execution_plane = _resolve_execution_plane(account_env)
+    auth_profile = _resolve_rds_auth_profile(instance_id=db_instance_id, region=region, account_id=account_id) or {}
+    endpoint = _describe_rds_instance_endpoint(instance_id=db_instance_id, region=region, account_id=account_id)
+    engine = str(auth_profile.get('engine') or endpoint.get('engine') or '').strip()
+    mapped_connection_name = _resolve_vault_connection_name_override(
+        account_id=account_id,
+        engine=engine,
+        db_instance_id=db_instance_id,
+        execution_plane=execution_plane,
+    )
+    selected_connection_name, selected_connection_source = _resolve_best_vault_connection_for_instance(
+        plane=execution_plane,
+        desired_engine=engine,
+        endpoint_host=str(endpoint.get('address') or '').strip(),
+        db_instance_id=db_instance_id,
+        explicit_connection_name=explicit_connection_name,
+        mapped_connection_name=mapped_connection_name,
+    )
+
+    result = {
+        'scope': 'database_connection_test',
+        'label': 'Vault DB connection test',
+        'account_id': account_id,
+        'account_name': account_name,
+        'instance_id': db_instance_id,
+        'region': region,
+        'engine': engine,
+        'environment': account_env,
+        'execution_plane': execution_plane,
+        'connection_mode': 'direct',
+        'checks': [],
+        'ok': False,
+        'grants': [],
+    }
+    if selected_connection_name:
+        result['connection_name'] = selected_connection_name
+    result['connection_source'] = selected_connection_source
+
+    checks = [
+        {
+            'name': 'Target selection',
+            'status': 'success',
+            'message': (
+                f"Using account {account_name or account_id}, instance {db_instance_id}, "
+                f"engine {engine or 'unknown'}, region {region}."
+            ),
+        },
+        {
+            'name': 'Vault execution plane',
+            'status': 'success',
+            'message': f'Vault plane resolved to {execution_plane or "default"} for {account_env or "unknown"} environment.',
+        },
+    ]
+    checks.append({
+        'name': 'Vault connection target',
+        'status': 'success' if selected_connection_name else 'skipped',
+        'message': (
+            (
+                f'Using Vault connection {selected_connection_name} '
+                f'({selected_connection_source.replace("_", " ")}).'
+            )
+            if selected_connection_name
+            else 'No matching Vault connection resolved for this instance. Configure mapping or set connection name explicitly.'
+        ),
+    })
+
+    if not _supports_live_db_connection_test(engine):
+        checks.append({
+            'name': 'Engine support',
+            'status': 'error',
+            'message': 'This test flow currently supports MySQL-family and PostgreSQL engines only.',
+        })
+        result['checks'] = checks
+        return {
+            'status': 'error',
+            'result': result,
+        }
+
+    if _is_postgres_family_engine(engine):
+        connect_host = str(endpoint.get('address') or '').strip()
+        connect_port = int(endpoint.get('port') or 5432)
+        checks.append({
+            'name': 'Connection path',
+            'status': 'success',
+            'message': 'Using the RDS PostgreSQL endpoint from the PAM backend.',
+        })
+    else:
+        proxy_host, proxy_port, _plane = _resolve_db_connect_proxy_endpoint(
+            account_env=account_env,
+            execution_plane=execution_plane,
+            account_id=account_id,
+        )
+        connect_host = str(proxy_host or '').strip()
+        connect_port = int(proxy_port or 3306) if str(proxy_port or '').strip() else 3306
+        if connect_host and connect_host != 'proxy-not-configured':
+            result['connection_mode'] = 'proxy'
+            checks.append({
+                'name': 'Connection path',
+                'status': 'success',
+                'message': f'Using the configured RDS Proxy path for this account on port {connect_port}.',
+            })
+        else:
+            connect_host = str(endpoint.get('address') or '').strip()
+            connect_port = int(endpoint.get('port') or 3306)
+            checks.append({
+                'name': 'Connection path',
+                'status': 'success',
+                'message': 'No account-specific RDS Proxy was configured, so the test is using the RDS instance endpoint from the PAM backend only.',
+            })
+
+    test_session = None
+    revoke_error = ''
+    cleanup_error = ''
+    try:
+        test_session = VaultManager.create_database_connection_test_session(
+            request_id=str(uuid.uuid4()),
+            engine=engine,
+            requester=tested_by or 'admin',
+            connection_name=selected_connection_name,
+            plane=execution_plane,
+        )
+        result['tested_username'] = _mask_secret(test_session.get('db_username') or '', visible=3)
+        checks.append({
+            'name': 'Vault credential mint',
+            'status': 'success',
+            'message': f"Vault created a temporary read-only test user {result['tested_username']} and returned a short-lived password.",
+        })
+
+        if _is_postgres_family_engine(engine):
+            target_db_name = str(auth_profile.get('db_name') or endpoint.get('name') or 'postgres').strip() or 'postgres'
+            probe = inspect_postgres_connection(
+                host=connect_host,
+                port=connect_port,
+                username=str(test_session.get('db_username') or '').strip(),
+                password=str(test_session.get('vault_token') or '').strip(),
+                database=target_db_name,
+            )
+        else:
+            probe = inspect_mysql_connection(
+                host=connect_host,
+                port=connect_port,
+                username=str(test_session.get('db_username') or '').strip(),
+                password=str(test_session.get('vault_token') or '').strip(),
+                database='',
+            )
+        if not probe.get('success'):
+            raise RuntimeError(str(probe.get('error') or 'Database login failed.').strip() or 'Database login failed.')
+
+        profile = probe.get('profile') if isinstance(probe.get('profile'), dict) else {}
+        current_user = str(profile.get('current_user') or '').strip()
+        session_user = str(profile.get('session_user') or '').strip()
+        checks.append({
+            'name': 'Database login',
+            'status': 'success',
+            'message': f"Connection succeeded through {result['connection_mode']}. current_user={current_user or 'unknown'}, session_user={session_user or 'unknown'}.",
+        })
+
+        grants = []
+        for grant in (probe.get('grants') or []):
+            text = str(grant or '').strip()
+            if text:
+                grants.append(text)
+        result['grants'] = grants[:10]
+        checks.append({
+            'name': 'Privileges attached',
+            'status': 'success',
+            'message': (
+                f'Observed {len(grants)} grant statement(s) on the generated test user.'
+                + (f' First grant: {grants[0]}' if grants else '')
+            ),
+        })
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='login')
+        checks.append({
+            'name': 'Connection validation',
+            'status': 'error',
+            'code': code,
+            'message': message,
+        })
+    finally:
+        if test_session:
+            lease_id = str(test_session.get('lease_id') or '').strip()
+            role_name = str(test_session.get('vault_role_name') or '').strip()
+            session_kind = str(test_session.get('session_kind') or '').strip().lower()
+            if lease_id:
+                try:
+                    VaultManager.revoke_lease(lease_id, plane=execution_plane)
+                except Exception as exc:
+                    revoke_error = str(exc or '').strip()
+            if role_name and session_kind not in ('existing_role', 'static'):
+                try:
+                    VaultManager.delete_database_role(role_name, plane=execution_plane)
+                except Exception as exc:
+                    cleanup_error = str(exc or '').strip()
+
+    if test_session:
+        if revoke_error or cleanup_error:
+            checks.append({
+                'name': 'Cleanup',
+                'status': 'error',
+                'message': (revoke_error or cleanup_error or 'Temporary test credentials could not be fully cleaned up.').strip(),
+            })
+        else:
+            checks.append({
+                'name': 'Cleanup',
+                'status': 'success',
+                'message': 'Temporary Vault lease and database role were revoked after the test.',
+            })
+
+    result['checks'] = checks
+    result['ok'] = all(item.get('status') != 'error' for item in checks if item.get('status') != 'skipped')
+    return {
+        'status': 'success' if result['ok'] else 'error',
+        'result': result,
+    }
+
+
 def _sso_admin_client():
-    return _aws_client('sso-admin', region_name='ap-south-1', assume_idc_role=True)
+    return _aws_client('sso-admin', region_name=_identity_center_region(), assume_idc_role=True)
 
 
 def _identitystore_client():
-    return _aws_client('identitystore', region_name='ap-south-1', assume_idc_role=True)
+    return _aws_client('identitystore', region_name=_identity_center_region(), assume_idc_role=True)
 
 
 def _organizations_client():
     return _aws_client('organizations', assume_idc_role=True)
+
+
+def _ensure_identity_center_runtime_config():
+    identity_store_id = str(CONFIG.get('identity_store_id') or '').strip()
+    instance_arn = str(CONFIG.get('sso_instance_arn') or '').strip()
+    if identity_store_id and instance_arn:
+        return
+    try:
+        sso_admin = _sso_admin_client()
+        resp = sso_admin.list_instances()
+        instances = resp.get('Instances') or []
+        if not instances:
+            return
+        first = instances[0] or {}
+        if not instance_arn:
+            CONFIG['sso_instance_arn'] = str(first.get('InstanceArn') or '').strip()
+        if not identity_store_id:
+            CONFIG['identity_store_id'] = str(first.get('IdentityStoreId') or '').strip()
+    except Exception as exc:
+        try:
+            print(f"Identity Center runtime config discovery failed: {exc}", flush=True)
+        except Exception:
+            pass
 
 # Request-level activation coordination (prevents duplicate Vault user creation under concurrent retries).
 _DB_ACTIVATION_LOCKS = {}
@@ -308,13 +2622,38 @@ def _set_activation_error(req, message):
     req['activation_progress'] = pg
 
 
+def _safe_activation_error_for_response(req):
+    if not isinstance(req, dict):
+        return ''
+    progress = req.get('activation_progress') if isinstance(req.get('activation_progress'), dict) else {}
+    progress_error = str(progress.get('error') or '').strip()
+    raw_error = str(req.get('activation_error') or '').strip()
+    if raw_error:
+        safe_msg, safe_code = _public_db_activation_error(raw_error)
+        if safe_code != 'DB_ACTIVATION_FAILED':
+            return safe_msg
+    if progress_error:
+        return progress_error
+    if not raw_error:
+        return ''
+    safe_msg, _safe_code = _public_db_activation_error(raw_error)
+    return safe_msg
+
+
 def _activation_progress_for_response(req):
     pg = _ensure_activation_progress(req)
+    raw_error = str(req.get('activation_error') or '').strip()
+    safe_error = _safe_activation_error_for_response(req)
+    message = pg.get('message', '')
+    if raw_error:
+        safe_msg, safe_code = _public_db_activation_error(raw_error)
+        if safe_code != 'DB_ACTIVATION_FAILED' and str(message or '').strip() == 'Database access activation failed. Please retry or contact an administrator. (Details are in server logs.)':
+            message = safe_msg
     return {
         'steps': pg.get('steps', []),
         'current_step': pg.get('current_step', ''),
-        'message': pg.get('message', ''),
-        'error': pg.get('error', ''),
+        'message': message,
+        'error': safe_error,
         'updated_at': pg.get('updated_at', ''),
     }
 
@@ -332,10 +2671,1581 @@ if _data_dir:
     except Exception:
         pass
 FEATURE_FLAGS_PATH = os.getenv('FEATURE_FLAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'feature_flags.json')
+APP_SETTINGS_PATH = os.getenv('APP_SETTINGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'app_settings.json')
 ORG_HIERARCHY_TAGS_PATH = os.getenv('ORG_HIERARCHY_TAGS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_tags.json')
 ORG_HIERARCHY_CACHE_PATH = os.getenv('ORG_HIERARCHY_CACHE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_hierarchy_cache.json')
-GUARDRAILS_CONFIG_PATH = os.getenv('GUARDRAILS_CONFIG_PATH') or os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
-LOCAL_USER_GROUPS_PATH = os.getenv('LOCAL_USER_GROUPS_PATH') or os.path.join(os.path.dirname(__file__), 'user_groups.json')
+AWS_RUNTIME_CACHE_PATH = os.getenv('AWS_RUNTIME_CACHE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'aws_runtime_cache.json')
+GUARDRAILS_CONFIG_PATH = os.getenv('GUARDRAILS_CONFIG_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'guardrails_config.json')
+LEGACY_GUARDRAILS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'guardrails_config.json')
+LOCAL_USER_GROUPS_PATH = os.getenv('LOCAL_USER_GROUPS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'user_groups.json')
+LOCAL_ORG_USERS_PATH = os.getenv('LOCAL_ORG_USERS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'org_users.json')
+USER_BUSINESS_PROFILES_PATH = os.getenv('USER_BUSINESS_PROFILES_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'user_business_profiles.json')
+IAM_ROLE_CATALOG_PATH = os.getenv('IAM_ROLE_CATALOG_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'iam_role_catalog.json')
+PAM_APP_ROLE_CATALOG_PATH = os.getenv('PAM_APP_ROLE_CATALOG_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'pam_app_roles.json')
+USER_FEEDBACK_PATH = os.getenv('USER_FEEDBACK_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'user_feedback.json')
+ANNOUNCEMENTS_PATH = os.getenv('ANNOUNCEMENTS_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'announcements.json')
+DB_USER_AUDIT_STATE_PATH = os.getenv('DB_USER_AUDIT_STATE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'db_user_audit_state.json')
+DESKTOP_AGENT_STATE_PATH = os.getenv('DESKTOP_AGENT_STATE_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'desktop_agent_state.json')
+LEGACY_LOCAL_USER_GROUPS_PATH = os.path.join(os.path.dirname(__file__), 'user_groups.json')
+LEGACY_LOCAL_ORG_USERS_PATH = os.path.join(os.path.dirname(__file__), 'org_users.json')
+IDLE_SESSION_TIMEOUT_MINUTES = max(5, int(os.environ.get('IDLE_SESSION_TIMEOUT_MINUTES', '30')))
+JUMPCLOUD_PROFILE_CACHE_TTL_SECONDS = max(60, int(os.environ.get('JUMPCLOUD_PROFILE_CACHE_TTL_SECONDS', '300')))
+_JUMPCLOUD_PROFILE_CACHE = {}
+_JUMPCLOUD_PROFILE_CACHE_LOCK = threading.Lock()
+MASKED_SETTING_SENTINEL = '__CONFIGURED__'
+NOTIFICATION_AUDIENCE_ROLES = ('Employee', 'Engineer', 'Admin', 'SuperAdmin')
+_JSON_STATE_WARNING_PATHS = set()
+
+
+def _ensure_parent_dir(path):
+    parent = os.path.dirname(str(path or '').strip()) or '.'
+    os.makedirs(parent, exist_ok=True)
+
+
+def _load_json_state_file(path, default_payload, legacy_paths=None):
+    target = str(path or '').strip()
+    default_obj = copy.deepcopy(default_payload)
+    paths = [target] + [str(p or '').strip() for p in (legacy_paths or []) if str(p or '').strip()]
+    for candidate in paths:
+        if not candidate or not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, 'r') as f:
+                raw = f.read()
+            if not str(raw or '').strip():
+                if candidate == target and target:
+                    try:
+                        _ensure_parent_dir(target)
+                        with open(target, 'w') as f:
+                            json.dump(default_obj, f, indent=2)
+                    except Exception:
+                        pass
+                return copy.deepcopy(default_obj)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                if candidate != target and target:
+                    _ensure_parent_dir(target)
+                    with open(target, 'w') as f:
+                        json.dump(data, f, indent=2)
+                return data
+        except Exception as exc:
+            try:
+                if candidate not in _JSON_STATE_WARNING_PATHS:
+                    print(f"Warning: failed to load JSON state from {candidate}: {exc}", flush=True)
+                    _JSON_STATE_WARNING_PATHS.add(candidate)
+            except Exception:
+                pass
+            if candidate == target and target:
+                try:
+                    _ensure_parent_dir(target)
+                    with open(target, 'w') as f:
+                        json.dump(default_obj, f, indent=2)
+                except Exception:
+                    pass
+                return copy.deepcopy(default_obj)
+    if target:
+        try:
+            _ensure_parent_dir(target)
+            with open(target, 'w') as f:
+                json.dump(default_obj, f, indent=2)
+        except Exception:
+            pass
+    return default_obj
+
+
+def _save_json_state_file(path, payload):
+    target = str(path or '').strip()
+    if not target:
+        return
+    _ensure_parent_dir(target)
+    with open(target, 'w') as f:
+        json.dump(payload, f, indent=2)
+
+
+def _load_db_user_audit_state():
+    data = _load_json_state_file(
+        DB_USER_AUDIT_STATE_PATH,
+        {'last_run': {}, 'latest_summary': {}, 'latest_rows': []},
+    )
+    return data if isinstance(data, dict) else {'last_run': {}, 'latest_summary': {}, 'latest_rows': []}
+
+
+def _save_db_user_audit_state(payload):
+    src = payload if isinstance(payload, dict) else {}
+    clean = {
+        'last_run': src.get('last_run') if isinstance(src.get('last_run'), dict) else {},
+        'latest_summary': src.get('latest_summary') if isinstance(src.get('latest_summary'), dict) else {},
+        'latest_rows': [item for item in (src.get('latest_rows') or []) if isinstance(item, dict)][:500],
+    }
+    _save_json_state_file(DB_USER_AUDIT_STATE_PATH, clean)
+
+
+def _parse_iso_datetime_utc(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _normalize_desktop_agent_id(value):
+    cleaned = re.sub(r'[^A-Za-z0-9_.:-]+', '-', str(value or '').strip()).strip('-')
+    if cleaned:
+        return cleaned[:128]
+    return f'agent-{uuid.uuid4().hex[:12]}'
+
+
+def _normalize_desktop_agent_record(record, *, agent_id=''):
+    src = record if isinstance(record, dict) else {}
+    normalized_id = _normalize_desktop_agent_id(agent_id or src.get('agent_id'))
+    email = str(src.get('user_email') or '').strip().lower()
+    status_raw = str(src.get('last_status') or src.get('status') or '').strip().lower()
+    if status_raw in ('ok', 'success', 'healthy', 'connected'):
+        status = 'connected'
+    elif status_raw in ('error', 'failed', 'failure', 'disconnected'):
+        status = 'error'
+    else:
+        status = 'unknown'
+    registered_at = _parse_iso_datetime_utc(src.get('registered_at'))
+    last_seen_at = _parse_iso_datetime_utc(src.get('last_seen_at'))
+    updated_at = _parse_iso_datetime_utc(src.get('updated_at'))
+    return {
+        'agent_id': normalized_id,
+        'user_email': email,
+        'user_name': str(src.get('user_name') or '').strip(),
+        'host': str(src.get('host') or src.get('hostname') or '').strip(),
+        'platform': str(src.get('platform') or src.get('os') or '').strip(),
+        'version': str(src.get('version') or '').strip(),
+        'network_scope': str(src.get('network_scope') or src.get('network') or '').strip(),
+        'last_status': status,
+        'last_error': str(src.get('last_error') or src.get('error') or '').strip()[:500],
+        'registered_at': (registered_at.isoformat() if registered_at else ''),
+        'last_seen_at': (last_seen_at.isoformat() if last_seen_at else ''),
+        'updated_at': (updated_at.isoformat() if updated_at else ''),
+    }
+
+
+def _desktop_agent_token_fingerprint(token):
+    raw = str(token or '').strip()
+    if not raw:
+        return ''
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _normalize_desktop_agent_auth_token(record, *, token_hash=''):
+    src = record if isinstance(record, dict) else {}
+    normalized_hash = str(token_hash or src.get('token_hash') or '').strip().lower()
+    if not re.fullmatch(r'[a-f0-9]{64}', normalized_hash or ''):
+        return {}
+    issued_at = _parse_iso_datetime_utc(src.get('issued_at'))
+    expires_at = _parse_iso_datetime_utc(src.get('expires_at'))
+    last_seen_at = _parse_iso_datetime_utc(src.get('last_seen_at'))
+    revoked_at = _parse_iso_datetime_utc(src.get('revoked_at'))
+    if issued_at:
+        hard_expiry = issued_at + timedelta(hours=24)
+        if expires_at is None or expires_at > hard_expiry:
+            expires_at = hard_expiry
+    agent_raw = str(src.get('agent_id') or '').strip()
+    agent_id = _normalize_desktop_agent_id(agent_raw) if agent_raw else ''
+    return {
+        'token_hash': normalized_hash,
+        'agent_id': agent_id,
+        'user_email': str(src.get('user_email') or '').strip().lower(),
+        'issued_at': issued_at.isoformat() if issued_at else '',
+        'expires_at': expires_at.isoformat() if expires_at else '',
+        'last_seen_at': last_seen_at.isoformat() if last_seen_at else '',
+        'revoked_at': revoked_at.isoformat() if revoked_at else '',
+        'created_by': str(src.get('created_by') or '').strip().lower(),
+    }
+
+
+def _normalize_desktop_agent_pairing_record(record, *, device_code=''):
+    src = record if isinstance(record, dict) else {}
+    normalized_device_code = str(device_code or src.get('device_code') or '').strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]{20,128}', normalized_device_code or ''):
+        return {}
+    normalized_user_code = str(src.get('user_code') or '').strip().upper()
+    if not re.fullmatch(r'[A-Z0-9]{6,12}', normalized_user_code or ''):
+        return {}
+    status_raw = str(src.get('status') or '').strip().lower()
+    status = status_raw if status_raw in ('pending', 'approved', 'expired', 'cancelled', 'consumed') else 'pending'
+    requested_at = _parse_iso_datetime_utc(src.get('requested_at'))
+    expires_at = _parse_iso_datetime_utc(src.get('expires_at'))
+    approved_at = _parse_iso_datetime_utc(src.get('approved_at'))
+    token_expires_at = _parse_iso_datetime_utc(src.get('token_expires_at'))
+    agent_raw = str(src.get('agent_id') or '').strip()
+    agent_id = _normalize_desktop_agent_id(agent_raw) if agent_raw else ''
+    return {
+        'device_code': normalized_device_code,
+        'user_code': normalized_user_code,
+        'agent_id': agent_id,
+        'user_email': str(src.get('user_email') or '').strip().lower(),
+        'user_name': str(src.get('user_name') or '').strip(),
+        'host': str(src.get('host') or src.get('hostname') or '').strip(),
+        'platform': str(src.get('platform') or src.get('os') or '').strip(),
+        'version': str(src.get('version') or '').strip(),
+        'status': status,
+        'token_hash': str(src.get('token_hash') or '').strip().lower(),
+        'access_token': str(src.get('access_token') or '').strip()[:512],
+        'created_by': str(src.get('created_by') or '').strip().lower(),
+        'requested_at': requested_at.isoformat() if requested_at else '',
+        'expires_at': expires_at.isoformat() if expires_at else '',
+        'approved_at': approved_at.isoformat() if approved_at else '',
+        'token_expires_at': token_expires_at.isoformat() if token_expires_at else '',
+    }
+
+
+def _load_desktop_agent_state():
+    data = _load_json_state_file(
+        DESKTOP_AGENT_STATE_PATH,
+        {'agents': {}, 'auth_tokens': {}, 'pairing_sessions': {}, 'updated_at': ''},
+    )
+    src = data if isinstance(data, dict) else {}
+    agents_src = src.get('agents')
+    agents = {}
+    if isinstance(agents_src, dict):
+        for raw_id, record in agents_src.items():
+            normalized = _normalize_desktop_agent_record(record, agent_id=raw_id)
+            if normalized.get('agent_id'):
+                agents[normalized['agent_id']] = normalized
+    elif isinstance(agents_src, list):
+        for record in agents_src:
+            if not isinstance(record, dict):
+                continue
+            normalized = _normalize_desktop_agent_record(record)
+            if normalized.get('agent_id'):
+                agents[normalized['agent_id']] = normalized
+    tokens_src = src.get('auth_tokens')
+    auth_tokens = {}
+    if isinstance(tokens_src, dict):
+        for raw_hash, record in tokens_src.items():
+            normalized = _normalize_desktop_agent_auth_token(record, token_hash=raw_hash)
+            if normalized.get('token_hash'):
+                auth_tokens[normalized['token_hash']] = normalized
+    pairing_src = src.get('pairing_sessions')
+    pairing_sessions = {}
+    if isinstance(pairing_src, dict):
+        for raw_device_code, record in pairing_src.items():
+            normalized = _normalize_desktop_agent_pairing_record(record, device_code=raw_device_code)
+            if normalized.get('device_code'):
+                pairing_sessions[normalized['device_code']] = normalized
+    return {
+        'agents': agents,
+        'auth_tokens': auth_tokens,
+        'pairing_sessions': pairing_sessions,
+        'updated_at': str(src.get('updated_at') or '').strip(),
+    }
+
+
+def _save_desktop_agent_state(payload):
+    src = payload if isinstance(payload, dict) else {}
+    agents = src.get('agents') if isinstance(src.get('agents'), dict) else {}
+    clean_agents = {}
+    for idx, (raw_id, record) in enumerate(agents.items()):
+        if idx >= 5000:
+            break
+        normalized = _normalize_desktop_agent_record(record, agent_id=raw_id)
+        if normalized.get('agent_id'):
+            clean_agents[normalized['agent_id']] = normalized
+    auth_tokens = src.get('auth_tokens') if isinstance(src.get('auth_tokens'), dict) else {}
+    clean_tokens = {}
+    for idx, (raw_hash, record) in enumerate(auth_tokens.items()):
+        if idx >= 10000:
+            break
+        normalized = _normalize_desktop_agent_auth_token(record, token_hash=raw_hash)
+        if normalized.get('token_hash'):
+            clean_tokens[normalized['token_hash']] = normalized
+    pairing_sessions = src.get('pairing_sessions') if isinstance(src.get('pairing_sessions'), dict) else {}
+    clean_pairing_sessions = {}
+    for idx, (raw_device_code, record) in enumerate(pairing_sessions.items()):
+        if idx >= 20000:
+            break
+        normalized = _normalize_desktop_agent_pairing_record(record, device_code=raw_device_code)
+        if normalized.get('device_code'):
+            clean_pairing_sessions[normalized['device_code']] = normalized
+    clean = {
+        'agents': clean_agents,
+        'auth_tokens': clean_tokens,
+        'pairing_sessions': clean_pairing_sessions,
+        'updated_at': str(src.get('updated_at') or datetime.now(timezone.utc).isoformat()).strip(),
+    }
+    _save_json_state_file(DESKTOP_AGENT_STATE_PATH, clean)
+
+
+def _load_local_org_users():
+    data = _load_json_state_file(
+        LOCAL_ORG_USERS_PATH,
+        {'users': []},
+        legacy_paths=[LEGACY_LOCAL_ORG_USERS_PATH],
+    )
+    if isinstance(data, dict) and isinstance(data.get('users'), list):
+        return data
+    return {'users': []}
+
+
+def _save_local_org_users(payload):
+    clean = {'users': payload.get('users') if isinstance(payload, dict) and isinstance(payload.get('users'), list) else []}
+    _save_json_state_file(LOCAL_ORG_USERS_PATH, clean)
+
+
+def _load_local_user_groups():
+    data = _load_json_state_file(
+        LOCAL_USER_GROUPS_PATH,
+        {'groups': []},
+        legacy_paths=[LEGACY_LOCAL_USER_GROUPS_PATH],
+    )
+    if isinstance(data, dict) and isinstance(data.get('groups'), list):
+        return data
+    return {'groups': []}
+
+
+def _save_local_user_groups(payload):
+    groups = payload.get('groups') if isinstance(payload, dict) and isinstance(payload.get('groups'), list) else []
+    clean = {'groups': [_normalize_local_group_record(item) for item in groups if isinstance(item, dict)]}
+    _save_json_state_file(LOCAL_USER_GROUPS_PATH, clean)
+
+
+def _user_group_ids_for_email(user_email: str) -> list[str]:
+    email = str(user_email or '').strip().lower()
+    if not email:
+        return []
+    groups_data = _load_local_user_groups()
+    groups = groups_data.get('groups') or []
+    return [
+        str(group.get('id') or '').strip()
+        for group in groups
+        if isinstance(group, dict) and email in [str(m or '').strip().lower() for m in (group.get('members') or [])]
+    ]
+
+
+def _normalize_email_address(value):
+    email = str(value or '').strip().lower()
+    if not email or '@' not in email:
+        return ''
+    return email
+
+
+def _normalize_email_list(values):
+    if isinstance(values, list):
+        raw_items = values
+    else:
+        text = str(values or '').strip()
+        raw_items = re.split(r'[\n,;]+', text) if text else []
+    emails = []
+    for value in raw_items:
+        email = _normalize_email_address(value)
+        if email and email not in emails:
+            emails.append(email)
+    return emails
+
+
+def _group_id_from_name(name):
+    raw = str(name or '').strip().lower()
+    raw = re.sub(r'[^a-z0-9]+', '_', raw).strip('_')
+    return raw
+
+
+def _normalize_local_group_record(group):
+    src = group if isinstance(group, dict) else {}
+    name = str(src.get('name') or src.get('id') or '').strip()
+    gid = _group_id_from_name(src.get('id') or name)
+    created_at = str(src.get('created_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    members = []
+    for value in (src.get('members') or []):
+        email = _normalize_email_address(value)
+        if email and email not in members:
+            members.append(email)
+    iam_role_ids = []
+    for value in (src.get('iam_role_ids') or src.get('role_ids') or []):
+        role_id = str(value or '').strip()
+        if role_id and role_id not in iam_role_ids:
+            iam_role_ids.append(role_id)
+    pam_role_ids = []
+    for value in (src.get('pam_role_ids') or src.get('app_role_ids') or []):
+        role_id = str(value or '').strip()
+        if role_id and role_id not in pam_role_ids:
+            pam_role_ids.append(role_id)
+    return {
+        'id': gid,
+        'name': name or gid or 'group',
+        'description': str(src.get('description') or '').strip(),
+        'role': _normalize_pam_role(str(src.get('role') or 'Employee').strip() or 'Employee'),
+        'members': members,
+        'iam_role_ids': iam_role_ids,
+        'pam_role_ids': pam_role_ids,
+        'created_at': created_at,
+        'updated_at': updated_at,
+    }
+
+
+def _is_privileged_group_role(role):
+    return _normalize_pam_role(role or 'Employee') in ('Engineer', 'Admin', 'SuperAdmin')
+
+
+def _pam_admin_records_from_local_groups():
+    role_priority = {'Employee': 1, 'Engineer': 2, 'Admin': 3, 'SuperAdmin': 4}
+    merged = {}
+    groups_payload = _load_local_user_groups()
+    for group in (groups_payload.get('groups') or []):
+        normalized_group = _normalize_local_group_record(group)
+        role = _normalize_pam_role(normalized_group.get('role') or 'Employee')
+        if not _is_privileged_group_role(role):
+            continue
+        for raw_email in (normalized_group.get('members') or []):
+            email = _normalize_email_address(raw_email)
+            if not email:
+                continue
+            current = merged.get(email)
+            if not current or role_priority.get(role, 0) >= role_priority.get(current.get('role') or 'Employee', 0):
+                merged[email] = {'email': email, 'role': role}
+    return list(merged.values())
+
+
+def _default_privileged_group_id_for_role(role):
+    normalized = _normalize_pam_role(role or 'Employee')
+    return {
+        'Engineer': 'pam_engineers',
+        'Admin': 'pam_admins',
+        'SuperAdmin': 'pam_superadmins',
+    }.get(normalized, '')
+
+
+def _is_reserved_privileged_group_id(group_id):
+    gid = _group_id_from_name(group_id)
+    return gid in {'pam_engineers', 'pam_admins', 'pam_superadmins'}
+
+
+def _can_manage_group_definition(actor_role, *, group_id='', existing_role='', requested_role='', mutation='view'):
+    actor = _normalize_pam_role(actor_role or 'Employee')
+    group_role = _normalize_pam_role(existing_role or requested_role or 'Employee')
+    reserved_group = _is_reserved_privileged_group_id(group_id)
+
+    if actor == 'SuperAdmin':
+        if mutation == 'delete' and reserved_group:
+            return False, 'Reserved PAM groups cannot be deleted.'
+        return True, ''
+
+    if actor != 'Admin':
+        return False, 'Only Admin or SuperAdmin can manage PAM groups.'
+
+    if group_role == 'SuperAdmin' or group_id == 'pam_superadmins':
+        return False, 'Only SuperAdmin can manage the PAM SuperAdmins group.'
+
+    if mutation == 'delete' and reserved_group:
+        return False, 'Reserved PAM groups cannot be deleted.'
+
+    return True, ''
+
+
+def _sync_privileged_group_membership(email, role):
+    normalized_email = _normalize_email_address(email)
+    target_role = _normalize_pam_role(role or 'Employee')
+    if not normalized_email:
+        return
+
+    groups_payload = _load_local_user_groups()
+    groups = [_normalize_local_group_record(item) for item in (groups_payload.get('groups') or [])]
+
+    for idx, group in enumerate(groups):
+        if not _is_privileged_group_role(group.get('role')):
+            continue
+        members = [member for member in (group.get('members') or []) if _normalize_email_address(member) != normalized_email]
+        group['members'] = members
+        groups[idx] = _normalize_local_group_record(group)
+
+    if _is_privileged_group_role(target_role):
+        target_idx = next((idx for idx, group in enumerate(groups) if _normalize_pam_role(group.get('role')) == target_role), None)
+        if target_idx is None:
+            default_id = _default_privileged_group_id_for_role(target_role)
+            default_name = {
+                'Engineer': 'PAM Engineers',
+                'Admin': 'PAM Admins',
+                'SuperAdmin': 'PAM SuperAdmins',
+            }.get(target_role, target_role)
+            groups.append(_normalize_local_group_record({
+                'id': default_id or default_name,
+                'name': default_name,
+                'description': f'{target_role} users for NPAMx administration',
+                'role': target_role,
+                'members': [normalized_email],
+            }))
+        else:
+            target_group = dict(groups[target_idx])
+            members = list(target_group.get('members') or [])
+            if normalized_email not in members:
+                members.append(normalized_email)
+            target_group['members'] = members
+            groups[target_idx] = _normalize_local_group_record(target_group)
+
+    groups_payload['groups'] = groups
+    _save_local_user_groups(groups_payload)
+
+
+def _load_user_business_profiles():
+    data = _load_json_state_file(
+        USER_BUSINESS_PROFILES_PATH,
+        {'profiles': []},
+    )
+    profiles = data.get('profiles') if isinstance(data, dict) and isinstance(data.get('profiles'), list) else []
+    return {'profiles': [_normalize_user_business_profile(item) for item in profiles if isinstance(item, dict)]}
+
+
+def _save_user_business_profiles(payload):
+    profiles = payload.get('profiles') if isinstance(payload, dict) and isinstance(payload.get('profiles'), list) else []
+    clean = {'profiles': [_normalize_user_business_profile(item) for item in profiles if isinstance(item, dict)]}
+    _save_json_state_file(USER_BUSINESS_PROFILES_PATH, clean)
+
+
+def _normalize_profile_environment(value):
+    raw = str(value or '').strip().lower()
+    if raw in ('non prod', 'non-production', 'nonproduction'):
+        return 'nonprod'
+    if raw in ('prod', 'nonprod', 'dev', 'sandbox'):
+        return raw
+    return ''
+
+
+def _safe_non_negative_int(value, default=0):
+    try:
+        parsed = int(value)
+    except Exception:
+        return int(default)
+    return parsed if parsed >= 0 else int(default)
+
+
+def _normalize_user_business_profile(profile):
+    src = profile if isinstance(profile, dict) else {}
+    email = _normalize_email_address(src.get('email'))
+    environments = []
+    for item in (src.get('frequent_environments') or src.get('frequentEnvironments') or []):
+        normalized = _normalize_profile_environment(item)
+        if normalized and normalized not in environments:
+            environments.append(normalized)
+    created_at = str(src.get('created_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    return {
+        'email': email,
+        'display_name': str(src.get('display_name') or '').strip(),
+        'manager_email': _normalize_email_address(src.get('manager_email') or src.get('rm_email')),
+        'manager_display_name': str(src.get('manager_display_name') or src.get('rm_display_name') or '').strip(),
+        'manager_manager_email': _normalize_email_address(src.get('manager_manager_email')),
+        'manager_manager_display_name': str(src.get('manager_manager_display_name') or '').strip(),
+        'team': str(src.get('team') or '').strip(),
+        'job_title': str(src.get('job_title') or src.get('title') or '').strip(),
+        'location': str(src.get('location') or '').strip(),
+        'frequent_environments': environments,
+        'rm_change_count': _safe_non_negative_int(src.get('rm_change_count'), 0),
+        'rm_last_changed_at': str(src.get('rm_last_changed_at') or '').strip(),
+        'directory_profile_source': str(src.get('directory_profile_source') or '').strip(),
+        'directory_profile_refreshed_at': str(src.get('directory_profile_refreshed_at') or '').strip(),
+        'created_at': created_at,
+        'updated_at': updated_at,
+    }
+
+
+def _business_profile_required_fields(profile):
+    data = _normalize_user_business_profile(profile)
+    missing = []
+    if not data.get('manager_email'):
+        missing.append('manager_email')
+    if not data.get('team'):
+        missing.append('team')
+    if not data.get('location'):
+        missing.append('location')
+    if not data.get('frequent_environments'):
+        missing.append('frequent_environments')
+    return missing
+
+
+def _find_user_business_profile(email):
+    target = _normalize_email_address(email)
+    if not target:
+        return {}
+    payload = _load_user_business_profiles()
+    for item in payload.get('profiles') or []:
+        if _normalize_email_address(item.get('email')) == target:
+            return item
+    return {}
+
+
+def _upsert_user_business_profile(profile):
+    normalized = _normalize_user_business_profile(profile)
+    email = normalized.get('email')
+    if not email:
+        raise ValueError('email is required')
+    payload = _load_user_business_profiles()
+    profiles = payload.get('profiles') or []
+    existing = None
+    for idx, item in enumerate(profiles):
+        if _normalize_email_address(item.get('email')) == email:
+            existing = idx
+            normalized['created_at'] = str(item.get('created_at') or normalized.get('created_at') or datetime.now(timezone.utc).isoformat())
+            break
+    if existing is None:
+        profiles.append(normalized)
+    else:
+        profiles[existing] = normalized
+    _save_user_business_profiles({'profiles': profiles})
+    return normalized
+
+
+def _save_user_business_profile_for_actor(*, target_email, updates, actor_email, actor_is_admin=False):
+    target = _normalize_email_address(target_email)
+    if not target:
+        raise ValueError('email is required')
+    existing = _find_user_business_profile(target)
+    merged = dict(existing or {})
+    merged.update(updates or {})
+    merged['email'] = target
+    prepared = _normalize_user_business_profile(merged)
+    current_rm = _normalize_email_address((existing or {}).get('manager_email'))
+    next_rm = _normalize_email_address(prepared.get('manager_email'))
+    rm_change_count = _safe_non_negative_int((existing or {}).get('rm_change_count'), 0)
+    if current_rm and next_rm and current_rm != next_rm:
+        if not actor_is_admin and rm_change_count >= 2:
+            raise ValueError('RM email can only be changed twice. Please contact the NPAMx admin for further updates.')
+        if not actor_is_admin:
+            prepared['rm_change_count'] = rm_change_count + 1
+        else:
+            prepared['rm_change_count'] = rm_change_count
+        prepared['rm_last_changed_at'] = datetime.now(timezone.utc).isoformat()
+    else:
+        prepared['rm_change_count'] = rm_change_count
+        prepared['rm_last_changed_at'] = str((existing or {}).get('rm_last_changed_at') or prepared.get('rm_last_changed_at') or '').strip()
+    saved = _upsert_user_business_profile(prepared)
+    remaining_changes = max(0, 2 - _safe_non_negative_int(saved.get('rm_change_count'), 0))
+    saved['rm_change_limit'] = 2
+    saved['rm_changes_remaining'] = remaining_changes
+    saved['rm_change_locked'] = (not actor_is_admin) and remaining_changes <= 0
+    return saved
+
+
+def _load_iam_role_catalog():
+    data = _load_json_state_file(
+        IAM_ROLE_CATALOG_PATH,
+        {'roles': []},
+    )
+    roles = data.get('roles') if isinstance(data, dict) and isinstance(data.get('roles'), list) else []
+    normalized = [_normalize_iam_role_definition(item) for item in roles if isinstance(item, dict)]
+    merged = _merge_default_iam_roles(normalized)
+    if merged != normalized:
+        _save_json_state_file(IAM_ROLE_CATALOG_PATH, {'roles': merged})
+    return {'roles': merged}
+
+
+def _save_iam_role_catalog(payload):
+    roles = payload.get('roles') if isinstance(payload, dict) and isinstance(payload.get('roles'), list) else []
+    clean = {'roles': _merge_default_iam_roles([_normalize_iam_role_definition(item) for item in roles if isinstance(item, dict)])}
+    _save_json_state_file(IAM_ROLE_CATALOG_PATH, clean)
+
+
+def _normalize_pam_app_role_definition(role):
+    src = role if isinstance(role, dict) else {}
+    rid = str(src.get('id') or '').strip() or _group_id_from_name(src.get('name') or 'pam_app_role')
+    capabilities = []
+    for value in (src.get('capabilities') or []):
+        capability_id = str(value or '').strip()
+        if capability_id in PAM_APP_CAPABILITY_IDS and capability_id not in capabilities:
+            capabilities.append(capability_id)
+    users = []
+    for value in (src.get('user_emails') or src.get('users') or []):
+        email = _normalize_email_address(value)
+        if email and email not in users:
+            users.append(email)
+    groups = []
+    for value in (src.get('group_ids') or src.get('groups') or []):
+        gid = _group_id_from_name(value)
+        if gid and gid not in groups:
+            groups.append(gid)
+    created_at = str(src.get('created_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    return {
+        'id': rid,
+        'name': str(src.get('name') or rid).strip(),
+        'description': str(src.get('description') or '').strip(),
+        'capabilities': capabilities,
+        'user_emails': users,
+        'group_ids': groups,
+        'system_default': bool(src.get('system_default')),
+        'created_at': created_at,
+        'updated_at': updated_at,
+    }
+
+
+def _default_pam_app_role_templates():
+    all_capabilities = sorted(PAM_APP_CAPABILITY_IDS)
+    return [
+        {
+            'id': 'sys_app_employee',
+            'name': 'Employee Default',
+            'description': 'Default workspace tabs for standard users.',
+            'capabilities': [
+                'home.view', 'requests.view',
+                'cloud.aws.view', 'cloud.gcp.view',
+                'workloads.instances.view', 'workloads.gcp_vms.view',
+                'storage.s3.view', 'storage.gcs.view',
+                'databases.request.view',
+                'terminal.database.view', 'terminal.vm.view',
+            ],
+            'system_default': True,
+        },
+        {
+            'id': 'sys_app_engineer',
+            'name': 'PAM Engineer Default',
+            'description': 'Default engineer access for operational visibility without full admin controls.',
+            'capabilities': [
+                'home.view', 'requests.view', 'sessions.view', 'tickets.view',
+                'cloud.aws.view', 'cloud.gcp.view',
+                'workloads.instances.view', 'workloads.gcp_vms.view',
+                'storage.s3.view', 'storage.gcs.view',
+                'databases.request.view',
+                'terminal.database.view', 'terminal.vm.view',
+                'admin.console.view',
+                'admin.identity_center.view',
+                'admin.identity_center.users.view',
+                'admin.identity_center.groups.view',
+                'admin.identity_center.permission_sets.view',
+                'admin.identity_center.organization.view',
+                'admin.integrations.view',
+                'admin.integrations.cloud.manage',
+                'admin.integrations.ticketing.manage',
+                'admin.integrations.siem.manage',
+                'admin.integrations.igp.manage',
+                'admin.feedback.view',
+            ],
+            'system_default': True,
+        },
+        {
+            'id': 'sys_app_admin',
+            'name': 'PAM Admin Default',
+            'description': 'Default full admin access for PAM administrators.',
+            'capabilities': [
+                *all_capabilities,
+            ],
+            'system_default': True,
+        },
+        {
+            'id': 'sys_app_superadmin',
+            'name': 'PAM SuperAdmin Default',
+            'description': 'Default super admin access for break-glass or super admins.',
+            'capabilities': [
+                *all_capabilities,
+            ],
+            'system_default': True,
+        },
+    ]
+
+
+def _merge_default_pam_app_roles(existing_roles):
+    existing = [_normalize_pam_app_role_definition(item) for item in (existing_roles or []) if isinstance(item, dict)]
+    defaults = [_normalize_pam_app_role_definition(item) for item in _default_pam_app_role_templates()]
+    by_id = {str(item.get('id') or '').strip(): item for item in existing if str(item.get('id') or '').strip()}
+    for default in defaults:
+        rid = str(default.get('id') or '').strip()
+        current = by_id.get(rid)
+        if current:
+            by_id[rid] = _normalize_pam_app_role_definition({
+                **default,
+                **current,
+                'system_default': True,
+            })
+        else:
+            by_id[rid] = default
+    ordered = []
+    seen = set()
+    for default in defaults:
+        rid = str(default.get('id') or '').strip()
+        if rid and rid in by_id and rid not in seen:
+            ordered.append(by_id[rid])
+            seen.add(rid)
+    for item in existing:
+        rid = str(item.get('id') or '').strip()
+        if rid and rid not in seen:
+            ordered.append(by_id.get(rid, item))
+            seen.add(rid)
+    return ordered
+
+
+def _load_pam_app_role_catalog():
+    data = _load_json_state_file(
+        PAM_APP_ROLE_CATALOG_PATH,
+        {'roles': []},
+    )
+    roles = data.get('roles') if isinstance(data, dict) and isinstance(data.get('roles'), list) else []
+    normalized = [_normalize_pam_app_role_definition(item) for item in roles if isinstance(item, dict)]
+    merged = _merge_default_pam_app_roles(normalized)
+    if merged != normalized:
+        _save_json_state_file(PAM_APP_ROLE_CATALOG_PATH, {'roles': merged})
+    return {'roles': merged}
+
+
+def _save_pam_app_role_catalog(payload):
+    roles = payload.get('roles') if isinstance(payload, dict) and isinstance(payload.get('roles'), list) else []
+    clean = {'roles': _merge_default_pam_app_roles([_normalize_pam_app_role_definition(item) for item in roles if isinstance(item, dict)])}
+    _save_json_state_file(PAM_APP_ROLE_CATALOG_PATH, clean)
+
+
+def _load_user_feedback_entries():
+    data = _load_json_state_file(
+        USER_FEEDBACK_PATH,
+        {'feedback': []},
+    )
+    items = data.get('feedback') if isinstance(data, dict) and isinstance(data.get('feedback'), list) else []
+    return {'feedback': [item for item in items if isinstance(item, dict)]}
+
+
+def _save_user_feedback_entries(payload):
+    items = payload.get('feedback') if isinstance(payload, dict) and isinstance(payload.get('feedback'), list) else []
+    clean = {'feedback': [item for item in items if isinstance(item, dict)]}
+    _save_json_state_file(USER_FEEDBACK_PATH, clean)
+
+
+def _load_announcements():
+    data = _load_json_state_file(
+        ANNOUNCEMENTS_PATH,
+        {'announcements': []},
+    )
+    items = data.get('announcements') if isinstance(data, dict) and isinstance(data.get('announcements'), list) else []
+    return {'announcements': [item for item in items if isinstance(item, dict)]}
+
+
+def _save_announcements(payload):
+    items = payload.get('announcements') if isinstance(payload, dict) and isinstance(payload.get('announcements'), list) else []
+    clean = {'announcements': [item for item in items if isinstance(item, dict)]}
+    _save_json_state_file(ANNOUNCEMENTS_PATH, clean)
+
+
+def _normalize_feedback_category(value):
+    raw = str(value or '').strip().lower()
+    allowed = {'databases_access', 'cloud_access', 'workloads_access', 'storage_access'}
+    return raw if raw in allowed else ''
+
+
+def _normalize_feedback_type(value):
+    raw = str(value or '').strip().lower()
+    allowed = {'ui', 'access_workflow', 'application', 'other'}
+    return raw if raw in allowed else ''
+
+
+def _normalize_feedback_status(value):
+    raw = str(value or '').strip().lower()
+    allowed = {'new', 'in_progress', 'closed'}
+    return raw if raw in allowed else 'new'
+
+
+def _normalize_feedback_reply(value):
+    text = ' '.join(str(value or '').strip().split())
+    words = [token for token in text.split(' ') if token]
+    if len(words) > 300:
+        text = ' '.join(words[:300])
+    return text
+
+
+def _normalize_feedback_entry(entry):
+    src = entry if isinstance(entry, dict) else {}
+    description = ' '.join(str(src.get('description') or '').strip().split())
+    words = [token for token in description.split(' ') if token]
+    if len(words) > 300:
+        description = ' '.join(words[:300])
+    submitted_at = str(src.get('submitted_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = str(src.get('updated_at') or submitted_at).strip() or submitted_at
+    status_updated_at = str(src.get('status_updated_at') or updated_at).strip() or updated_at
+    admin_reply = _normalize_feedback_reply(src.get('admin_reply'))
+    admin_reply_at = str(src.get('admin_reply_at') or '').strip()
+    reply_seen_at = str(src.get('reply_seen_at') or '').strip()
+    admin_seen_by = src.get('admin_seen_by') if isinstance(src.get('admin_seen_by'), dict) else {}
+    clean_admin_seen_by = {}
+    for raw_email, raw_seen_at in admin_seen_by.items():
+        email_key = _normalize_email_address(raw_email)
+        seen_at = str(raw_seen_at or '').strip()
+        if email_key and seen_at:
+            clean_admin_seen_by[email_key] = seen_at
+    return {
+        'id': str(src.get('id') or str(uuid.uuid4())).strip(),
+        'email': _normalize_email_address(src.get('email')),
+        'name': str(src.get('name') or '').strip(),
+        'category': _normalize_feedback_category(src.get('category')),
+        'feedback_type': _normalize_feedback_type(src.get('feedback_type') or src.get('type')),
+        'description': description,
+        'submitted_at': submitted_at,
+        'updated_at': updated_at,
+        'status': _normalize_feedback_status(src.get('status')),
+        'status_updated_at': status_updated_at,
+        'admin_reply': admin_reply,
+        'admin_reply_by': _normalize_email_address(src.get('admin_reply_by')),
+        'admin_reply_at': admin_reply_at,
+        'reply_seen_at': reply_seen_at,
+        'admin_seen_by': clean_admin_seen_by,
+        'closed_at': str(src.get('closed_at') or '').strip(),
+    }
+
+
+def _feedback_has_unread_update(item):
+    entry = _normalize_feedback_entry(item)
+    admin_reply_at = str(entry.get('admin_reply_at') or '').strip()
+    status_updated_at = str(entry.get('status_updated_at') or '').strip()
+    reply_seen_at = str(entry.get('reply_seen_at') or '').strip()
+    latest_admin_update = max(admin_reply_at, status_updated_at)
+    if not latest_admin_update:
+        return False
+    if not entry.get('admin_reply') and entry.get('status') == 'new':
+        return False
+    if not reply_seen_at:
+        return True
+    return latest_admin_update > reply_seen_at
+
+
+def _feedback_is_unread_for_admin(item, admin_email):
+    entry = _normalize_feedback_entry(item)
+    admin_key = _normalize_email_address(admin_email)
+    if not admin_key or entry.get('status') != 'new':
+        return False
+    seen_by = entry.get('admin_seen_by') if isinstance(entry.get('admin_seen_by'), dict) else {}
+    seen_at = str(seen_by.get(admin_key) or '').strip()
+    latest_update = max(
+        str(entry.get('submitted_at') or ''),
+        str(entry.get('status_updated_at') or ''),
+        str(entry.get('updated_at') or '')
+    )
+    if not latest_update:
+        return False
+    if not seen_at:
+        return True
+    return latest_update > seen_at
+
+
+def _normalize_notification_roles(values):
+    items = values if isinstance(values, list) else ([values] if values else [])
+    roles = []
+    for value in items:
+        role = _normalize_pam_role(value or '')
+        if role in NOTIFICATION_AUDIENCE_ROLES and role not in roles:
+            roles.append(role)
+    return roles
+
+
+def _normalize_notification_group_ids(values):
+    items = values if isinstance(values, list) else ([values] if values else [])
+    group_ids = []
+    for value in items:
+        gid = _group_id_from_name(value)
+        if gid and gid not in group_ids:
+            group_ids.append(gid)
+    return group_ids
+
+
+def _normalize_documentation_articles(values):
+    items = values if isinstance(values, list) else []
+    normalized = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = ' '.join(str(item.get('title') or item.get('label') or '').strip().split())
+        url = str(item.get('url') or item.get('link') or '').strip()
+        keywords_raw = item.get('keywords') if isinstance(item.get('keywords'), list) else []
+        keywords = []
+        for value in keywords_raw:
+            keyword = ' '.join(str(value or '').strip().split())
+            if keyword and keyword.lower() not in [x.lower() for x in keywords]:
+                keywords.append(keyword)
+        if not title or not url:
+            continue
+        sig = f'{title.lower()}::{url.lower()}'
+        if sig in seen:
+            continue
+        seen.add(sig)
+        normalized.append({
+            'id': str(item.get('id') or uuid.uuid4()).strip(),
+            'title': title,
+            'url': url,
+            'keywords': keywords,
+        })
+    return normalized
+
+
+def _normalize_announcement_entry(entry):
+    src = entry if isinstance(entry, dict) else {}
+    message = ' '.join(str(src.get('message') or '').strip().split())
+    created_at = str(src.get('created_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = str(src.get('updated_at') or '').strip() or created_at
+    seen_by_raw = src.get('seen_by') if isinstance(src.get('seen_by'), dict) else {}
+    seen_by = {}
+    for key, value in seen_by_raw.items():
+        email = _normalize_email_address(key)
+        seen_at = str(value or '').strip()
+        if email and seen_at:
+            seen_by[email] = seen_at
+    return {
+        'id': str(src.get('id') or str(uuid.uuid4())).strip(),
+        'message': message,
+        'active': src.get('active') is not False,
+        'closed': src.get('closed') is True,
+        'created_at': created_at,
+        'updated_at': updated_at,
+        'created_by': _normalize_email_address(src.get('created_by')),
+        'updated_by': _normalize_email_address(src.get('updated_by')),
+        'target_roles': _normalize_notification_roles(src.get('target_roles') or src.get('roles') or []),
+        'target_group_ids': _normalize_notification_group_ids(src.get('target_group_ids') or src.get('group_ids') or src.get('groups') or []),
+        'email_enabled': src.get('email_enabled') is True,
+        'direct_emails': _normalize_email_list(src.get('direct_emails') or src.get('recipient_emails') or src.get('to_emails') or []),
+        'cc_emails': _normalize_email_list(src.get('cc_emails') or src.get('cc') or []),
+        'bcc_emails': _normalize_email_list(src.get('bcc_emails') or src.get('bcc') or []),
+        'email_last_tested_at': str(src.get('email_last_tested_at') or '').strip(),
+        'seen_by': seen_by,
+    }
+
+
+def _announcement_targets_user(item, email, *, role='', group_ids=None):
+    announcement = _normalize_announcement_entry(item)
+    user_email = _normalize_email_address(email)
+    if not user_email:
+        return False
+    target_roles = announcement.get('target_roles') if isinstance(announcement.get('target_roles'), list) else []
+    target_group_ids = announcement.get('target_group_ids') if isinstance(announcement.get('target_group_ids'), list) else []
+    if not target_roles and not target_group_ids:
+        return True
+    normalized_role = _normalize_pam_role(role or '')
+    if normalized_role and normalized_role in target_roles:
+        return True
+    normalized_groups = {_group_id_from_name(item) for item in (group_ids or []) if _group_id_from_name(item)}
+    return bool(normalized_groups.intersection({_group_id_from_name(item) for item in target_group_ids if _group_id_from_name(item)}))
+
+
+def _notification_role_priority(role):
+    return {
+        'Employee': 1,
+        'Engineer': 2,
+        'Admin': 3,
+        'SuperAdmin': 4,
+    }.get(_normalize_pam_role(role or ''), 0)
+
+
+def _notification_known_recipients():
+    recipients = {}
+    for item in (_merged_directory_users() or []):
+        email = _normalize_email_address(item.get('email'))
+        if not email:
+            continue
+        recipients[email] = {
+            'email': email,
+            'display_name': str(item.get('display_name') or email).strip() or email,
+            'role': 'Employee',
+            'group_ids': set(_user_group_ids_for_email(email)),
+        }
+    groups_payload = _load_local_user_groups()
+    for group in (groups_payload.get('groups') or []):
+        normalized_group = _normalize_local_group_record(group)
+        gid = _group_id_from_name(normalized_group.get('id'))
+        group_role = _normalize_pam_role(normalized_group.get('role') or 'Employee')
+        for raw_email in (normalized_group.get('members') or []):
+            email = _normalize_email_address(raw_email)
+            if not email:
+                continue
+            current = recipients.get(email, {
+                'email': email,
+                'display_name': email,
+                'role': 'Employee',
+                'group_ids': set(),
+            })
+            current['group_ids'].add(gid)
+            if _notification_role_priority(group_role) >= _notification_role_priority(current.get('role')):
+                current['role'] = group_role
+            recipients[email] = current
+    for admin in (_load_pam_admins().get('admins') or []):
+        email = _normalize_email_address(admin.get('email'))
+        if not email:
+            continue
+        role = _normalize_pam_role(admin.get('role') or 'Admin')
+        current = recipients.get(email, {
+            'email': email,
+            'display_name': str(admin.get('display_name') or email).strip() or email,
+            'role': 'Employee',
+            'group_ids': set(),
+        })
+        if _notification_role_priority(role) >= _notification_role_priority(current.get('role')):
+            current['role'] = role
+        if not str(current.get('display_name') or '').strip():
+            current['display_name'] = str(admin.get('display_name') or email).strip() or email
+        current['group_ids'].update(_user_group_ids_for_email(email))
+        recipients[email] = current
+    return [{
+        **item,
+        'group_ids': sorted({gid for gid in (item.get('group_ids') or set()) if gid}),
+    } for item in recipients.values()]
+
+
+def _announcement_recipient_records(payload):
+    announcement = _normalize_announcement_entry(payload)
+    recipients = []
+    seen = set()
+    for record in _notification_known_recipients():
+        if _announcement_targets_user(
+            announcement,
+            record.get('email'),
+            role=record.get('role'),
+            group_ids=record.get('group_ids') or [],
+        ):
+            email = _normalize_email_address(record.get('email'))
+            if email and email not in seen:
+                recipients.append(record)
+                seen.add(email)
+    for direct_email in (announcement.get('direct_emails') or []):
+        email = _normalize_email_address(direct_email)
+        if not email or email in seen:
+            continue
+        recipients.append({
+            'email': email,
+            'display_name': email,
+            'role': 'Direct',
+            'group_ids': [],
+            'delivery_source': 'direct',
+        })
+        seen.add(email)
+    recipients.sort(key=lambda item: ((item.get('display_name') or '').lower(), item.get('email') or ''))
+    return recipients
+
+
+def _announcement_is_unread(item, email):
+    announcement = _normalize_announcement_entry(item)
+    user_email = _normalize_email_address(email)
+    if not user_email or not announcement.get('active') or announcement.get('closed'):
+        return False
+    seen_at = str((announcement.get('seen_by') or {}).get(user_email) or '').strip()
+    if not seen_at:
+        return True
+    return str(announcement.get('updated_at') or '') > seen_at
+
+
+def _normalize_iam_role_definition(role):
+    src = role if isinstance(role, dict) else {}
+    rid = str(src.get('id') or '').strip() or _group_id_from_name(src.get('name') or 'iam_role')
+    allowed_actions = set(_DB_READ_OPS).union(_DB_REQUESTABLE_WRITE_OPS)
+    users = []
+    for value in (src.get('user_emails') or src.get('users') or []):
+        email = _normalize_email_address(value)
+        if email and email not in users:
+            users.append(email)
+    groups = []
+    for value in (src.get('group_ids') or src.get('groups') or []):
+        gid = _group_id_from_name(value)
+        if gid and gid not in groups:
+            groups.append(gid)
+    actions = []
+    for value in (src.get('actions') or src.get('query_actions') or []):
+        action = str(value or '').strip().upper()
+        if action and action in allowed_actions and action not in actions:
+            actions.append(action)
+    role_type = str(src.get('request_role') or src.get('role_type') or '').strip().lower()
+    if role_type not in ('read_only', 'read_limited_write', 'admin'):
+        role_type = _derive_iam_request_role(actions)
+    visible_envs = []
+    for value in (src.get('visible_environments') or src.get('environments') or []):
+        env = str(value or '').strip().lower()
+        if env in ('prod', 'nonprod', 'sandbox') and env not in visible_envs:
+            visible_envs.append(env)
+    engine_families = []
+    for value in (src.get('engine_families') or src.get('engines') or []):
+        engine = _normalize_db_engine_family(value)
+        if engine in ('mysql', 'postgres', 'aurora', 'maria', 'mssql', 'redshift') and engine not in engine_families:
+            engine_families.append(engine)
+    created_at = str(src.get('created_at') or '').strip() or datetime.now(timezone.utc).isoformat()
+    updated_at = datetime.now(timezone.utc).isoformat()
+    return {
+        'id': rid,
+        'name': str(src.get('name') or rid).strip(),
+        'description': str(src.get('description') or '').strip(),
+        'actions': actions,
+        'request_role': role_type,
+        'user_emails': users,
+        'group_ids': groups,
+        'default_visible': bool(src.get('default_visible')),
+        'visible_environments': visible_envs,
+        'engine_families': engine_families,
+        'system_default': bool(src.get('system_default')),
+        'created_at': created_at,
+        'updated_at': updated_at,
+    }
+
+
+def _derive_iam_request_role(actions):
+    ops = [str(item or '').strip().upper() for item in (actions or []) if str(item or '').strip()]
+    if any(item in ops for item in ('CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX')):
+        return 'admin'
+    if any(item in ops for item in ('INSERT', 'UPDATE', 'DELETE', 'MERGE')):
+        return 'read_limited_write'
+    return 'read_only'
+
+
+def _default_iam_role_templates():
+    now = datetime.now(timezone.utc).isoformat()
+    return [
+        {
+            'id': 'sys_db_read_only',
+            'name': 'Read Only',
+            'description': 'System default read-only database access role.',
+            'actions': ['SELECT'],
+            'request_role': 'read_only',
+            'default_visible': True,
+            'visible_environments': ['prod', 'nonprod', 'sandbox'],
+            'engine_families': ['mysql', 'postgres', 'aurora', 'maria', 'mssql'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+        {
+            'id': 'sys_db_limited_write',
+            'name': 'Limited Read + Write',
+            'description': 'System default limited-write role for non-production access requests.',
+            'actions': ['SELECT', 'INSERT', 'UPDATE', 'MERGE'],
+            'request_role': 'read_limited_write',
+            'default_visible': True,
+            'visible_environments': ['nonprod', 'sandbox'],
+            'engine_families': ['mysql', 'postgres', 'aurora', 'maria', 'mssql'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+        {
+            'id': 'sys_db_full_admin',
+            'name': 'Full Admin',
+            'description': 'System default elevated database role. Assign this only to approved users or groups.',
+            'actions': list(_DB_DEFAULT_ADMIN_OPS_ORDERED),
+            'request_role': 'admin',
+            'default_visible': False,
+            'visible_environments': ['prod', 'nonprod', 'sandbox'],
+            'engine_families': ['mysql', 'postgres', 'aurora', 'maria', 'mssql'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+        {
+            'id': 'dwh_read_only',
+            'name': 'DWH Read Only',
+            'description': 'System default read-only role for Amazon Redshift / DWH requests.',
+            'actions': ['SELECT'],
+            'request_role': 'read_only',
+            'default_visible': True,
+            'visible_environments': ['prod', 'nonprod', 'sandbox'],
+            'engine_families': ['redshift'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+        {
+            'id': 'dwh_limited_write',
+            'name': 'DWH Limited Read + Write',
+            'description': 'System default limited-write role for Amazon Redshift / DWH requests.',
+            'actions': ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+            'request_role': 'read_limited_write',
+            'default_visible': True,
+            'visible_environments': ['nonprod', 'sandbox'],
+            'engine_families': ['redshift'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+        {
+            'id': 'dwh_full_admin',
+            'name': 'DWH Full Admin',
+            'description': 'System default elevated role for Amazon Redshift / DWH requests.',
+            'actions': ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'CREATE', 'ALTER', 'DROP', 'RENAME', 'ANALYZE'],
+            'request_role': 'admin',
+            'default_visible': False,
+            'visible_environments': ['prod', 'nonprod', 'sandbox'],
+            'engine_families': ['redshift'],
+            'system_default': True,
+            'user_emails': [],
+            'group_ids': [],
+            'created_at': now,
+            'updated_at': now,
+        },
+    ]
+
+
+def _merge_default_iam_roles(existing_roles):
+    existing = [_normalize_iam_role_definition(item) for item in (existing_roles or []) if isinstance(item, dict)]
+    defaults = [_normalize_iam_role_definition(item) for item in _default_iam_role_templates()]
+    by_id = {str(item.get('id') or '').strip(): item for item in existing if str(item.get('id') or '').strip()}
+    for default in defaults:
+        rid = str(default.get('id') or '').strip()
+        current = by_id.get(rid)
+        if current:
+            by_id[rid] = _normalize_iam_role_definition({
+                **default,
+                **current,
+                'visible_environments': current.get('visible_environments') or default.get('visible_environments'),
+                'engine_families': current.get('engine_families') or default.get('engine_families'),
+                'system_default': True,
+            })
+        else:
+            by_id[rid] = default
+    ordered = []
+    seen = set()
+    for default in defaults:
+        rid = str(default.get('id') or '').strip()
+        if rid and rid in by_id and rid not in seen:
+            ordered.append(by_id[rid])
+            seen.add(rid)
+    for item in existing:
+        rid = str(item.get('id') or '').strip()
+        if rid and rid not in seen:
+            ordered.append(by_id.get(rid, item))
+            seen.add(rid)
+    return ordered
+
+
+def _cached_or_synced_identity_center_users():
+    if isinstance(identity_center_synced_users, list) and identity_center_synced_users:
+        return identity_center_synced_users
+    return _cached_identity_center_users()
+
+
+def _directory_user_record_from_any(source):
+    item = source if isinstance(source, dict) else {}
+    email = _normalize_email_address(item.get('email') or item.get('username'))
+    if not email:
+        return {}
+    display_name = str(item.get('display_name') or item.get('name') or '').strip()
+    first_name = str(item.get('first_name') or '').strip()
+    last_name = str(item.get('last_name') or '').strip()
+    if not display_name:
+        display_name = ' '.join(part for part in [first_name, last_name] if part).strip()
+    if not display_name:
+        display_name = derive_name_from_email(email) if 'derive_name_from_email' in globals() else email.split('@')[0].replace('.', ' ').title()
+    return {
+        'email': email,
+        'display_name': display_name,
+        'first_name': first_name,
+        'last_name': last_name,
+        'username': str(item.get('username') or email).strip(),
+    }
+
+
+def _merged_directory_users(search=''):
+    users_by_email = {}
+    for item in (_cached_or_synced_identity_center_users() or []):
+        record = _directory_user_record_from_any(item)
+        if record.get('email'):
+            users_by_email[record['email']] = {**users_by_email.get(record['email'], {}), **record}
+    for item in (_load_local_org_users().get('users') or []):
+        record = _directory_user_record_from_any(item)
+        if record.get('email'):
+            users_by_email[record['email']] = {**users_by_email.get(record['email'], {}), **record}
+    profiles_by_email = {
+        _normalize_email_address(item.get('email')): item
+        for item in (_load_user_business_profiles().get('profiles') or [])
+        if _normalize_email_address(item.get('email'))
+    }
+    pam_by_email = {}
+    try:
+        pam_by_email = {
+            _normalize_email_address(item.get('email')): item
+            for item in (_load_pam_admins() or [])
+            if _normalize_email_address(item.get('email'))
+        }
+    except Exception:
+        pam_by_email = {}
+    records = []
+    q = str(search or '').strip().lower()
+    for email, record in users_by_email.items():
+        profile = profiles_by_email.get(email, {})
+        pam = pam_by_email.get(email, {})
+        item = {
+            **record,
+            'group_ids': _user_group_ids_for_email(email),
+            'pam_role': _normalize_pam_role((pam or {}).get('role') or 'Employee'),
+            'team': str(profile.get('team') or '').strip(),
+            'location': str(profile.get('location') or '').strip(),
+            'manager_email': str(profile.get('manager_email') or '').strip(),
+            'manager_manager_email': str(profile.get('manager_manager_email') or '').strip(),
+            'frequent_environments': profile.get('frequent_environments') or [],
+        }
+        effective_app_roles = _effective_pam_app_roles_for_user(email, pam_role=item.get('pam_role') or 'Employee')
+        item['pam_app_roles'] = [
+            {
+                'id': str(role.get('id') or '').strip(),
+                'name': str(role.get('name') or role.get('id') or '').strip(),
+            }
+            for role in effective_app_roles
+            if str(role.get('id') or '').strip()
+        ]
+        item['pam_capabilities_count'] = len({
+            str(capability or '').strip()
+            for role in effective_app_roles
+            for capability in (role.get('capabilities') or [])
+            if str(capability or '').strip()
+        })
+        if q:
+            hay = ' '.join([
+                item.get('email') or '',
+                item.get('display_name') or '',
+                item.get('first_name') or '',
+                item.get('last_name') or '',
+                item.get('username') or '',
+                item.get('team') or '',
+                ' '.join(str(role.get('name') or '') for role in (item.get('pam_app_roles') or [])),
+            ]).lower()
+            if q not in hay:
+                continue
+        records.append(item)
+    records.sort(key=lambda item: ((item.get('display_name') or '').lower(), item.get('email') or ''))
+    return records
+
+
+def _search_identity_center_directory_users(query):
+    q = str(query or '').strip().lower()
+    if not q:
+        return []
+    try:
+        _ensure_identity_center_runtime_config()
+        identity_store_id = CONFIG.get('identity_store_id')
+        if not identity_store_id:
+            return _merged_directory_users(search=q)
+        identitystore = _identitystore_client()
+        matched = []
+        for page in identitystore.get_paginator('list_users').paginate(IdentityStoreId=identity_store_id):
+            for item in page.get('Users', []) or []:
+                user_name = str(item.get('UserName') or '').strip()
+                email_value = ''
+                for email_obj in item.get('Emails', []) or []:
+                    candidate = _normalize_email_address(email_obj.get('Value'))
+                    if candidate:
+                        email_value = candidate
+                        break
+                display_name = str(item.get('DisplayName') or '').strip()
+                first_name = str(((item.get('Name') or {}).get('GivenName')) or '').strip()
+                last_name = str(((item.get('Name') or {}).get('FamilyName')) or '').strip()
+                hay = ' '.join([user_name, email_value, display_name, first_name, last_name]).lower()
+                if q not in hay:
+                    continue
+                matched.append({
+                    'email': email_value or user_name,
+                    'display_name': display_name or ' '.join(p for p in [first_name, last_name] if p).strip() or user_name,
+                    'first_name': first_name,
+                    'last_name': last_name,
+                    'username': user_name,
+                })
+        if matched:
+            return matched
+    except Exception:
+        pass
+    return _merged_directory_users(search=q)
+
+
+def _group_with_member_details(group):
+    normalized = _normalize_local_group_record(group)
+    users = {
+        _normalize_email_address(item.get('email')): item
+        for item in _merged_directory_users()
+        if _normalize_email_address(item.get('email'))
+    }
+    members = []
+    for email in normalized.get('members') or []:
+        record = users.get(_normalize_email_address(email), {})
+        members.append({
+            'email': email,
+            'display_name': str(record.get('display_name') or '').strip() or email,
+            'team': str(record.get('team') or '').strip(),
+        })
+    normalized['members_detail'] = members
+    normalized['member_count'] = len(members)
+    normalized['pam_app_roles'] = [
+        {
+            'id': str(role.get('id') or '').strip(),
+            'name': str(role.get('name') or role.get('id') or '').strip(),
+        }
+        for role in (_load_pam_app_role_catalog().get('roles') or [])
+        if normalized.get('id') in { _group_id_from_name(item) for item in (role.get('group_ids') or []) if _group_id_from_name(item) }
+    ]
+    return normalized
+
+
+def _system_pam_app_role_ids_for_pam_role(role):
+    normalized = _normalize_pam_role(role or 'Employee')
+    if normalized == 'SuperAdmin':
+        return ['sys_app_superadmin']
+    if normalized == 'Admin':
+        return ['sys_app_admin']
+    if normalized == 'Engineer':
+        return ['sys_app_engineer']
+    return ['sys_app_employee']
+
+
+def _effective_pam_app_roles_for_user(email, pam_role='Employee'):
+    user_email = _normalize_email_address(email)
+    roles = [_normalize_pam_app_role_definition(item) for item in (_load_pam_app_role_catalog().get('roles') or [])]
+    role_map = {str(item.get('id') or '').strip(): item for item in roles if str(item.get('id') or '').strip()}
+    effective = []
+    seen = set()
+    assigned_custom = []
+    normalized_pam_role = _normalize_pam_role(pam_role or 'Employee')
+    if user_email:
+        local_group_ids = {_group_id_from_name(item) for item in _user_group_ids_for_email(user_email) if _group_id_from_name(item)}
+        for role in roles:
+            rid = str(role.get('id') or '').strip()
+            if not rid or role.get('system_default'):
+                continue
+            assigned_users = {str(item or '').strip().lower() for item in (role.get('user_emails') or []) if str(item or '').strip()}
+            assigned_groups = {_group_id_from_name(item) for item in (role.get('group_ids') or []) if _group_id_from_name(item)}
+            if user_email in assigned_users or local_group_ids.intersection(assigned_groups):
+                assigned_custom.append(role)
+    system_role_ids = _system_pam_app_role_ids_for_pam_role(pam_role)
+    include_employee_fallback = (normalized_pam_role == 'Employee')
+    for rid in system_role_ids:
+        if rid == 'sys_app_employee' and not include_employee_fallback:
+            continue
+        role = role_map.get(rid)
+        if role and rid not in seen:
+            effective.append(role)
+            seen.add(rid)
+    for role in assigned_custom:
+        rid = str(role.get('id') or '').strip()
+        if rid and rid not in seen:
+            effective.append(role)
+            seen.add(rid)
+    return effective
+
+
+def _effective_pam_capabilities_for_identity(email='', nameid='', hints=None):
+    normalized_email = _normalize_email_address(email)
+    admin_record = _pam_admin_record_for_identity(email=normalized_email, nameid=nameid or '', hints=hints or {})
+    pam_role = _normalize_pam_role((admin_record or {}).get('role') or 'Employee')
+    capabilities = []
+    for role in _effective_pam_app_roles_for_user(normalized_email, pam_role=pam_role):
+        for capability in (role.get('capabilities') or []):
+            if capability in PAM_APP_CAPABILITY_IDS and capability not in capabilities:
+                capabilities.append(capability)
+    return capabilities
+
+
+def _current_request_capabilities():
+    ident = _current_request_identity()
+    return _effective_pam_capabilities_for_identity(
+        email=ident.get('email') or _email_from_saml_session() or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {},
+    )
+
+
+def _request_has_capability(capability_id):
+    return str(capability_id or '').strip() in set(_current_request_capabilities())
 
 FEATURE_FLAG_DEFAULTS = {
     'cloud_access': True,
@@ -353,7 +4263,107 @@ FEATURE_FLAG_DEFAULTS = {
     'database_terminal_access': True,
     'vm_terminal_access': True,
     'request_calendar': True,
-    'database_ai_assistant': True,
+    'database_ai_assistant': False,
+    'npamx_chatbot': True,
+    'documentation_portal': True,
+    'support_portal': True,
+    'home_cloud_history': True,
+    'home_storage_history': True,
+    'home_databases_history': True,
+    'home_workloads_history': True,
+}
+
+PAM_APP_CAPABILITY_GROUPS = [
+    {
+        'id': 'workspace',
+        'label': 'Workspace Tabs',
+        'capabilities': [
+            ('home.view', 'Home'),
+            ('requests.view', 'My Requests'),
+            ('sessions.view', 'Active Sessions'),
+            ('tickets.view', 'Tickets'),
+            ('cloud.aws.view', 'Cloud · AWS'),
+            ('cloud.gcp.view', 'Cloud · GCP'),
+            ('workloads.instances.view', 'Workloads · EC2 Instances'),
+            ('workloads.gcp_vms.view', 'Workloads · GCP VMs'),
+            ('storage.s3.view', 'Storage · S3'),
+            ('storage.gcs.view', 'Storage · GCS'),
+            ('databases.request.view', 'Databases · Database Access'),
+            ('terminal.database.view', 'Terminal · Database Terminal'),
+            ('terminal.vm.view', 'Terminal · VM Terminal'),
+        ],
+    },
+    {
+        'id': 'admin',
+        'label': 'Admin Tabs',
+        'capabilities': [
+            ('admin.console.view', 'Admin Console'),
+            ('admin.users.view', 'Admin · Users & Groups'),
+            ('admin.identity_center.view', 'Admin · AWS Identity Center'),
+            ('admin.management.view', 'Admin · Management'),
+            ('admin.security.view', 'Admin · Security'),
+            ('admin.integrations.view', 'Admin · Integrations'),
+            ('admin.db_governance.view', 'Admin · DB Governance'),
+            ('admin.database_sessions.view', 'Admin · Database Sessions'),
+            ('admin.feedback.view', 'Admin · Feedback'),
+            ('admin.full_controls', 'Admin · Full Controls'),
+            ('admin.super_controls', 'Admin · Super Controls'),
+        ],
+    },
+    {
+        'id': 'admin_users',
+        'label': 'Admin Users & Groups',
+        'capabilities': [
+            ('admin.users.pam_admins.manage', 'PAM Admins'),
+            ('admin.users.groups.manage', 'Groups'),
+            ('admin.users.individuals.manage', 'Individual Users'),
+        ],
+    },
+    {
+        'id': 'admin_identity_center',
+        'label': 'Admin AWS Identity Center',
+        'capabilities': [
+            ('admin.identity_center.users.view', 'Identity Center · Users'),
+            ('admin.identity_center.groups.view', 'Identity Center · Groups'),
+            ('admin.identity_center.permission_sets.view', 'Identity Center · Permission Sets'),
+            ('admin.identity_center.organization.view', 'Identity Center · Organization Hierarchy'),
+        ],
+    },
+    {
+        'id': 'admin_management',
+        'label': 'Admin Management',
+        'capabilities': [
+            ('admin.management.policies.view', 'Management · Policies'),
+            ('admin.management.approval_workflows.manage', 'Management · Approval Workflows'),
+            ('admin.management.features.manage', 'Management · Features'),
+        ],
+    },
+    {
+        'id': 'admin_security',
+        'label': 'Admin Security',
+        'capabilities': [
+            ('admin.security.settings.manage', 'Security · Configuration'),
+            ('admin.security.iam_roles.manage', 'Security · IAM'),
+            ('admin.security.guardrails.manage', 'Security · Guardrails'),
+            ('admin.security.audit.view', 'Security · Audit Logs'),
+        ],
+    },
+    {
+        'id': 'admin_integrations',
+        'label': 'Admin Integrations',
+        'capabilities': [
+            ('admin.integrations.cloud.manage', 'Integrations · Cloud'),
+            ('admin.integrations.ticketing.manage', 'Integrations · Ticketing'),
+            ('admin.integrations.siem.manage', 'Integrations · SIEM'),
+            ('admin.integrations.igp.manage', 'Integrations · IGP'),
+        ],
+    },
+]
+
+PAM_APP_CAPABILITY_IDS = {
+    capability_id
+    for group in PAM_APP_CAPABILITY_GROUPS
+    for capability_id, _label in (group.get('capabilities') or [])
 }
 
 FEATURE_KEY_ALIASES = {
@@ -398,6 +4408,115 @@ FEATURE_KEY_ALIASES = {
     'ai': 'database_ai_assistant',
     'ai_assistant': 'database_ai_assistant',
     'database_ai_assistant': 'database_ai_assistant',
+    'npamx_chatbot': 'npamx_chatbot',
+    'npamx_assistant': 'npamx_chatbot',
+    'chatbot': 'npamx_chatbot',
+    'assistant_chatbot': 'npamx_chatbot',
+    'documentation': 'documentation_portal',
+    'documentation_portal': 'documentation_portal',
+    'support': 'support_portal',
+    'support_portal': 'support_portal',
+    'home_cloud_history': 'home_cloud_history',
+    'home_storage_history': 'home_storage_history',
+    'home_databases_history': 'home_databases_history',
+    'home_workloads_history': 'home_workloads_history',
+}
+
+APP_SETTINGS_DEFAULTS = {
+    'app_base_url': '',
+    'documentation_home_url': '',
+    'documentation_search_url': '',
+    'documentation_articles': [],
+    'support_email': '',
+    'sso_instance_arn': '',
+    'identity_store_id': '',
+    'sso_start_url': '',
+    'saml_idp_metadata_xml': '',
+    'idc_assume_role_arn': '',
+    'idc_assume_role_session_name': 'npam-idc',
+    'resource_assume_role_arn': '',
+    'resource_assume_role_name_template': '',
+    'resource_assume_role_session_name': 'npam-resource',
+    'resource_role_mappings': [],
+    'db_connect_proxy_mappings': [],
+    'vault_addr_nonprod': '',
+    'vault_db_mount_nonprod': 'database',
+    'vault_db_connection_name_map_nonprod': {},
+    'vault_db_connection_name_map_prod': {},
+    'vault_db_connection_name_map_sandbox': {},
+    'db_connect_proxy_host_nonprod': '',
+    'db_connect_proxy_port_nonprod': '',
+    'db_connect_allow_direct_nonprod': False,
+    'sns_notifications_enabled': False,
+    'sns_topic_arn': '',
+    'gmail_notifications_enabled': False,
+    'gmail_sender_email': '',
+    'gmail_sender_display_name': 'NPAMx',
+    'gmail_workspace_domain': '',
+    'gmail_workspace_admin_contact': '',
+    'gmail_project_id': '',
+    'gmail_oauth_client_id': '',
+    'gmail_client_secret_name': '',
+    'gmail_refresh_token_secret_name': '',
+    'notification_email_footer_note': NPAMX_NOTIFICATION_FOOTER_DEFAULT,
+    'notify_email_databases_access': True,
+    'notify_email_cloud_access': True,
+    'notify_email_storage_access': True,
+    'notify_email_workloads_access': True,
+    'notify_email_admin_activity': False,
+    'notify_email_feedback_to_admins': True,
+    'notify_email_feedback_updates_to_users': True,
+    'feedback_admin_send_to_all': False,
+    'feedback_admin_target_roles': ['Admin', 'SuperAdmin'],
+    'feedback_admin_target_group_ids': [],
+    'feedback_admin_direct_emails': [],
+    'feedback_admin_cc_emails': [],
+    'feedback_admin_bcc_emails': [],
+    'db_user_audit_schedule_enabled': False,
+    'db_user_audit_schedule_weekday': 'Sun',
+    'db_user_audit_schedule_time_ist': '09:00',
+    'db_user_audit_notify_on_red_flag': True,
+    'notify_email_access_approval_reminders': True,
+    'notify_email_access_ready_to_requestor': True,
+    'jumpcloud_enabled': False,
+    'jumpcloud_api_base_url': 'https://console.jumpcloud.com/api',
+    'jumpcloud_api_key_secret_name': '',
+    'jumpcloud_user_lookup_field': 'email',
+    'jumpcloud_manager_attribute_name': 'manager',
+    'jumpcloud_department_attribute_name': 'department',
+    'jumpcloud_job_title_attribute_name': 'jobTitle',
+    'jumpcloud_sync_mode': 'on_demand',
+    'jumpcloud_directory_id': '',
+    'jumpcloud_admin_contact': '',
+    'jira_enabled': False,
+    'jira_base_url': '',
+    'jira_project_key': '',
+    'jira_user_email': '',
+    'jira_api_token_secret_name': '',
+    'audit_logs_bucket': '',
+    'audit_logs_prefix': 'npamx/audit',
+    'audit_logs_auto_export': False,
+    'request_approver_email_domain': 'nykaa.com',
+    'db_governance_api_base_url': '',
+    'db_governance_api_token': '',
+    'db_governance_api_timeout_seconds': 12,
+    'desktop_agent_enabled': False,
+    'desktop_agent_auth_mode': 'identity_center',
+    'desktop_agent_shared_token': '',
+    'desktop_agent_download_url_windows': '',
+    'desktop_agent_download_url_macos': '',
+    'desktop_agent_download_url_linux': '',
+    'desktop_agent_download_delivery': 's3_proxy',
+    'desktop_agent_download_s3_bucket': '',
+    'desktop_agent_download_s3_region': '',
+    'desktop_agent_download_s3_key_windows': '',
+    'desktop_agent_download_s3_key_macos': '',
+    'desktop_agent_download_s3_key_linux': '',
+    'desktop_agent_network_scope': 'netskope',
+    'desktop_agent_heartbeat_ttl_seconds': 180,
+    'desktop_agent_pairing_code_ttl_seconds': 600,
+    'desktop_agent_pairing_poll_interval_seconds': 5,
+    'desktop_agent_token_ttl_days': 1,
 }
 
 _BREAK_GLASS_SEED_CACHE = {'loaded': False, 'email': ''}
@@ -414,6 +4533,18 @@ def _as_bool(value, default=False):
     if raw in ('0', 'false', 'no', 'n', 'off', 'disabled'):
         return False
     return bool(default)
+
+
+def _as_int(value, default=0, minimum=None, maximum=None):
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        parsed = int(default)
+    if minimum is not None:
+        parsed = max(int(minimum), parsed)
+    if maximum is not None:
+        parsed = min(int(maximum), parsed)
+    return parsed
 
 
 def _canonical_feature_key(key):
@@ -458,18 +4589,1163 @@ def _save_feature_flags(flags):
     return normalized
 
 
+def _normalize_role_mappings(raw):
+    items = raw if isinstance(raw, list) else []
+    out = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        account_id = re.sub(r'[^0-9]', '', str(item.get('account_id') or '').strip())
+        role_arn = str(item.get('role_arn') or '').strip()
+        account_name = str(item.get('account_name') or item.get('label') or '').strip()
+        if not account_id or not role_arn:
+            continue
+        sig = f'{account_id}:{role_arn}'
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append({
+            'account_id': account_id,
+            'role_arn': role_arn,
+            'account_name': account_name,
+            'label': account_name,
+        })
+    return out
+
+
+def _normalize_db_proxy_mappings(raw):
+    items = raw if isinstance(raw, list) else []
+    out = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        account_id = re.sub(r'[^0-9]', '', str(item.get('account_id') or '').strip())
+        proxy_host = str(item.get('proxy_host') or item.get('host') or '').strip()
+        account_name = str(item.get('account_name') or item.get('label') or '').strip()
+        port_raw = str(item.get('proxy_port') or item.get('port') or '').strip()
+        try:
+            proxy_port = int(port_raw) if port_raw else 3306
+        except Exception:
+            proxy_port = 3306
+        if not account_id or not proxy_host:
+            continue
+        sig = f'{account_id}:{proxy_host.lower()}:{proxy_port}'
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append({
+            'account_id': account_id,
+            'account_name': account_name,
+            'label': account_name,
+            'proxy_host': proxy_host,
+            'proxy_port': proxy_port,
+        })
+    return out
+
+
+def _normalize_vault_connection_name_map(raw):
+    items = raw if isinstance(raw, dict) else {}
+    out = {}
+    for key, value in items.items():
+        map_key = str(key or '').strip().lower()
+        map_value = str(value or '').strip()
+        if not map_key or not map_value:
+            continue
+        out[map_key] = map_value
+    return out
+
+
+def _normalize_app_settings(raw):
+    source = raw if isinstance(raw, dict) else {}
+    settings = dict(APP_SETTINGS_DEFAULTS)
+    for key in (
+        'app_base_url',
+        'documentation_home_url',
+        'documentation_search_url',
+        'support_email',
+        'sso_instance_arn',
+        'identity_store_id',
+        'sso_start_url',
+        'saml_idp_metadata_xml',
+        'idc_assume_role_arn',
+        'idc_assume_role_session_name',
+        'resource_assume_role_arn',
+        'resource_assume_role_name_template',
+        'resource_assume_role_session_name',
+        'vault_addr_nonprod',
+        'vault_db_mount_nonprod',
+        'db_connect_proxy_host_nonprod',
+        'db_connect_proxy_port_nonprod',
+        'sns_topic_arn',
+        'gmail_sender_email',
+        'gmail_sender_display_name',
+        'gmail_workspace_domain',
+        'gmail_workspace_admin_contact',
+        'gmail_project_id',
+        'gmail_oauth_client_id',
+        'gmail_client_secret_name',
+        'gmail_refresh_token_secret_name',
+        'notification_email_footer_note',
+        'jumpcloud_api_base_url',
+        'jumpcloud_api_key_secret_name',
+        'jumpcloud_user_lookup_field',
+        'jumpcloud_manager_attribute_name',
+        'jumpcloud_department_attribute_name',
+        'jumpcloud_job_title_attribute_name',
+        'jumpcloud_sync_mode',
+        'jumpcloud_directory_id',
+        'jumpcloud_admin_contact',
+        'jira_base_url',
+        'jira_project_key',
+        'jira_user_email',
+        'jira_api_token_secret_name',
+        'audit_logs_bucket',
+        'audit_logs_prefix',
+        'request_approver_email_domain',
+        'db_governance_api_base_url',
+        'db_governance_api_token',
+        'desktop_agent_auth_mode',
+        'desktop_agent_shared_token',
+        'desktop_agent_download_url_windows',
+        'desktop_agent_download_url_macos',
+        'desktop_agent_download_url_linux',
+        'desktop_agent_download_delivery',
+        'desktop_agent_download_s3_bucket',
+        'desktop_agent_download_s3_region',
+        'desktop_agent_download_s3_key_windows',
+        'desktop_agent_download_s3_key_macos',
+        'desktop_agent_download_s3_key_linux',
+        'desktop_agent_network_scope',
+    ):
+        settings[key] = str(source.get(key) or '').strip()
+    if not settings['idc_assume_role_session_name']:
+        settings['idc_assume_role_session_name'] = 'npam-idc'
+    if not settings['resource_assume_role_session_name']:
+        settings['resource_assume_role_session_name'] = 'npam-resource'
+    if not settings['vault_db_mount_nonprod']:
+        settings['vault_db_mount_nonprod'] = 'database'
+    if not settings['audit_logs_prefix']:
+        settings['audit_logs_prefix'] = 'npamx/audit'
+    if not settings['request_approver_email_domain']:
+        settings['request_approver_email_domain'] = 'nykaa.com'
+    settings['db_governance_api_timeout_seconds'] = _as_int(source.get('db_governance_api_timeout_seconds'), 12, 3, 60)
+    auth_mode = str(settings.get('desktop_agent_auth_mode') or '').strip().lower()
+    settings['desktop_agent_auth_mode'] = auth_mode if auth_mode in ('identity_center', 'shared_token') else 'identity_center'
+    delivery_mode = str(settings.get('desktop_agent_download_delivery') or '').strip().lower()
+    settings['desktop_agent_download_delivery'] = delivery_mode if delivery_mode in ('s3_proxy', 'url') else 's3_proxy'
+    if not settings['desktop_agent_network_scope']:
+        settings['desktop_agent_network_scope'] = 'netskope'
+    settings['db_connect_allow_direct_nonprod'] = _as_bool(source.get('db_connect_allow_direct_nonprod'), False)
+    settings['sns_notifications_enabled'] = _as_bool(source.get('sns_notifications_enabled'), False)
+    settings['gmail_notifications_enabled'] = _as_bool(source.get('gmail_notifications_enabled'), False)
+    footer_note = str(source.get('notification_email_footer_note') or '').strip()
+    legacy_footer = 'This is an automated notification from NPAMx. Please do not reply to this email, as this mailbox is not monitored. If you need assistance, please contact the NPAMx admin team.'
+    if not footer_note or footer_note == legacy_footer:
+        settings['notification_email_footer_note'] = NPAMX_NOTIFICATION_FOOTER_DEFAULT
+    else:
+        settings['notification_email_footer_note'] = footer_note
+    settings['notify_email_databases_access'] = _as_bool(source.get('notify_email_databases_access'), True)
+    settings['notify_email_cloud_access'] = _as_bool(source.get('notify_email_cloud_access'), True)
+    settings['notify_email_storage_access'] = _as_bool(source.get('notify_email_storage_access'), True)
+    settings['notify_email_workloads_access'] = _as_bool(source.get('notify_email_workloads_access'), True)
+    settings['notify_email_admin_activity'] = _as_bool(source.get('notify_email_admin_activity'), False)
+    settings['notify_email_feedback_to_admins'] = _as_bool(source.get('notify_email_feedback_to_admins'), True)
+    settings['notify_email_feedback_updates_to_users'] = _as_bool(source.get('notify_email_feedback_updates_to_users'), True)
+    settings['feedback_admin_send_to_all'] = _as_bool(source.get('feedback_admin_send_to_all'), False)
+    settings['feedback_admin_target_roles'] = _normalize_notification_roles(source.get('feedback_admin_target_roles') or [])
+    settings['feedback_admin_target_group_ids'] = _normalize_notification_group_ids(source.get('feedback_admin_target_group_ids') or [])
+    settings['feedback_admin_direct_emails'] = _normalize_email_list(source.get('feedback_admin_direct_emails') or [])
+    settings['feedback_admin_cc_emails'] = _normalize_email_list(source.get('feedback_admin_cc_emails') or [])
+    settings['feedback_admin_bcc_emails'] = _normalize_email_list(source.get('feedback_admin_bcc_emails') or [])
+    settings['db_user_audit_schedule_enabled'] = _as_bool(source.get('db_user_audit_schedule_enabled'), False)
+    weekday = str(source.get('db_user_audit_schedule_weekday') or 'Sun').strip().title()
+    settings['db_user_audit_schedule_weekday'] = weekday if weekday in ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun') else 'Sun'
+    schedule_time = str(source.get('db_user_audit_schedule_time_ist') or '09:00').strip()
+    settings['db_user_audit_schedule_time_ist'] = schedule_time if re.match(r'^\d{2}:\d{2}$', schedule_time) else '09:00'
+    settings['db_user_audit_notify_on_red_flag'] = _as_bool(source.get('db_user_audit_notify_on_red_flag'), True)
+    settings['notify_email_access_approval_reminders'] = _as_bool(source.get('notify_email_access_approval_reminders'), True)
+    settings['notify_email_access_ready_to_requestor'] = _as_bool(source.get('notify_email_access_ready_to_requestor'), True)
+    settings['jumpcloud_enabled'] = _as_bool(source.get('jumpcloud_enabled'), False)
+    settings['jira_enabled'] = _as_bool(source.get('jira_enabled'), False)
+    settings['audit_logs_auto_export'] = _as_bool(source.get('audit_logs_auto_export'), False)
+    settings['desktop_agent_enabled'] = _as_bool(source.get('desktop_agent_enabled'), False)
+    settings['desktop_agent_heartbeat_ttl_seconds'] = _as_int(source.get('desktop_agent_heartbeat_ttl_seconds'), 180, 30, 86400)
+    settings['desktop_agent_pairing_code_ttl_seconds'] = _as_int(source.get('desktop_agent_pairing_code_ttl_seconds'), 600, 120, 1800)
+    settings['desktop_agent_pairing_poll_interval_seconds'] = _as_int(source.get('desktop_agent_pairing_poll_interval_seconds'), 5, 3, 30)
+    settings['desktop_agent_token_ttl_days'] = _as_int(source.get('desktop_agent_token_ttl_days'), 1, 1, 1)
+    settings['resource_role_mappings'] = _normalize_role_mappings(source.get('resource_role_mappings'))
+    settings['db_connect_proxy_mappings'] = _normalize_db_proxy_mappings(source.get('db_connect_proxy_mappings'))
+    settings['vault_db_connection_name_map_nonprod'] = _normalize_vault_connection_name_map(source.get('vault_db_connection_name_map_nonprod'))
+    settings['vault_db_connection_name_map_prod'] = _normalize_vault_connection_name_map(source.get('vault_db_connection_name_map_prod'))
+    settings['vault_db_connection_name_map_sandbox'] = _normalize_vault_connection_name_map(source.get('vault_db_connection_name_map_sandbox'))
+    settings['documentation_articles'] = _normalize_documentation_articles(source.get('documentation_articles') or [])
+    return settings
+
+
+def _load_app_settings():
+    try:
+        if os.path.exists(APP_SETTINGS_PATH):
+            with open(APP_SETTINGS_PATH, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                source = data.get('settings') if isinstance(data.get('settings'), dict) else data
+                return _normalize_app_settings(source)
+    except Exception:
+        pass
+    return dict(APP_SETTINGS_DEFAULTS)
+
+
+def _save_app_settings(raw):
+    current = _load_app_settings()
+    settings = _normalize_app_settings(raw)
+    for key in ('jumpcloud_api_key_secret_name', 'jumpcloud_directory_id', 'desktop_agent_shared_token', 'db_governance_api_token'):
+        incoming = str(settings.get(key) or '').strip()
+        if incoming == MASKED_SETTING_SENTINEL:
+            settings[key] = str(current.get(key) or '').strip()
+    os.makedirs(os.path.dirname(APP_SETTINGS_PATH) or '.', exist_ok=True)
+    with open(APP_SETTINGS_PATH, 'w') as f:
+        json.dump({
+            'settings': settings,
+            'updated_at': datetime.now().isoformat()
+        }, f, indent=2)
+    return settings
+
+
+def _public_app_settings(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    download_flags = _desktop_agent_download_availability(source)
+    return {
+        'app_base_url': str(source.get('app_base_url') or '').strip(),
+        'documentation_home_url': str(source.get('documentation_home_url') or '').strip(),
+        'documentation_search_url': str(source.get('documentation_search_url') or '').strip(),
+        'documentation_articles': _normalize_documentation_articles(source.get('documentation_articles') or []),
+        'support_email': str(source.get('support_email') or '').strip(),
+        'break_glass_network_restricted': bool(_break_glass_allowed_networks()),
+        'break_glass_request_allowed': bool(_is_break_glass_request_allowed()),
+        'desktop_agent_enabled': bool(source.get('desktop_agent_enabled')),
+        'desktop_agent_auth_mode': _desktop_agent_auth_mode(source),
+        'desktop_agent_network_scope': str(source.get('desktop_agent_network_scope') or '').strip(),
+        'desktop_agent_pairing_code_ttl_seconds': _desktop_agent_pairing_code_ttl_seconds(source),
+        'desktop_agent_pairing_poll_interval_seconds': _desktop_agent_pairing_poll_interval_seconds(source),
+        'desktop_agent_download_available_windows': bool(download_flags.get('windows')),
+        'desktop_agent_download_available_macos': bool(download_flags.get('macos')),
+        'desktop_agent_download_available_linux': bool(download_flags.get('linux')),
+    }
+
+
+def _admin_app_settings_response(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    payload = dict(source)
+    metadata_xml = str(payload.pop('saml_idp_metadata_xml', '') or '').strip()
+    base_url = str(payload.get('app_base_url') or '').strip().rstrip('/')
+    payload['saml_idp_metadata_configured'] = bool(metadata_xml)
+    payload['saml_acs_url'] = f'{base_url}/saml/acs' if base_url else ''
+    payload['saml_audience_url'] = f'{base_url}/saml/metadata' if base_url else ''
+    if str(payload.get('jumpcloud_api_key_secret_name') or '').strip():
+        payload['jumpcloud_api_key_secret_name'] = MASKED_SETTING_SENTINEL
+    if str(payload.get('jumpcloud_directory_id') or '').strip():
+        payload['jumpcloud_directory_id'] = MASKED_SETTING_SENTINEL
+    if str(payload.get('db_governance_api_token') or '').strip():
+        payload['db_governance_api_token'] = MASKED_SETTING_SENTINEL
+    token_configured = bool(_desktop_agent_shared_token(payload)) if _desktop_agent_auth_mode(payload) == 'shared_token' else True
+    payload['desktop_agent_token_configured'] = token_configured
+    if token_configured and _desktop_agent_auth_mode(payload) == 'shared_token':
+        payload['desktop_agent_shared_token'] = MASKED_SETTING_SENTINEL
+    return payload
+
+
+def _desktop_agent_auth_mode(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    mode = str(source.get('desktop_agent_auth_mode') or '').strip().lower()
+    return mode if mode in ('identity_center', 'shared_token') else 'identity_center'
+
+
+def _desktop_agent_shared_token(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    configured = str(source.get('desktop_agent_shared_token') or '').strip()
+    if configured and configured != MASKED_SETTING_SENTINEL:
+        return configured
+    return str(os.getenv('NPAMX_DESKTOP_AGENT_SHARED_TOKEN') or '').strip()
+
+
+def _desktop_agent_heartbeat_ttl_seconds(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return _as_int(source.get('desktop_agent_heartbeat_ttl_seconds'), 180, 30, 86400)
+
+
+def _desktop_agent_pairing_code_ttl_seconds(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return _as_int(source.get('desktop_agent_pairing_code_ttl_seconds'), 600, 120, 1800)
+
+
+def _desktop_agent_pairing_poll_interval_seconds(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return _as_int(source.get('desktop_agent_pairing_poll_interval_seconds'), 5, 3, 30)
+
+
+def _desktop_agent_token_ttl_days(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return _as_int(source.get('desktop_agent_token_ttl_days'), 1, 1, 1)
+
+
+def _desktop_agent_download_delivery(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    mode = str(source.get('desktop_agent_download_delivery') or '').strip().lower()
+    return mode if mode in ('s3_proxy', 'url') else 's3_proxy'
+
+
+def _desktop_agent_download_s3_region(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return (
+        str(source.get('desktop_agent_download_s3_region') or '').strip()
+        or str(os.getenv('DESKTOP_AGENT_DOWNLOAD_S3_REGION') or '').strip()
+        or _aws_region_for_runtime()
+    )
+
+
+def _desktop_agent_download_target(settings, os_name):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    os_key = str(os_name or '').strip().lower()
+    if os_key == 'mac':
+        os_key = 'macos'
+    if os_key not in ('windows', 'macos', 'linux'):
+        return {}
+    mode = _desktop_agent_download_delivery(source)
+    if mode == 's3_proxy':
+        bucket = str(source.get('desktop_agent_download_s3_bucket') or '').strip()
+        key_name = str(source.get(f'desktop_agent_download_s3_key_{os_key}') or '').strip()
+        if bucket and key_name:
+            return {
+                'mode': 's3_proxy',
+                'bucket': bucket,
+                'key': key_name,
+                'region': _desktop_agent_download_s3_region(source),
+            }
+    direct_url = str(source.get(f'desktop_agent_download_url_{os_key}') or '').strip()
+    if direct_url:
+        return {
+            'mode': 'url',
+            'url': direct_url,
+        }
+    return {}
+
+
+def _desktop_agent_download_availability(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return {
+        'windows': bool(_desktop_agent_download_target(source, 'windows')),
+        'macos': bool(_desktop_agent_download_target(source, 'macos')),
+        'linux': bool(_desktop_agent_download_target(source, 'linux')),
+    }
+
+
+def _prune_desktop_agent_state(state, *, now=None):
+    src = state if isinstance(state, dict) else {}
+    now_dt = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    pairing_sessions = src.get('pairing_sessions') if isinstance(src.get('pairing_sessions'), dict) else {}
+    auth_tokens = src.get('auth_tokens') if isinstance(src.get('auth_tokens'), dict) else {}
+    changed = False
+
+    cleaned_pairing = {}
+    for device_code, record in pairing_sessions.items():
+        normalized = _normalize_desktop_agent_pairing_record(record, device_code=device_code)
+        if not normalized:
+            changed = True
+            continue
+        expires_at = _parse_iso_datetime_utc(normalized.get('expires_at'))
+        if normalized.get('status') == 'pending' and expires_at and now_dt > expires_at:
+            normalized['status'] = 'expired'
+            changed = True
+        approved_at = _parse_iso_datetime_utc(normalized.get('approved_at'))
+        if normalized.get('status') in ('approved', 'expired', 'cancelled', 'consumed'):
+            if approved_at and (now_dt - approved_at) > timedelta(days=7):
+                changed = True
+                continue
+            if not approved_at and expires_at and (now_dt - expires_at) > timedelta(days=2):
+                changed = True
+                continue
+        cleaned_pairing[normalized['device_code']] = normalized
+
+    cleaned_tokens = {}
+    for token_hash, record in auth_tokens.items():
+        normalized = _normalize_desktop_agent_auth_token(record, token_hash=token_hash)
+        if not normalized:
+            changed = True
+            continue
+        if str(normalized.get('expires_at') or '').strip() != str((record or {}).get('expires_at') or '').strip():
+            changed = True
+        expires_at = _parse_iso_datetime_utc(normalized.get('expires_at'))
+        revoked_at = _parse_iso_datetime_utc(normalized.get('revoked_at'))
+        if revoked_at and (now_dt - revoked_at) > timedelta(days=30):
+            changed = True
+            continue
+        if expires_at and now_dt > expires_at:
+            changed = True
+            continue
+        cleaned_tokens[normalized['token_hash']] = normalized
+
+    src['pairing_sessions'] = cleaned_pairing
+    src['auth_tokens'] = cleaned_tokens
+    if changed:
+        src['updated_at'] = now_dt.isoformat()
+    return src, changed
+
+
+def _desktop_agent_issue_access_token(state, *, agent_id, user_email, user_name='', created_by='', settings=None):
+    src = state if isinstance(state, dict) else {}
+    now = datetime.now(timezone.utc)
+    token_value = secrets.token_urlsafe(48)
+    token_hash = _desktop_agent_token_fingerprint(token_value)
+    auth_tokens = src.get('auth_tokens') if isinstance(src.get('auth_tokens'), dict) else {}
+    auth_tokens[token_hash] = _normalize_desktop_agent_auth_token({
+        'token_hash': token_hash,
+        'agent_id': agent_id,
+        'user_email': str(user_email or '').strip().lower(),
+        'issued_at': now.isoformat(),
+        'expires_at': (now + timedelta(hours=24)).isoformat(),
+        'last_seen_at': '',
+        'revoked_at': '',
+        'created_by': str(created_by or '').strip().lower(),
+    }, token_hash=token_hash)
+    src['auth_tokens'] = auth_tokens
+    src['updated_at'] = now.isoformat()
+    return token_value, auth_tokens[token_hash]
+
+
+def _desktop_agent_verify_access_token(state, provided_token, *, expected_agent_id=''):
+    token_hash = _desktop_agent_token_fingerprint(provided_token)
+    if not token_hash:
+        return {}
+    src = state if isinstance(state, dict) else {}
+    auth_tokens = src.get('auth_tokens') if isinstance(src.get('auth_tokens'), dict) else {}
+    token_record = auth_tokens.get(token_hash) if isinstance(auth_tokens.get(token_hash), dict) else {}
+    normalized = _normalize_desktop_agent_auth_token(token_record, token_hash=token_hash)
+    if not normalized:
+        return {}
+    now = datetime.now(timezone.utc)
+    issued_at = _parse_iso_datetime_utc(normalized.get('issued_at'))
+    expires_at = _parse_iso_datetime_utc(normalized.get('expires_at'))
+    revoked_at = _parse_iso_datetime_utc(normalized.get('revoked_at'))
+    hard_expiry = None
+    if issued_at:
+        hard_expiry = issued_at + timedelta(hours=24)
+        if expires_at is None or hard_expiry < expires_at:
+            expires_at = hard_expiry
+    if revoked_at or (expires_at and now > expires_at):
+        return {}
+    agent_id = str(normalized.get('agent_id') or '').strip()
+    if expected_agent_id and agent_id and agent_id != expected_agent_id:
+        return {}
+    return normalized
+
+
+def _desktop_agent_status_snapshot(settings=None):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    ttl_seconds = _desktop_agent_heartbeat_ttl_seconds(source)
+    now = datetime.now(timezone.utc)
+    state = _load_desktop_agent_state()
+    state, changed = _prune_desktop_agent_state(state, now=now)
+    if changed:
+        _save_desktop_agent_state(state)
+    agents = list((state.get('agents') or {}).values())
+    for agent in agents:
+        seen_at = _parse_iso_datetime_utc(agent.get('last_seen_at'))
+        if seen_at is None:
+            agent['_age_seconds'] = 10**12
+        else:
+            agent['_age_seconds'] = max(0, int((now - seen_at).total_seconds()))
+        agent['_last_seen_dt'] = seen_at or datetime.fromtimestamp(0, tz=timezone.utc)
+    agents.sort(key=lambda item: item.get('_last_seen_dt') or datetime.fromtimestamp(0, tz=timezone.utc), reverse=True)
+    connected = [a for a in agents if int(a.get('_age_seconds') or 10**12) <= ttl_seconds and str(a.get('last_status') or '') != 'error']
+    stale = [a for a in agents if a not in connected]
+    latest_error = next((str(a.get('last_error') or '').strip() for a in agents if str(a.get('last_error') or '').strip()), '')
+    latest_agent = agents[0] if agents else {}
+    download_flags = _desktop_agent_download_availability(source)
+    token_configured = bool(_desktop_agent_shared_token(source)) if _desktop_agent_auth_mode(source) == 'shared_token' else True
+    return {
+        'enabled': bool(source.get('desktop_agent_enabled')),
+        'auth_mode': _desktop_agent_auth_mode(source),
+        'token_configured': token_configured,
+        'network_scope': str(source.get('desktop_agent_network_scope') or '').strip(),
+        'heartbeat_ttl_seconds': ttl_seconds,
+        'pairing_code_ttl_seconds': _desktop_agent_pairing_code_ttl_seconds(source),
+        'pairing_poll_interval_seconds': _desktop_agent_pairing_poll_interval_seconds(source),
+        'token_ttl_days': _desktop_agent_token_ttl_days(source),
+        'download_delivery': _desktop_agent_download_delivery(source),
+        'download_available_windows': bool(download_flags.get('windows')),
+        'download_available_macos': bool(download_flags.get('macos')),
+        'download_available_linux': bool(download_flags.get('linux')),
+        'download_url_windows': str(source.get('desktop_agent_download_url_windows') or '').strip(),
+        'download_url_macos': str(source.get('desktop_agent_download_url_macos') or '').strip(),
+        'download_url_linux': str(source.get('desktop_agent_download_url_linux') or '').strip(),
+        'agents_total': len(agents),
+        'agents_connected': len(connected),
+        'agents_stale': len(stale),
+        'latest_error': latest_error,
+        'latest_agent': {
+            'agent_id': str(latest_agent.get('agent_id') or '').strip(),
+            'user_email': str(latest_agent.get('user_email') or '').strip(),
+            'host': str(latest_agent.get('host') or '').strip(),
+            'platform': str(latest_agent.get('platform') or '').strip(),
+            'version': str(latest_agent.get('version') or '').strip(),
+            'last_status': str(latest_agent.get('last_status') or '').strip(),
+            'last_seen_at': str(latest_agent.get('last_seen_at') or '').strip(),
+            'last_error': str(latest_agent.get('last_error') or '').strip(),
+        },
+    }
+
+
+def _build_desktop_agent_integration_test_payload(settings, *, tested_by=''):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else {})
+    snapshot = _desktop_agent_status_snapshot(source)
+    checks = []
+    checks.append({
+        'name': 'Desktop agent enabled',
+        'status': 'success' if snapshot.get('enabled') else 'error',
+        'code': 'NPAMX-AGENT-ENABLED',
+        'message': 'Desktop agent integration is enabled.' if snapshot.get('enabled') else 'Turn on desktop agent integration before rollout.',
+    })
+    checks.append({
+        'name': 'Agent authentication mode',
+        'status': 'success' if snapshot.get('token_configured') else 'error',
+        'code': 'NPAMX-AGENT-AUTH',
+        'message': (
+            'Identity Center pairing is enabled for agent login.'
+            if _desktop_agent_auth_mode(source) == 'identity_center'
+            else (
+                'Shared token is configured for agent authentication.'
+                if snapshot.get('token_configured')
+                else 'Set Desktop Agent Shared Token in integration settings.'
+            )
+        ),
+    })
+    checks.append({
+        'name': 'Agent heartbeat',
+        'status': 'success' if int(snapshot.get('agents_connected') or 0) > 0 else 'error',
+        'code': 'NPAMX-AGENT-HEARTBEAT',
+        'message': (
+            f"{int(snapshot.get('agents_connected') or 0)} connected agent(s) seen within TTL."
+            if int(snapshot.get('agents_connected') or 0) > 0
+            else (str(snapshot.get('latest_error') or '').strip() or 'No active desktop agent heartbeat received yet.')
+        ),
+    })
+    checks.append({
+        'name': 'Agent package links',
+        'status': 'success' if snapshot.get('download_available_windows') and snapshot.get('download_available_macos') and snapshot.get('download_available_linux') else 'skipped',
+        'code': 'NPAMX-AGENT-PACKAGES',
+        'message': (
+            'Windows, macOS, and Linux packages are available for download.'
+            if snapshot.get('download_available_windows') and snapshot.get('download_available_macos') and snapshot.get('download_available_linux')
+            else 'Optional: upload/package all OS binaries for guided rollout.'
+        ),
+    })
+    ok = all(str((item or {}).get('status') or '').lower() in ('success', 'skipped') for item in checks)
+    summary = {
+        'passed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'success'),
+        'failed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'error'),
+        'skipped': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'skipped'),
+    }
+    return {
+        'status': 'success' if ok else 'error',
+        'tested_by': tested_by,
+        'result': {
+            'scope': 'desktop_agent',
+            'label': 'NPAMX Desktop Agent',
+            'ok': ok,
+            'checks': checks,
+            'agents_connected': int(snapshot.get('agents_connected') or 0),
+            'agents_total': int(snapshot.get('agents_total') or 0),
+            'agents_stale': int(snapshot.get('agents_stale') or 0),
+            'latest_error': str(snapshot.get('latest_error') or '').strip(),
+            'latest_agent': snapshot.get('latest_agent') if isinstance(snapshot.get('latest_agent'), dict) else {},
+            'heartbeat_ttl_seconds': int(snapshot.get('heartbeat_ttl_seconds') or 180),
+            'network_scope': str(snapshot.get('network_scope') or '').strip(),
+            'auth_mode': str(snapshot.get('auth_mode') or '').strip(),
+            'pairing_code_ttl_seconds': int(snapshot.get('pairing_code_ttl_seconds') or 600),
+            'pairing_poll_interval_seconds': int(snapshot.get('pairing_poll_interval_seconds') or 5),
+            'download_url_windows': str(snapshot.get('download_url_windows') or '').strip(),
+            'download_url_macos': str(snapshot.get('download_url_macos') or '').strip(),
+            'download_url_linux': str(snapshot.get('download_url_linux') or '').strip(),
+            'download_available_windows': bool(snapshot.get('download_available_windows')),
+            'download_available_macos': bool(snapshot.get('download_available_macos')),
+            'download_available_linux': bool(snapshot.get('download_available_linux')),
+        },
+        'results': {
+            'summary': summary,
+            'management': {
+                'label': 'Desktop Agent',
+                'ok': ok,
+                'checks': checks,
+                'host': 'npamx-api',
+                'port': '',
+                'account_id': '',
+            },
+            'resources': [],
+        },
+    }
+
+
+def _extract_desktop_agent_token():
+    auth = str(request.headers.get('Authorization') or '').strip()
+    if auth.lower().startswith('bearer '):
+        return auth[7:].strip()
+    return str(request.headers.get('X-NPAMX-Agent-Token') or '').strip()
+
+
+def _require_desktop_agent_auth():
+    settings = _normalize_app_settings(_load_app_settings())
+    mode = _desktop_agent_auth_mode(settings)
+    provided = _extract_desktop_agent_token()
+    if mode == 'shared_token':
+        expected = _desktop_agent_shared_token(settings)
+        if not expected:
+            return None, None, (jsonify({'error': 'Desktop agent token is not configured on server.', 'code': 'NPAMX-AGENT-401'}), 503)
+        if not provided or not hmac.compare_digest(provided, expected):
+            return None, None, (jsonify({'error': 'Invalid desktop agent token.', 'code': 'NPAMX-AGENT-403'}), 401)
+        return settings, {}, None
+
+    if not provided:
+        return None, None, (jsonify({'error': 'Agent access token is required. Run agent login first.', 'code': 'NPAMX-AGENT-401'}), 401)
+    state = _load_desktop_agent_state()
+    state, changed = _prune_desktop_agent_state(state)
+    token_record = _desktop_agent_verify_access_token(state, provided)
+    if not token_record:
+        if changed:
+            _save_desktop_agent_state(state)
+        return None, None, (jsonify({'error': 'Invalid or expired agent access token. Please login again.', 'code': 'NPAMX-AGENT-403'}), 401)
+    token_hash = str(token_record.get('token_hash') or '').strip().lower()
+    auth_tokens = state.get('auth_tokens') if isinstance(state.get('auth_tokens'), dict) else {}
+    entry = auth_tokens.get(token_hash) if isinstance(auth_tokens.get(token_hash), dict) else {}
+    if entry:
+        entry['last_seen_at'] = datetime.now(timezone.utc).isoformat()
+        auth_tokens[token_hash] = _normalize_desktop_agent_auth_token(entry, token_hash=token_hash)
+        state['auth_tokens'] = auth_tokens
+        state['updated_at'] = datetime.now(timezone.utc).isoformat()
+        _save_desktop_agent_state(state)
+    return settings, token_record, None
+
+
+def _jumpcloud_enabled(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return bool(source.get('jumpcloud_enabled'))
+
+
+def _jumpcloud_api_key_value(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    raw_value = str(source.get('jumpcloud_api_key_secret_name') or '').strip()
+    if not raw_value:
+        return ''
+    # Support the currently-deployed UI behavior where admins may paste the API key
+    # directly, while still allowing a proper Secrets Manager secret name.
+    if raw_value.startswith('jca_'):
+        return raw_value
+    try:
+        return _get_runtime_secret(raw_value)
+    except Exception:
+        return raw_value
+
+
+def _jumpcloud_attr(record, key):
+    if not isinstance(record, dict):
+        return ''
+    attr_name = str(key or '').strip()
+    if not attr_name:
+        return ''
+    direct = record.get(attr_name)
+    if direct not in (None, ''):
+        return direct
+    attrs = record.get('attributes')
+    if isinstance(attrs, dict):
+        value = attrs.get(attr_name)
+        if value not in (None, ''):
+            return value
+    if isinstance(attrs, list):
+        for item in attrs:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or item.get('key') or item.get('attribute') or '').strip()
+            if name != attr_name:
+                continue
+            for candidate_key in ('value', 'values'):
+                candidate = item.get(candidate_key)
+                if candidate not in (None, ''):
+                    return candidate
+    return ''
+
+
+def _jumpcloud_primary_email(record):
+    if not isinstance(record, dict):
+        return ''
+    for key in ('email', 'workEmail', 'username'):
+        email = _normalize_email_address(record.get(key))
+        if email:
+            return email
+    return ''
+
+
+def _jumpcloud_display_name(record):
+    if not isinstance(record, dict):
+        return ''
+    return str(
+        record.get('displayName')
+        or record.get('display_name')
+        or record.get('name')
+        or record.get('fullname')
+        or ' '.join(
+            part for part in [
+                str(record.get('firstname') or record.get('firstName') or '').strip(),
+                str(record.get('lastname') or record.get('lastName') or '').strip(),
+            ]
+            if part
+        )
+    ).strip()
+
+
+def _jumpcloud_manager_ref(value):
+    if isinstance(value, dict):
+        for key in ('email', 'workEmail', 'username'):
+            email = _normalize_email_address(value.get(key))
+            if email:
+                return {'email': email}
+        for key in ('id', '_id', 'uid', 'user_id', 'value'):
+            ref = str(value.get(key) or '').strip()
+            if ref:
+                return {'id': ref}
+    if isinstance(value, list):
+        for item in value:
+            resolved = _jumpcloud_manager_ref(item)
+            if resolved:
+                return resolved
+        return {}
+    raw = str(value or '').strip()
+    if not raw:
+        return {}
+    normalized_email = _normalize_email_address(raw)
+    if normalized_email:
+        return {'email': normalized_email}
+    return {'id': raw}
+
+
+def _jumpcloud_request_json(url, *, api_key, timeout=6):
+    req = urllib.request.Request(
+        url,
+        headers={
+            'x-api-key': str(api_key or '').strip(),
+            'Accept': 'application/json',
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode('utf-8', errors='replace')
+    payload = json.loads(raw or '{}')
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('results', 'users', 'items'):
+            if isinstance(payload.get(key), list):
+                return payload.get(key)
+    return payload
+
+
+def _db_governance_base_url(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return (
+        str(source.get('db_governance_api_base_url') or '').strip().rstrip('/')
+        or str(os.getenv('DB_GOVERNANCE_API_BASE_URL') or '').strip().rstrip('/')
+    )
+
+
+def _db_governance_api_token(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    configured = str(source.get('db_governance_api_token') or '').strip()
+    if configured and configured != MASKED_SETTING_SENTINEL:
+        return configured
+    return str(os.getenv('DB_GOVERNANCE_API_TOKEN') or '').strip()
+
+
+def _db_governance_timeout_seconds(settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    return _as_int(source.get('db_governance_api_timeout_seconds'), 12, 3, 60)
+
+
+def _db_governance_headers(settings=None):
+    headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'NPAMX-DB-Governance-BFF/1.0',
+    }
+    token = _db_governance_api_token(settings)
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    return headers
+
+
+def _db_governance_request_json(path, *, settings=None, params=None):
+    base_url = _db_governance_base_url(settings)
+    if not base_url:
+        raise ValueError('DB Governance API base URL is not configured.')
+    normalized_path = '/' + str(path or '').strip().lstrip('/')
+    query = urlencode(params or {}, doseq=True)
+    url = base_url + normalized_path + (('?' + query) if query else '')
+    req = urllib.request.Request(url, headers=_db_governance_headers(settings))
+    with urllib.request.urlopen(req, timeout=_db_governance_timeout_seconds(settings)) as resp:
+        raw = resp.read().decode('utf-8', errors='replace')
+    payload = json.loads(raw or '{}')
+    return payload if isinstance(payload, (dict, list)) else {}
+
+
+def _db_governance_items(payload, *keys):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _db_governance_first(payload, *keys):
+    if not isinstance(payload, dict):
+        return {}
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _db_governance_bool(value, default=False):
+    return _as_bool(value, default)
+
+
+def _db_governance_text(value):
+    return str(value or '').strip()
+
+
+def _db_governance_int(value, default=0):
+    return _as_int(value, default)
+
+
+def _db_governance_risk_flags(item):
+    row = item if isinstance(item, dict) else {}
+    flags = []
+    if not _db_governance_bool(row.get('iam_auth_enabled') or row.get('iam_enabled') or row.get('iamAuthEnabled'), True):
+        flags.append({'id': 'iam_disabled', 'label': 'IAM auth disabled', 'severity': 'high'})
+    if _db_governance_bool(row.get('public_subnet_detected') or row.get('publicSubnetDetected')):
+        flags.append({'id': 'public_subnet', 'label': 'Public subnet detected', 'severity': 'high'})
+    if _db_governance_bool(row.get('public_inbound_sg_rule') or row.get('publicInboundSgRule') or row.get('public_sg_rule_detected')):
+        flags.append({'id': 'public_sg_rule', 'label': 'Public inbound security group rule', 'severity': 'critical'})
+    if _db_governance_bool(row.get('publicly_accessible') or row.get('publiclyAccessible') or row.get('public_rds_endpoint')):
+        flags.append({'id': 'public_endpoint', 'label': 'Publicly accessible RDS endpoint', 'severity': 'critical'})
+    return flags
+
+
+def _db_governance_normalize_summary(payload):
+    source = payload if isinstance(payload, dict) else {}
+    summary = _db_governance_first(source, 'summary', 'data')
+    if not summary:
+        summary = source
+    return {
+        'accounts_total': _db_governance_int(summary.get('accounts_total') or summary.get('accountsCount') or summary.get('total_accounts')),
+        'databases_total': _db_governance_int(summary.get('databases_total') or summary.get('databasesCount') or summary.get('total_databases')),
+        'findings_total': _db_governance_int(summary.get('findings_total') or summary.get('findingsCount') or summary.get('total_findings')),
+        'critical_findings': _db_governance_int(summary.get('critical_findings') or summary.get('criticalCount')),
+        'high_findings': _db_governance_int(summary.get('high_findings') or summary.get('highCount')),
+        'scans_running': _db_governance_int(summary.get('scans_running') or summary.get('running_scans') or summary.get('runningScans')),
+        'last_scan_at': _db_governance_text(summary.get('last_scan_at') or summary.get('lastScanAt')),
+        'status': _db_governance_text(summary.get('status') or source.get('status') or 'ok') or 'ok',
+    }
+
+
+def _db_governance_normalize_account(item):
+    row = item if isinstance(item, dict) else {}
+    return {
+        'account_id': _db_governance_text(row.get('account_id') or row.get('accountId')),
+        'account_name': _db_governance_text(row.get('account_name') or row.get('accountName')),
+        'environment': _db_governance_text(row.get('environment') or row.get('env') or row.get('account_env')),
+        'databases_total': _db_governance_int(row.get('databases_total') or row.get('databasesCount')),
+        'findings_total': _db_governance_int(row.get('findings_total') or row.get('findingsCount')),
+        'critical_findings': _db_governance_int(row.get('critical_findings') or row.get('criticalCount')),
+        'high_findings': _db_governance_int(row.get('high_findings') or row.get('highCount')),
+        'last_scan_at': _db_governance_text(row.get('last_scan_at') or row.get('lastScanAt')),
+    }
+
+
+def _db_governance_normalize_database(item):
+    row = item if isinstance(item, dict) else {}
+    environment = _db_governance_text(row.get('environment') or row.get('env') or row.get('account_env')).lower()
+    raw_status = _db_governance_text(row.get('status') or row.get('db_status') or row.get('instance_status') or row.get('state'))
+    normalized_status = raw_status.lower()
+    stopped = normalized_status in ('stopped', 'stopping', 'stopped_nonprod')
+    should_skip = bool(environment == 'nonprod' and stopped)
+    flags = _db_governance_risk_flags(row)
+    return {
+        'account_id': _db_governance_text(row.get('account_id') or row.get('accountId')),
+        'account_name': _db_governance_text(row.get('account_name') or row.get('accountName')),
+        'environment': environment,
+        'database_id': _db_governance_text(row.get('database_id') or row.get('databaseId') or row.get('resource_id') or row.get('db_instance_id')),
+        'database_name': _db_governance_text(row.get('database_name') or row.get('databaseName') or row.get('name')),
+        'engine': _db_governance_text(row.get('engine')),
+        'resource_kind': _db_governance_text(row.get('resource_kind') or row.get('resourceKind')),
+        'region': _db_governance_text(row.get('region')),
+        'status': raw_status,
+        'scan_status': _db_governance_text(row.get('scan_status') or row.get('scanStatus')),
+        'last_scan_at': _db_governance_text(row.get('last_scan_at') or row.get('lastScanAt')),
+        'iam_auth_enabled': _db_governance_bool(row.get('iam_auth_enabled') or row.get('iam_enabled') or row.get('iamAuthEnabled'), True),
+        'public_subnet_detected': _db_governance_bool(row.get('public_subnet_detected') or row.get('publicSubnetDetected')),
+        'public_inbound_sg_rule': _db_governance_bool(row.get('public_inbound_sg_rule') or row.get('publicInboundSgRule') or row.get('public_sg_rule_detected')),
+        'publicly_accessible': _db_governance_bool(row.get('publicly_accessible') or row.get('publiclyAccessible') or row.get('public_rds_endpoint')),
+        'should_skip_nightly_scan': should_skip,
+        'nightly_scan_note': 'Stopped non-prod DB; nightly scans should be skipped.' if should_skip else '',
+        'risk_flags': flags,
+        'findings_total': _db_governance_int(row.get('findings_total') or row.get('findingsCount')),
+    }
+
+
+def _db_governance_normalize_finding(item):
+    row = item if isinstance(item, dict) else {}
+    return {
+        'finding_id': _db_governance_text(row.get('finding_id') or row.get('findingId') or row.get('id')),
+        'account_id': _db_governance_text(row.get('account_id') or row.get('accountId')),
+        'database_id': _db_governance_text(row.get('database_id') or row.get('databaseId')),
+        'database_name': _db_governance_text(row.get('database_name') or row.get('databaseName')),
+        'title': _db_governance_text(row.get('title') or row.get('name')),
+        'severity': _db_governance_text(row.get('severity') or 'info').lower() or 'info',
+        'category': _db_governance_text(row.get('category')),
+        'status': _db_governance_text(row.get('status')),
+        'message': _db_governance_text(row.get('message') or row.get('description')),
+        'recommended_action': _db_governance_text(row.get('recommended_action') or row.get('recommendedAction') or row.get('remediation')),
+        'detected_at': _db_governance_text(row.get('detected_at') or row.get('detectedAt') or row.get('created_at')),
+    }
+
+
+def _db_governance_normalize_scan_status(payload):
+    source = payload if isinstance(payload, dict) else {}
+    state = _db_governance_first(source, 'scan_status', 'scanStatus', 'data')
+    if not state:
+        state = source
+    return {
+        'status': _db_governance_text(state.get('status') or source.get('status') or 'unknown') or 'unknown',
+        'running': _db_governance_bool(state.get('running') or state.get('is_running')),
+        'last_scan_at': _db_governance_text(state.get('last_scan_at') or state.get('lastScanAt')),
+        'next_scan_at': _db_governance_text(state.get('next_scan_at') or state.get('nextScanAt')),
+        'message': _db_governance_text(state.get('message')),
+        'nightly_skip_rule': 'Stopped non-prod RDS should be skipped during nightly scans.',
+    }
+
+
+def _db_governance_response_status(payload):
+    if isinstance(payload, dict):
+        return _db_governance_text(payload.get('status') or 'success') or 'success'
+    return 'success'
+
+
+def _jumpcloud_user_lookup_candidates(email, lookup_field):
+    normalized_email = _normalize_email_address(email)
+    if not normalized_email:
+        return []
+    username = normalized_email.split('@')[0]
+    lookup = str(lookup_field or 'email').strip() or 'email'
+    candidates = [(lookup, normalized_email)]
+    if lookup != 'email':
+        candidates.append(('email', normalized_email))
+    if lookup != 'username':
+        candidates.append(('username', username))
+    out = []
+    seen = set()
+    for field, value in candidates:
+        sig = f'{field}:{str(value).lower()}'
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append((field, value))
+    return out
+
+
+def _jumpcloud_find_user_by_lookup(*, base_url, api_key, email, lookup_field):
+    root = str(base_url or '').rstrip('/')
+    if not root or not api_key:
+        return {}
+    for field, value in _jumpcloud_user_lookup_candidates(email, lookup_field):
+        url = f"{root}/systemusers?{urlencode({'filter': f'{field}:$eq:{value}'})}"
+        try:
+            payload = _jumpcloud_request_json(url, api_key=api_key)
+        except Exception:
+            continue
+        if isinstance(payload, list) and payload:
+            return payload[0]
+        if isinstance(payload, dict) and payload:
+            return payload
+    return {}
+
+
+def _jumpcloud_lookup_user_record(*, base_url, api_key, identifier, lookup_field='email'):
+    normalized_email = _normalize_email_address(identifier)
+    if normalized_email:
+        record = _jumpcloud_find_user_by_lookup(
+            base_url=base_url,
+            api_key=api_key,
+            email=normalized_email,
+            lookup_field=lookup_field,
+        )
+        if isinstance(record, dict) and record:
+            return record
+    raw = str(identifier or '').strip()
+    if raw:
+        record = _jumpcloud_get_user_by_id(base_url=base_url, api_key=api_key, user_id=raw)
+        if isinstance(record, dict) and record:
+            return record
+    return {}
+
+
+def _jumpcloud_get_user_by_id(*, base_url, api_key, user_id):
+    root = str(base_url or '').rstrip('/')
+    target_id = str(user_id or '').strip()
+    if not root or not api_key or not target_id:
+        return {}
+    url = f"{root}/systemusers/{quote(target_id, safe='')}"
+    try:
+        payload = _jumpcloud_request_json(url, api_key=api_key)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _jumpcloud_profile_cache_get(cache_key):
+    now = time.time()
+    with _JUMPCLOUD_PROFILE_CACHE_LOCK:
+        item = _JUMPCLOUD_PROFILE_CACHE.get(cache_key)
+        if not item:
+            return None
+        expires_at = float(item.get('expires_at') or 0)
+        if expires_at <= now:
+            _JUMPCLOUD_PROFILE_CACHE.pop(cache_key, None)
+            return None
+        return copy.deepcopy(item.get('value'))
+
+
+def _jumpcloud_profile_cache_put(cache_key, value):
+    with _JUMPCLOUD_PROFILE_CACHE_LOCK:
+        _JUMPCLOUD_PROFILE_CACHE[cache_key] = {
+            'expires_at': time.time() + JUMPCLOUD_PROFILE_CACHE_TTL_SECONDS,
+            'value': copy.deepcopy(value),
+        }
+
+
+def _jumpcloud_enriched_business_profile(email, current_profile=None, settings=None):
+    source = settings if isinstance(settings, dict) else _load_app_settings()
+    normalized_email = _normalize_email_address(email)
+    if not normalized_email or not _jumpcloud_enabled(source):
+        return dict(current_profile or {})
+    base_url = str(source.get('jumpcloud_api_base_url') or '').strip().rstrip('/')
+    api_key = _jumpcloud_api_key_value(source)
+    lookup_field = str(source.get('jumpcloud_user_lookup_field') or 'email').strip() or 'email'
+    manager_attr = str(source.get('jumpcloud_manager_attribute_name') or 'manager').strip() or 'manager'
+    department_attr = str(source.get('jumpcloud_department_attribute_name') or 'department').strip() or 'department'
+    job_title_attr = str(source.get('jumpcloud_job_title_attribute_name') or 'jobTitle').strip() or 'jobTitle'
+    if not base_url or not api_key:
+        return dict(current_profile or {})
+
+    cache_key = '|'.join([
+        normalized_email,
+        base_url,
+        lookup_field,
+        manager_attr,
+        department_attr,
+        job_title_attr,
+    ])
+    cached = _jumpcloud_profile_cache_get(cache_key)
+    if isinstance(cached, dict):
+        merged_cached = dict(current_profile or {})
+        merged_cached.update(cached)
+        return _normalize_user_business_profile(merged_cached)
+
+    user_record = _jumpcloud_find_user_by_lookup(
+        base_url=base_url,
+        api_key=api_key,
+        email=normalized_email,
+        lookup_field=lookup_field,
+    )
+    if not isinstance(user_record, dict) or not user_record:
+        return dict(current_profile or {})
+
+    manager_record = {}
+    manager_ref = _jumpcloud_manager_ref(_jumpcloud_attr(user_record, manager_attr))
+    manager_email = _normalize_email_address(manager_ref.get('email'))
+    if manager_ref:
+        manager_record = _jumpcloud_lookup_user_record(
+            base_url=base_url,
+            api_key=api_key,
+            identifier=manager_ref.get('email') or manager_ref.get('id') or '',
+            lookup_field='email',
+        )
+        if not manager_email:
+            manager_email = _jumpcloud_primary_email(manager_record)
+
+    manager_manager_email = ''
+    manager_manager_name = ''
+    if isinstance(manager_record, dict) and manager_record:
+        manager_manager_ref = _jumpcloud_manager_ref(_jumpcloud_attr(manager_record, manager_attr))
+        manager_manager_email = _normalize_email_address(manager_manager_ref.get('email'))
+        manager_manager_record = {}
+        if manager_manager_ref:
+            manager_manager_record = _jumpcloud_lookup_user_record(
+                base_url=base_url,
+                api_key=api_key,
+                identifier=manager_manager_ref.get('email') or manager_manager_ref.get('id') or '',
+                lookup_field='email',
+            )
+            if not manager_manager_email:
+                manager_manager_email = _jumpcloud_primary_email(manager_manager_record)
+        manager_manager_name = _jumpcloud_display_name(manager_manager_record) if manager_manager_record else ''
+
+    enriched = {
+        'email': normalized_email,
+        'manager_email': manager_email,
+        'manager_display_name': _jumpcloud_display_name(manager_record),
+        'manager_manager_email': manager_manager_email,
+        'manager_manager_display_name': manager_manager_name,
+        'team': str(_jumpcloud_attr(user_record, department_attr) or '').strip(),
+        'job_title': str(_jumpcloud_attr(user_record, job_title_attr) or '').strip(),
+        'directory_profile_source': 'jumpcloud',
+        'directory_profile_refreshed_at': datetime.now(timezone.utc).isoformat(),
+    }
+    # Do not wipe out existing manually-maintained fields when JumpCloud does not provide them.
+    merged = dict(current_profile or {})
+    for key, value in enriched.items():
+        if value not in (None, '', []):
+            merged[key] = value
+    normalized = _normalize_user_business_profile(merged)
+    normalized['job_title'] = enriched.get('job_title') or str((current_profile or {}).get('job_title') or '').strip()
+    normalized['directory_profile_source'] = 'jumpcloud'
+    normalized['directory_profile_refreshed_at'] = enriched.get('directory_profile_refreshed_at')
+    _jumpcloud_profile_cache_put(cache_key, {
+        'manager_email': normalized.get('manager_email') or '',
+        'manager_display_name': normalized.get('manager_display_name') or '',
+        'manager_manager_email': normalized.get('manager_manager_email') or '',
+        'manager_manager_display_name': normalized.get('manager_manager_display_name') or '',
+        'team': normalized.get('team') or '',
+        'job_title': normalized.get('job_title') or '',
+        'directory_profile_source': normalized.get('directory_profile_source') or '',
+        'directory_profile_refreshed_at': normalized.get('directory_profile_refreshed_at') or '',
+    })
+    return normalized
+
+
 def _normalize_pam_role(role):
     raw = str(role or '').strip()
     low = raw.lower()
     if low in ('superadmin', 'super_admin', 'super admin', 'breakglass', 'break_glass', 'root'):
         return 'SuperAdmin'
-    if low in ('manager',):
-        return 'Manager'
+    if low in ('engineer', 'eng', 'manager'):
+        return 'Engineer'
     if low in ('admin', 'administrator', 'system administrator'):
         return 'Admin'
-    if low in ('readonly', 'readaccess', 'read_only'):
-        return 'Readaccess'
-    return 'Admin'
+    if low in ('readonly', 'readaccess', 'read_only', 'employee', 'employees', 'user'):
+        return 'Employee'
+    return 'Employee'
 
 
 def _is_super_admin_role(role):
@@ -479,6 +5755,114 @@ def _is_super_admin_role(role):
 def _is_admin_role(role):
     r = _normalize_pam_role(role)
     return r in ('SuperAdmin', 'Admin')
+
+
+def _is_engineer_role(role):
+    return _normalize_pam_role(role) == 'Engineer'
+
+
+def _can_access_admin_console_role(role):
+    r = _normalize_pam_role(role)
+    return r in ('Engineer', 'Admin', 'SuperAdmin')
+
+
+def _is_admin_only_api_path(path):
+    exact_paths = {
+        '/api/admin/users',
+        '/api/admin/create-user',
+        '/api/admin/create-group',
+        '/api/admin/onboard-user',
+        '/api/admin/sync-users',
+        '/api/admin/sync-from-identity-center',
+        '/api/admin/sync-from-ad',
+        '/api/admin/features',
+        '/api/admin/toggle-feature',
+        '/api/admin/request-feature',
+        '/api/admin/save-guardrails',
+        '/api/admin/guardrails',
+        '/api/admin/generate-guardrails',
+        '/api/admin/pam-admins',
+        '/api/admin/groups',
+        '/api/admin/iam-roles',
+        '/api/admin/approval-workflows',
+        '/api/admin/identity-center/environment-tag',
+        '/api/admin/settings',
+    }
+    prefix_paths = (
+        '/api/admin/pam-admins/',
+        '/api/admin/integrations/',
+        '/api/admin/groups/',
+        '/api/admin/users/',
+        '/api/admin/iam-roles/',
+        '/api/admin/approval-workflows/',
+    )
+    return path in exact_paths or any(path.startswith(prefix) for prefix in prefix_paths)
+
+
+def _normalize_admin_api_path(path):
+    raw = str(path or '').strip()
+    if raw.startswith('/api/v1/admin/'):
+        return '/api/admin/' + raw[len('/api/v1/admin/'):]
+    return raw
+
+
+def _admin_api_required_capability(path):
+    normalized = _normalize_admin_api_path(path)
+    if not normalized or normalized == '/api/admin/check-pam-admin':
+        return ''
+
+    if normalized.startswith('/api/admin/pam-admins'):
+        return 'admin.users.pam_admins.manage'
+    if normalized == '/api/admin/create-group' or normalized.startswith('/api/admin/groups'):
+        return 'admin.users.groups.manage'
+    if normalized == '/api/admin/create-user' or normalized == '/api/admin/onboard-user' or normalized.startswith('/api/admin/users'):
+        return 'admin.users.individuals.manage'
+    if normalized.startswith('/api/admin/app-roles'):
+        return 'admin.users.individuals.manage'
+
+    if normalized.startswith('/api/admin/identity-center/users'):
+        return 'admin.identity_center.users.view'
+    if normalized.startswith('/api/admin/identity-center/groups'):
+        return 'admin.identity_center.groups.view'
+    if normalized.startswith('/api/admin/identity-center/permission-sets') or normalized.startswith('/api/admin/identity-center/account-permission-sets'):
+        return 'admin.identity_center.permission_sets.view'
+    if normalized.startswith('/api/admin/identity-center/'):
+        return 'admin.identity_center.organization.view'
+    if normalized in ('/api/admin/sync-from-identity-center', '/api/admin/sync-from-ad', '/api/admin/push-to-identity-center'):
+        return 'admin.identity_center.organization.view'
+
+    if normalized.startswith('/api/admin/approval-workflows'):
+        return 'admin.management.approval_workflows.manage'
+    if normalized.startswith('/api/admin/features') or normalized in ('/api/admin/toggle-feature', '/api/admin/request-feature'):
+        return 'admin.management.features.manage'
+
+    if normalized.startswith('/api/admin/iam-roles'):
+        return 'admin.security.iam_roles.manage'
+    if normalized in ('/api/admin/save-guardrails', '/api/admin/generate-guardrails', '/api/admin/guardrails') or normalized.startswith('/api/admin/guardrails'):
+        return 'admin.security.guardrails.manage'
+    if normalized.startswith('/api/admin/audit'):
+        return 'admin.security.audit.view'
+    if normalized.startswith('/api/admin/settings') or normalized.startswith('/api/admin/access-rules') or normalized.startswith('/api/admin/delete-permissions') or normalized.startswith('/api/admin/create-permissions'):
+        return 'admin.security.settings.manage'
+    if normalized.startswith('/api/admin/break-glass'):
+        return 'admin.security.settings.manage'
+
+    if normalized.startswith('/api/admin/integrations/aws') or normalized.startswith('/api/admin/integrations/sns') or normalized.startswith('/api/admin/integrations/gmail') or normalized.startswith('/api/admin/integrations/database-connection') or normalized.startswith('/api/admin/integrations/desktop-agent'):
+        return 'admin.integrations.cloud.manage'
+    if normalized.startswith('/api/admin/integrations/ticket'):
+        return 'admin.integrations.ticketing.manage'
+    if normalized.startswith('/api/admin/integrations/siem'):
+        return 'admin.integrations.siem.manage'
+    if normalized.startswith('/api/admin/integrations/identity-center-login') or normalized.startswith('/api/admin/integrations/igp'):
+        return 'admin.integrations.igp.manage'
+
+    if normalized.startswith('/api/admin/db-governance'):
+        return 'admin.db_governance.view'
+    if normalized.startswith('/api/admin/database-sessions'):
+        return 'admin.database_sessions.view'
+    if normalized.startswith('/api/admin/feedback') or normalized.startswith('/api/admin/announcements'):
+        return 'admin.feedback.view'
+    return ''
 
 
 def _break_glass_seed_email():
@@ -584,9 +5968,20 @@ def _load_pam_admins():
         else:
             admins.insert(0, {'email': super_seed, 'role': 'SuperAdmin'})
 
+    # Persist normalized file state (format upgrades + break-glass seed) before merging
+    # with privileged local groups. Group-derived records remain source-of-truth in groups.
+    try:
+        if admins:
+            _save_pam_admins(admins)
+    except Exception:
+        pass
+
+    # Merge file-based PAM admins with privileged local group membership.
+    admins.extend(_pam_admin_records_from_local_groups())
+
     # Deduplicate by email.
     dedup = {}
-    role_priority = {'Readaccess': 1, 'Manager': 2, 'Admin': 3, 'SuperAdmin': 4}
+    role_priority = {'Employee': 1, 'Engineer': 2, 'Admin': 3, 'SuperAdmin': 4}
     for a in admins:
         email = str(a.get('email') or '').strip().lower()
         if not email or '@' not in email:
@@ -597,13 +5992,6 @@ def _load_pam_admins():
             dedup[email] = {'email': email, 'role': role}
 
     normalized = list(dedup.values())
-
-    # Persist normalized state (format upgrades + break-glass seed) if needed.
-    try:
-        if normalized:
-            _save_pam_admins(normalized)
-    except Exception:
-        pass
 
     return normalized
 
@@ -775,8 +6163,27 @@ def _normalize_env_tag(value, default=''):
     return str(default or '').strip().lower()
 
 
+def _normalize_visibility_value(value, default=True):
+    if isinstance(value, bool):
+        return value
+    raw = str(value or '').strip().lower()
+    if raw in ('', 'inherit', 'default', 'visible'):
+        return bool(default)
+    if raw in ('1', 'true', 'yes', 'show', 'allow'):
+        return True
+    if raw in ('0', 'false', 'no', 'hide', 'hidden', 'deny'):
+        return False
+    return bool(default)
+
+
 def _load_org_hierarchy_tags():
-    out = {'roots': {}, 'ous': {}, 'accounts': {}, 'updated_at': ''}
+    out = {
+        'roots': {},
+        'ous': {},
+        'accounts': {},
+        'visibility': {'accounts': {}},
+        'updated_at': ''
+    }
     try:
         if os.path.exists(ORG_HIERARCHY_TAGS_PATH):
             with open(ORG_HIERARCHY_TAGS_PATH, 'r') as f:
@@ -791,6 +6198,23 @@ def _load_org_hierarchy_tags():
                             if tag:
                                 cleaned[str(k).strip()] = tag
                         out[key] = cleaned
+                visibility_block = data.get('visibility')
+                if isinstance(visibility_block, dict):
+                    accounts_visibility = visibility_block.get('accounts')
+                    if isinstance(accounts_visibility, dict):
+                        cleaned_visibility = {}
+                        for k, v in accounts_visibility.items():
+                            visible = _normalize_visibility_value(v, default=True)
+                            if visible is not True:
+                                cleaned_visibility[str(k).strip()] = visible
+                        out['visibility']['accounts'] = cleaned_visibility
+                elif isinstance(data.get('account_visibility'), dict):
+                    cleaned_visibility = {}
+                    for k, v in (data.get('account_visibility') or {}).items():
+                        visible = _normalize_visibility_value(v, default=True)
+                        if visible is not True:
+                            cleaned_visibility[str(k).strip()] = visible
+                    out['visibility']['accounts'] = cleaned_visibility
                 out['updated_at'] = str(data.get('updated_at') or '')
     except Exception:
         pass
@@ -802,6 +6226,7 @@ def _save_org_hierarchy_tags(tags):
         'roots': {},
         'ous': {},
         'accounts': {},
+        'visibility': {'accounts': {}},
         'updated_at': datetime.now().isoformat()
     }
     for key in ('roots', 'ous', 'accounts'):
@@ -812,10 +6237,27 @@ def _save_org_hierarchy_tags(tags):
             tag = _normalize_env_tag(v)
             if tag:
                 cleaned[key][str(k).strip()] = tag
-    os.makedirs(os.path.dirname(ORG_HIERARCHY_TAGS_PATH) or '.', exist_ok=True)
+    visibility = ((tags or {}).get('visibility') or {}).get('accounts') if isinstance(tags, dict) else {}
+    if isinstance(visibility, dict):
+        for k, v in visibility.items():
+            visible = _normalize_visibility_value(v, default=True)
+            if visible is not True:
+                cleaned['visibility']['accounts'][str(k).strip()] = visible
+    _ensure_parent_dir(ORG_HIERARCHY_TAGS_PATH)
     with open(ORG_HIERARCHY_TAGS_PATH, 'w') as f:
         json.dump(cleaned, f, indent=2)
     return cleaned
+
+
+def _is_account_visible_to_requesters(account_id, tags=None):
+    tags = tags or _load_org_hierarchy_tags()
+    account_key = str(account_id or '').strip()
+    if not account_key:
+        return True
+    visibility = ((tags.get('visibility') or {}).get('accounts') or {}) if isinstance(tags, dict) else {}
+    if account_key not in visibility:
+        return True
+    return _normalize_visibility_value(visibility.get(account_key), default=True)
 
 
 def _load_org_hierarchy_cache():
@@ -848,9 +6290,211 @@ def _save_org_hierarchy_cache(payload):
         'errors': payload.get('errors') if isinstance(payload.get('errors'), list) else [],
         'cached_at': datetime.now().isoformat(),
     }
-    os.makedirs(os.path.dirname(ORG_HIERARCHY_CACHE_PATH) or '.', exist_ok=True)
+    _ensure_parent_dir(ORG_HIERARCHY_CACHE_PATH)
     with open(ORG_HIERARCHY_CACHE_PATH, 'w') as f:
         json.dump(clean, f, indent=2)
+
+
+def _load_aws_runtime_cache():
+    data = _load_json_state_file(
+        AWS_RUNTIME_CACHE_PATH,
+        {
+            'accounts': {},
+            'permission_sets': [],
+            'organization': {},
+            'identity_center_users': [],
+            'identity_center_groups': [],
+            'cached_at': '',
+        },
+    )
+    if not isinstance(data, dict):
+        return {
+            'accounts': {},
+            'permission_sets': [],
+            'organization': {},
+            'identity_center_users': [],
+            'identity_center_groups': [],
+            'cached_at': '',
+        }
+    accounts = data.get('accounts') if isinstance(data.get('accounts'), dict) else {}
+    permission_sets = data.get('permission_sets') if isinstance(data.get('permission_sets'), list) else []
+    organization = data.get('organization') if isinstance(data.get('organization'), dict) else {}
+    identity_center_users = data.get('identity_center_users') if isinstance(data.get('identity_center_users'), list) else []
+    identity_center_groups = data.get('identity_center_groups') if isinstance(data.get('identity_center_groups'), list) else []
+    return {
+        'accounts': accounts,
+        'permission_sets': permission_sets,
+        'organization': organization,
+        'identity_center_users': identity_center_users,
+        'identity_center_groups': identity_center_groups,
+        'cached_at': str(data.get('cached_at') or ''),
+    }
+
+
+def _save_aws_runtime_cache():
+    payload = {
+        'accounts': CONFIG.get('accounts') if isinstance(CONFIG.get('accounts'), dict) else {},
+        'permission_sets': CONFIG.get('permission_sets') if isinstance(CONFIG.get('permission_sets'), list) else [],
+        'organization': CONFIG.get('organization') if isinstance(CONFIG.get('organization'), dict) else {},
+        'identity_center_users': identity_center_synced_users if isinstance(identity_center_synced_users, list) else [],
+        'identity_center_groups': identity_center_synced_groups if isinstance(identity_center_synced_groups, list) else [],
+        'cached_at': datetime.now().isoformat(),
+    }
+    _save_json_state_file(AWS_RUNTIME_CACHE_PATH, payload)
+
+
+def _restore_aws_runtime_cache():
+    global identity_center_synced_users, identity_center_synced_groups
+    cached = _load_aws_runtime_cache()
+    if (
+        cached.get('accounts')
+        or cached.get('permission_sets')
+        or cached.get('organization')
+        or cached.get('identity_center_users')
+        or cached.get('identity_center_groups')
+    ):
+        CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(cached.get('accounts') or {})
+        CONFIG['permission_sets'] = cached.get('permission_sets') or []
+        CONFIG['organization'] = cached.get('organization') or {}
+        identity_center_synced_users = cached.get('identity_center_users') or []
+        identity_center_synced_groups = cached.get('identity_center_groups') or []
+        return True
+    return False
+
+
+def _cached_identity_center_users():
+    cached_users = identity_center_synced_users if isinstance(identity_center_synced_users, list) else []
+    if cached_users:
+        return cached_users
+    _restore_aws_runtime_cache()
+    return identity_center_synced_users if isinstance(identity_center_synced_users, list) else []
+
+
+def _cached_identity_center_groups():
+    cached_groups = identity_center_synced_groups if isinstance(identity_center_synced_groups, list) else []
+    if cached_groups:
+        return cached_groups
+    _restore_aws_runtime_cache()
+    return identity_center_synced_groups if isinstance(identity_center_synced_groups, list) else []
+
+
+def _restore_accounts_from_org_hierarchy_cache():
+    cached = _load_org_hierarchy_cache()
+    accounts = {}
+
+    def _walk_accounts(nodes, root_id='', root_name='', ou_chain=None, ou_name=''):
+        for node in (nodes or []):
+            if not isinstance(node, dict):
+                continue
+            account_id = str(node.get('id') or '').strip()
+            if account_id:
+                env = _normalize_env_tag(node.get('effective_environment') or node.get('source_environment') or 'nonprod', 'nonprod') or 'nonprod'
+                accounts[account_id] = {
+                    'id': account_id,
+                    'name': str(node.get('name') or account_id).strip(),
+                    'email': str(node.get('email') or '').strip(),
+                    'status': str(node.get('status') or '').strip(),
+                    'environment': env,
+                    'source_environment': env,
+                    'root_id': root_id,
+                    'root_name': root_name,
+                    'ou_id': (ou_chain or [''])[-1] if ou_chain else '',
+                    'ou_name': ou_name,
+                    'ou_path': list(ou_chain or []),
+                    'visible_to_requesters': bool(node.get('visible_to_requesters', True)),
+                }
+
+    def _walk_ous(ous, root_id, root_name, parent_chain):
+        for ou in (ous or []):
+            if not isinstance(ou, dict):
+                continue
+            ou_id = str(ou.get('id') or '').strip()
+            ou_name = str(ou.get('name') or ou_id).strip()
+            ou_chain = list(parent_chain or []) + ([ou_id] if ou_id else [])
+            _walk_accounts(ou.get('accounts') or [], root_id=root_id, root_name=root_name, ou_chain=ou_chain, ou_name=ou_name)
+            _walk_ous(ou.get('ous') or [], root_id, root_name, ou_chain)
+
+    for root in (cached.get('roots') or []):
+        if not isinstance(root, dict):
+            continue
+        root_id = str(root.get('id') or '').strip()
+        root_name = str(root.get('name') or root_id).strip()
+        _walk_accounts(root.get('accounts') or [], root_id=root_id, root_name=root_name, ou_chain=[], ou_name='')
+        _walk_ous(root.get('ous') or [], root_id, root_name, [])
+
+    if accounts:
+        CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(accounts)
+        return True
+    return False
+
+
+def _apply_org_hierarchy_tags_to_cached_payload(payload, tags=None):
+    data = copy.deepcopy(payload if isinstance(payload, dict) else {})
+    tags = tags or _load_org_hierarchy_tags()
+
+    def _walk_account(node, ou_chain, root_id):
+        if not isinstance(node, dict):
+            return node
+        account_id = str(node.get('id') or '').strip()
+        account_name = str(node.get('name') or '').strip()
+        fallback_env = (
+            _normalize_env_tag(node.get('source_environment'))
+            or _normalize_env_tag(node.get('effective_environment'))
+            or _infer_env_from_account_name(account_name)
+            or 'nonprod'
+        )
+        node['assigned_environment'] = _normalize_env_tag((tags.get('accounts') or {}).get(account_id))
+        node['source_environment'] = fallback_env
+        node['effective_environment'] = _effective_env_from_tags(
+            account_id=account_id,
+            ou_chain=ou_chain,
+            root_id=root_id,
+            fallback=fallback_env,
+            tags=tags
+        )
+        node['visible_to_requesters'] = _is_account_visible_to_requesters(account_id, tags=tags)
+        return node
+
+    def _walk_ou(node, root_id, parent_ou_chain):
+        if not isinstance(node, dict):
+            return node
+        ou_id = str(node.get('id') or '').strip()
+        ou_chain = list(parent_ou_chain or []) + ([ou_id] if ou_id else [])
+        assigned = _normalize_env_tag((tags.get('ous') or {}).get(ou_id))
+        effective = _effective_env_from_tags(
+            account_id='',
+            ou_chain=ou_chain,
+            root_id=root_id,
+            fallback='',
+            tags=tags
+        ) or _effective_env_from_tags(
+            account_id='',
+            ou_chain=list(parent_ou_chain or []),
+            root_id=root_id,
+            fallback='nonprod',
+            tags=tags
+        )
+        node['assigned_environment'] = assigned
+        node['effective_environment'] = effective
+        node['accounts'] = [_walk_account(item, ou_chain, root_id) for item in (node.get('accounts') or [])]
+        node['ous'] = [_walk_ou(item, root_id, ou_chain) for item in (node.get('ous') or [])]
+        return node
+
+    roots = []
+    for root in (data.get('roots') or []):
+        if not isinstance(root, dict):
+            continue
+        root_id = str(root.get('id') or '').strip()
+        assigned = _normalize_env_tag((tags.get('roots') or {}).get(root_id))
+        root['assigned_environment'] = assigned
+        root['effective_environment'] = assigned or 'nonprod'
+        root['accounts'] = [_walk_account(item, [], root_id) for item in (root.get('accounts') or [])]
+        root['ous'] = [_walk_ou(item, root_id, []) for item in (root.get('ous') or [])]
+        roots.append(root)
+
+    data['roots'] = roots
+    data['tags'] = tags
+    return data
 
 
 def _effective_env_from_tags(account_id='', ou_chain=None, root_id='', fallback='nonprod', tags=None):
@@ -912,8 +6556,12 @@ def _apply_org_tag_overrides_to_accounts(accounts):
         acct['assigned_environment'] = _normalize_env_tag((tags.get('accounts') or {}).get(account_id))
         acct['effective_environment'] = effective
         acct['environment'] = effective
+        acct['visible_to_requesters'] = _is_account_visible_to_requesters(account_id, tags=tags)
         updated[str(key)] = acct
     return updated
+
+
+_restore_aws_runtime_cache()
 
 
 def _build_org_hierarchy_tree(org_client):
@@ -969,7 +6617,8 @@ def _build_org_hierarchy_tree(org_client):
             'status': str(acct.get('Status') or (cfg or {}).get('status') or '').strip(),
             'assigned_environment': assigned_tag,
             'effective_environment': effective_env,
-            'source_environment': fallback_env
+            'source_environment': fallback_env,
+            'visible_to_requesters': _is_account_visible_to_requesters(account_id, tags=tags),
         }
 
     def build_ou_node(ou_obj, root_id, parent_ou_chain):
@@ -1157,10 +6806,7 @@ def initialize_aws_config():
         # Test AWS credentials first (with timeout to avoid hang on expired creds)
         sts = boto3.client('sts', config=AWS_CONFIG)
         identity = sts.get_caller_identity()
-        print(f"AWS Identity: {identity}")
-        
         account_id = identity['Account']
-        print(f"Current account: {account_id}")
         
         # Use current account as POC account
         CONFIG['accounts'] = {
@@ -1213,10 +6859,7 @@ def initialize_aws_config():
             
         except Exception as e:
             print(f"SSO error: {e}")
-            CONFIG['permission_sets'] = [
-                {'name': 'ReadOnlyAccess', 'arn': 'arn:aws:iam::aws:policy/ReadOnlyAccess'},
-                {'name': 'PowerUserAccess', 'arn': 'arn:aws:iam::aws:policy/PowerUserAccess'}
-            ]
+            CONFIG['permission_sets'] = []
         
         # Get accounts + organizations metadata
         try:
@@ -1275,15 +6918,17 @@ def initialize_aws_config():
         except Exception as e:
             print(f"Organizations error: {e}")
             # Already set current account above
-        
+        CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG.get('accounts') or {})
+        _save_aws_runtime_cache()
         print(f"Final config - Accounts: {len(CONFIG['accounts'])}, Permission Sets: {len(CONFIG['permission_sets'])}")
         
     except Exception as e:
         print(f"Critical error: {e}")
-        # Fallback: Do NOT call AWS again (would hang with expired creds)
-        CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
-        CONFIG['permission_sets'] = [{'name': 'ReadOnlyAccess', 'arn': 'fallback-arn'}]
-        CONFIG['organization'] = {}
+        if not _restore_aws_runtime_cache():
+            # Fallback: keep runtime empty rather than inventing synthetic accounts/permission sets.
+            CONFIG['accounts'] = {}
+            CONFIG['permission_sets'] = []
+            CONFIG['organization'] = {}
 
 # Persistent storage (SQLite, survives backend restart)
 NPAMX_DB_PATH = os.getenv('NPAMX_DB_PATH') or os.path.join(os.path.dirname(__file__), 'data', 'npamx.db')
@@ -1299,6 +6944,16 @@ def _load_requests():
             print(f"Migrated legacy JSON storage -> SQLite: requests={rcount}, approvals={acount}")
 
         requests_db, approvals_db = STORE.load_all()
+        try:
+            STORE.sync_request_tickets(requests_db, approvals_db)
+        except Exception as ticket_sync_err:
+            print(f"Could not backfill request tickets from SQLite: {ticket_sync_err}")
+        try:
+            from audit_log import backfill_request_tickets_to_s3
+            result = backfill_request_tickets_to_s3()
+            print(f"Backfilled request tickets to S3: count={result.get('ticket_count', 0)} prefix={result.get('prefix', '')}")
+        except Exception as ticket_archive_err:
+            print(f"Could not backfill request tickets to S3: {ticket_archive_err}")
         print(f"Loaded {len(requests_db)} requests from {NPAMX_DB_PATH}")
     except Exception as e:
         print(f"Could not load requests from SQLite: {e}")
@@ -1312,6 +6967,86 @@ def _save_requests():
         print(f"Could not save requests to SQLite: {e}")
 
 _load_requests()
+
+
+def _sync_request_ticket(request_id: str) -> None:
+    rid = str(request_id or '').strip()
+    req = requests_db.get(rid)
+    if not rid or not isinstance(req, dict):
+        return
+    try:
+        STORE.upsert_request_ticket(rid, req, approvals_db.get(rid))
+    except Exception as err:
+        print(f"Could not sync request ticket for {rid}: {err}")
+        return
+    try:
+        from audit_log import archive_request_ticket_to_s3
+        ticket_rows, _total = STORE.list_request_tickets(q=rid, limit=1, offset=0)
+        ticket = ticket_rows[0] if ticket_rows else None
+        if ticket and str(ticket.get('request_id') or '').strip() == rid:
+            archive_request_ticket_to_s3(ticket, event='updated', write_event=True)
+    except Exception as err:
+        print(f"Could not archive request ticket {rid} to S3: {err}")
+
+
+def _mark_request_ticket_deleted(request_id: str, *, deleted_by: str = '', reason: str = '') -> None:
+    rid = str(request_id or '').strip()
+    req = requests_db.get(rid)
+    if rid and isinstance(req, dict):
+        req['deleted_at'] = datetime.now().isoformat()
+        req['deleted_by'] = str(deleted_by or '').strip().lower()
+        if reason:
+            req['ticket_delete_reason'] = str(reason or '').strip()
+        _sync_request_ticket(rid)
+    try:
+        STORE.mark_request_ticket_deleted(
+            rid,
+            deleted_by=str(deleted_by or '').strip().lower(),
+            deleted_at=datetime.now().isoformat(),
+            reason=str(reason or '').strip(),
+        )
+    except Exception as err:
+        print(f"Could not mark request ticket deleted for {rid}: {err}")
+    try:
+        from audit_log import archive_request_ticket_to_s3
+        ticket_rows, _total = STORE.list_request_tickets(q=rid, limit=1, offset=0)
+        ticket = ticket_rows[0] if ticket_rows else None
+        if ticket and str(ticket.get('request_id') or '').strip() == rid:
+            archive_request_ticket_to_s3(ticket, event='deleted', write_event=True)
+    except Exception as err:
+        print(f"Could not archive deleted request ticket {rid} to S3: {err}")
+
+
+def _ticket_filters_from_request_args():
+    category = str(request.args.get('category') or 'all').strip().lower()
+    status = str(request.args.get('status') or 'all').strip().lower()
+    q = str(request.args.get('q') or '').strip()
+    date_from = str(request.args.get('date_from') or '').strip()
+    date_to = str(request.args.get('date_to') or '').strip()
+    days_raw = str(request.args.get('days') or '').strip()
+    if days_raw and not date_from:
+        try:
+            days = max(1, min(int(days_raw), 3650))
+            date_from = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        except Exception:
+            pass
+    try:
+        page = max(1, int(request.args.get('page') or 1))
+    except Exception:
+        page = 1
+    try:
+        page_size = min(500, max(1, int(request.args.get('page_size') or 100)))
+    except Exception:
+        page_size = 100
+    return {
+        'category': category,
+        'status': status,
+        'q': q,
+        'date_from': date_from,
+        'date_to': date_to,
+        'page': page,
+        'page_size': page_size,
+    }
 
 def build_resource_arns(selected_resources, account_id, services):
     """Dynamically build resource ARNs from selected resources"""
@@ -1366,6 +7101,32 @@ def build_resource_arns(selected_resources, account_id, services):
     print(f"✅ Final ARNs: {final_arns}")
     print(f"=== build_resource_arns done ===\n")
     return final_arns
+
+
+def _discover_services_via_direct_apis(account_id: str, region: str):
+    discovered = set()
+    service_checks = {
+        'ec2': lambda: _resource_client('ec2', region_name=region, account_id=account_id).describe_instances(MaxResults=5),
+        's3': lambda: _resource_client('s3', region_name=region, account_id=account_id).list_buckets(),
+        'rds': lambda: _resource_client('rds', region_name=region, account_id=account_id).describe_db_instances(MaxRecords=5),
+        'lambda': lambda: _resource_client('lambda', region_name=region, account_id=account_id).list_functions(MaxItems=5),
+        'dynamodb': lambda: _resource_client('dynamodb', region_name=region, account_id=account_id).list_tables(Limit=5),
+        'secretsmanager': lambda: _resource_client('secretsmanager', region_name=region, account_id=account_id).list_secrets(MaxResults=5),
+        'logs': lambda: _resource_client('logs', region_name=region, account_id=account_id).describe_log_groups(limit=5),
+        'kms': lambda: _resource_client('kms', region_name=region, account_id=account_id).list_keys(Limit=5),
+        'sns': lambda: _resource_client('sns', region_name=region, account_id=account_id).list_topics(),
+        'sqs': lambda: _resource_client('sqs', region_name=region, account_id=account_id).list_queues(MaxResults=5),
+        'eks': lambda: _resource_client('eks', region_name=region, account_id=account_id).list_clusters(),
+        'ecs': lambda: _resource_client('ecs', region_name=region, account_id=account_id).list_clusters(maxResults=5),
+        'elasticloadbalancing': lambda: _resource_client('elbv2', region_name=region, account_id=account_id).describe_load_balancers(PageSize=5),
+    }
+    for service_name, callback in service_checks.items():
+        try:
+            callback()
+            discovered.add(service_name)
+        except Exception:
+            continue
+    return discovered
 
 def _sanitize_use_case_for_prompt(raw: str, max_len: int = 500) -> str:
     """Limit length and strip control chars to reduce prompt injection risk."""
@@ -1561,7 +7322,7 @@ def generate_fallback_permissions(use_case, account_env='nonprod'):
     """Rule-based permission generation with security restrictions"""
     use_case_lower = use_case.lower()
     actions = []
-    resources = ['*']
+    resources = []
     description = "AWS rule-based permissions for: " + use_case
     
     print(f"🔑 KEYWORD PARSER: Processing use case: {use_case_lower}")
@@ -1696,6 +7457,14 @@ def generate_fallback_permissions(use_case, account_env='nonprod'):
     # If no service detected, return error
     if not detected_services:
         return {'error': '❌ No AWS service detected. Please specify service (e.g., EC2, S3, Lambda, DynamoDB, RDS, ECS, SNS, SQS).'}
+
+    if not resources:
+        return {
+            'error': (
+                '❌ Fallback permission generation requires specific resources and cannot create wildcard access. '
+                'Please select exact resources or retry when AI generation is available.'
+            )
+        }
     
     return {
         'actions': list(set(actions)),  # Remove duplicates
@@ -1797,9 +7566,14 @@ def enhance_permissions_with_services(permissions_data, aws_services=None, servi
                 resources.append(log_group_arn)
                 description_parts.append(f"CloudWatch: {config['log_group']}")
     
-    # Use wildcard if no specific resources were added
+    # Do not silently widen to wildcard when no concrete resources were identified.
     if not resources:
-        resources = ['*']
+        return {
+            'error': 'Specific resources are required for service-enhanced permissions.',
+            'actions': list(set(enhanced_actions)),
+            'resources': [],
+            'description': '; '.join(description_parts),
+        }
     
     # Create tag-based conditions for EC2 if tags are specified
     conditions = None
@@ -1856,33 +7630,9 @@ def create_custom_permission_set(name, permissions_data, duration_hours=None):
         
         permission_set_arn = response['PermissionSet']['PermissionSetArn']
         
-        # Create SEPARATE statements per service for security
-        statements = []
-        if 'grouped_actions' in permissions_data:
-            for service, data in permissions_data['grouped_actions'].items():
-                statements.append({
-                    'Sid': service.upper().replace('-', ''),
-                    'Effect': 'Allow',
-                    'Action': data['actions'],
-                    'Resource': data['resources']
-                })
-        else:
-            # Fallback for old format
-            statements.append({
-                'Effect': 'Allow',
-                'Action': permissions_data.get('actions', []),
-                'Resource': permissions_data.get('resources', ['*'])
-            })
-        
-        policy_doc = {
-            'Version': '2012-10-17',
-            'Statement': statements
-        }
-        
-        sso_admin.put_inline_policy_to_permission_set(
-            InstanceArn=CONFIG['sso_instance_arn'],
-            PermissionSetArn=permission_set_arn,
-            InlinePolicy=json.dumps(policy_doc)
+        _apply_permission_set_configuration(
+            permission_set_arn=permission_set_arn,
+            permissions_data=permissions_data,
         )
         
         return {
@@ -1927,37 +7677,289 @@ def _resolve_effective_auth_choice(preferred_auth, auth_profile):
         return preferred
     return 'password'
 
-def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_name, duration_hours, auth_profile, request_id):
+
+def _redshift_db_credential_resources(*, region: str, account_id: str, cluster_identifier: str, db_username: str, db_name: str) -> list[str]:
+    cluster_id = str(cluster_identifier or '').strip()
+    user_name = str(db_username or '').strip()
+    database_name = str(db_name or '').strip() or 'dev'
+    reg = str(region or '').strip() or 'ap-south-1'
+    acct = str(account_id or '').strip()
+    if not cluster_id:
+        raise ValueError('Redshift cluster identifier is required for IAM policy generation.')
+    if not user_name:
+        raise ValueError('Redshift database username is required for IAM policy generation.')
+    if not acct:
+        raise ValueError('AWS account ID is required for Redshift IAM policy generation.')
+    return [
+        f"arn:aws:redshift:{reg}:{acct}:dbuser:{cluster_id}/{user_name}",
+        f"arn:aws:redshift:{reg}:{acct}:dbname:{cluster_id}/{database_name}",
+    ]
+
+
+def _normalize_customer_managed_policy_path(path: str) -> str:
+    value = str(path or '').strip() or '/'
+    if not value.startswith('/'):
+        value = '/' + value
+    if not value.endswith('/'):
+        value = value + '/'
+    return value
+
+
+def _redshift_permission_policy_attachment() -> dict:
+    managed_policy_arn = str(os.getenv('REDSHIFT_IDC_MANAGED_POLICY_ARN') or '').strip()
+    if managed_policy_arn:
+        return {
+            'managed_policy_arns': [managed_policy_arn],
+            'attachment_summary': f"managed-policy:{managed_policy_arn}",
+        }
+
+    customer_policy_name = str(os.getenv('REDSHIFT_IDC_CUSTOMER_MANAGED_POLICY_NAME') or '').strip()
+    customer_policy_path = _normalize_customer_managed_policy_path(
+        os.getenv('REDSHIFT_IDC_CUSTOMER_MANAGED_POLICY_PATH') or '/'
+    )
+    if customer_policy_name:
+        return {
+            'customer_managed_policy_references': [{
+                'Name': customer_policy_name,
+                'Path': customer_policy_path,
+            }],
+            'attachment_summary': f"customer-managed-policy:{customer_policy_path}{customer_policy_name}",
+        }
+
+    return {}
+
+
+def _redshift_permission_set_policy(*, resources: list[str], db_name: str) -> dict:
+    scoped_resources = [str(item or '').strip() for item in (resources or []) if str(item or '').strip()]
+    database_name = str(db_name or '').strip() or 'dev'
+    if len(scoped_resources) < 2:
+        raise ValueError('Redshift IAM policy requires dbuser and dbname resources.')
+    return {
+        'Version': '2012-10-17',
+        'Statement': [{
+            'Sid': 'RedshiftLogin',
+            'Effect': 'Allow',
+            'Action': ['redshift:GetClusterCredentials'],
+            'Resource': scoped_resources,
+            'Condition': {
+                'StringEquals': {
+                    'redshift:DbName': database_name,
+                }
+            },
+        }],
+    }
+
+
+def _build_inline_permission_set_policy(permissions_data: dict) -> dict:
+    statements = []
+    if 'grouped_actions' in permissions_data:
+        for service, data in permissions_data['grouped_actions'].items():
+            statement = {
+                'Sid': service.upper().replace('-', ''),
+                'Effect': 'Allow',
+                'Action': data['actions'],
+                'Resource': data['resources']
+            }
+            if isinstance(data.get('condition'), dict) and data.get('condition'):
+                statement['Condition'] = data['condition']
+            statements.append(statement)
+    else:
+        statement = {
+            'Effect': 'Allow',
+            'Action': permissions_data.get('actions', []),
+            'Resource': permissions_data.get('resources', ['*'])
+        }
+        if isinstance(permissions_data.get('conditions'), dict) and permissions_data.get('conditions'):
+            statement['Condition'] = permissions_data['conditions']
+        statements.append(statement)
+    return {
+        'Version': '2012-10-17',
+        'Statement': statements
+    }
+
+
+def _put_inline_policy_to_permission_set_with_retry(*, permission_set_arn: str, policy_doc: dict, max_attempts: int = 5):
+    sso_admin = _sso_admin_client()
+    last_exc = None
+    for attempt in range(1, max(1, int(max_attempts)) + 1):
+        try:
+            sso_admin.put_inline_policy_to_permission_set(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                PermissionSetArn=permission_set_arn,
+                InlinePolicy=json.dumps(policy_doc)
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+            err_txt = str(exc or '')
+            retryable = (
+                'validationexception' in err_txt.lower()
+                and 'invalid permissionspolicy document' in err_txt.lower()
+            )
+            if attempt >= max_attempts or not retryable:
+                raise
+            time.sleep(min(2 * attempt, 8))
+    if last_exc:
+        raise last_exc
+
+
+def _apply_permission_set_configuration(*, permission_set_arn: str, permissions_data: dict):
+    sso_admin = _sso_admin_client()
+    customer_refs = permissions_data.get('customer_managed_policy_references') or []
+    managed_policy_arns = permissions_data.get('managed_policy_arns') or []
+
+    if customer_refs or managed_policy_arns:
+        try:
+            sso_admin.delete_inline_policy_from_permission_set(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                PermissionSetArn=permission_set_arn,
+            )
+        except Exception:
+            pass
+
+        for ref in customer_refs:
+            try:
+                sso_admin.attach_customer_managed_policy_reference_to_permission_set(
+                    InstanceArn=CONFIG['sso_instance_arn'],
+                    PermissionSetArn=permission_set_arn,
+                    CustomerManagedPolicyReference={
+                        'Name': str(ref.get('Name') or '').strip(),
+                        'Path': _normalize_customer_managed_policy_path(ref.get('Path') or '/'),
+                    },
+                )
+            except Exception as exc:
+                err_txt = str(exc or '')
+                if 'already attached' not in err_txt.lower() and 'conflict' not in err_txt.lower():
+                    raise
+
+        for policy_arn in managed_policy_arns:
+            arn = str(policy_arn or '').strip()
+            if not arn:
+                continue
+            try:
+                sso_admin.attach_managed_policy_to_permission_set(
+                    InstanceArn=CONFIG['sso_instance_arn'],
+                    PermissionSetArn=permission_set_arn,
+                    ManagedPolicyArn=arn,
+                )
+            except Exception as exc:
+                err_txt = str(exc or '')
+                if 'already attached' not in err_txt.lower() and 'conflict' not in err_txt.lower():
+                    raise
+        return
+
+    policy_doc = _build_inline_permission_set_policy(permissions_data)
+    _put_inline_policy_to_permission_set_with_retry(
+        permission_set_arn=permission_set_arn,
+        policy_doc=policy_doc,
+    )
+
+
+def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_name, duration_hours, auth_profile, request_id, access_marker='R'):
     """Create DB Connect permission set and assign it to user for IAM DB auth flow.
-    Permission set name: JIT-<username>-<accountID> (IAM Identity Center safe, <=32 chars).
-    Inline policy: rds-db:connect only, resource = arn:aws:rds-db:region:account:dbuser:DbiResourceId/db_username.
+    Permission set name: JIT-<R|W>-<username>-<accountID>-<request> (IAM Identity Center safe, <=32 chars).
+    Inline policy:
+    - RDS: rds-db:connect on arn:aws:rds-db:...
+    - Redshift: redshift:GetClusterCredentials on AWS-documented dbuser/dbname resources
+      while Vault still creates and revokes the per-request database user.
     """
     try:
         account_key = _ensure_account_config_key(account_id)
         account_number = CONFIG['accounts'][account_key]['id']
         account_id_safe = re.sub(r'[^0-9a-zA-Z-]', '', str(account_number or '').strip()) or 'account'
         region = str((auth_profile or {}).get('region') or os.getenv('AWS_REGION') or 'ap-south-1')
+        resource_kind = str((auth_profile or {}).get('resource_kind') or '').strip().lower()
         db_resource_id = str((auth_profile or {}).get('db_resource_id') or '').strip()
-        if not db_resource_id:
+        proxy_host = str((auth_profile or {}).get('proxy_host') or '').strip()
+        proxy_resource_id = str((auth_profile or {}).get('proxy_resource_id') or '').strip()
+        if resource_kind != 'redshift_cluster' and not proxy_resource_id and proxy_host and proxy_host != 'proxy-not-configured':
+            try:
+                proxy_info = _describe_rds_proxy_endpoint(
+                    proxy_host=proxy_host,
+                    region=region,
+                    account_id=account_number,
+                )
+                proxy_resource_id = str(proxy_info.get('resource_id') or '').strip()
+            except Exception:
+                proxy_resource_id = ''
+        connect_resource_id = proxy_resource_id or db_resource_id
+        if resource_kind != 'redshift_cluster' and not connect_resource_id:
             return {'error': 'DB resource ID not available for IAM DB connect policy generation.'}
         safe_user = str(user_email or '').split('@')[0].replace('.', '-').replace('_', '-')
         safe_user = re.sub(r'[^a-zA-Z0-9-]', '', safe_user).strip('-').lower() or 'user'
+        marker = str(access_marker or 'R').strip().upper()[:1]
+        if marker not in ('R', 'W'):
+            marker = 'R'
+        request_suffix = re.sub(r'[^0-9a-zA-Z]', '', str(request_id or '').strip()).lower()[:6] or 'req'
         # IAM Identity Center permission set name max is 32 chars.
-        user_max = max(4, 32 - len("JIT--") - len(account_id_safe))
+        prefix = f"JIT-{marker}-"
+        fixed_len = len(prefix) + len(account_id_safe) + len(request_suffix) + 2
+        user_max = max(4, 32 - fixed_len)
         safe_user = safe_user[:user_max]
-        ps_name = f"JIT-{safe_user}-{account_id_safe}"
+        ps_name = f"{prefix}{safe_user}-{account_id_safe}-{request_suffix}"
         if len(ps_name) > 32:
             ps_name = ps_name[:32].rstrip('-')
-        session_hours = max(1, min(int(duration_hours or 2), 72))
-        db_connect_arn = f"arn:aws:rds-db:{region}:{account_number}:dbuser:{db_resource_id}/{db_username}"
-        permissions_data = {
-            'description': f'JIT DB connect for {db_name} ({region})',
-            'actions': ['rds-db:connect'],
-            'resources': [db_connect_arn]
-        }
+        inferred_role = 'read_only' if marker == 'R' else 'read_limited_write'
+        session_hours = max(
+            1,
+            min(
+                int(duration_hours or 2),
+                _database_request_max_duration_hours(_resolve_account_environment(account_id), inferred_role),
+            ),
+        )
+        db_connect_arn = ''
+        redshift_resources = []
+        is_redshift = resource_kind == 'redshift_cluster'
+        if resource_kind == 'redshift_cluster':
+            cluster_id = str((auth_profile or {}).get('cluster_identifier') or '').strip()
+            if not cluster_id:
+                return {'error': 'Redshift cluster identifier not available for IAM permission set generation.'}
+            attachment_cfg = _redshift_permission_policy_attachment()
+            redshift_resources = _redshift_db_credential_resources(
+                region=region,
+                account_id=account_number,
+                cluster_identifier=cluster_id,
+                db_username=db_username,
+                db_name=db_name,
+            )
+            db_connect_arn = redshift_resources[0]
+            if attachment_cfg:
+                permissions_data = {
+                    'description': f'JIT Redshift connect for {cluster_id}/{db_username} ({region})',
+                    **attachment_cfg,
+                }
+            else:
+                permissions_data = {
+                    'description': f'JIT Redshift connect for {cluster_id}/{db_username} ({region})',
+                    'grouped_actions': {
+                        'redshift_login': {
+                            'actions': ['redshift:GetClusterCredentials'],
+                            'resources': redshift_resources,
+                            'condition': {
+                                'StringEquals': {
+                                    'redshift:DbName': str(db_name or '').strip() or 'dev',
+                                }
+                            },
+                        },
+                    },
+                }
+        else:
+            db_connect_arn = f"arn:aws:rds-db:{region}:{account_number}:dbuser:{connect_resource_id}/{db_username}"
+            permissions_data = {
+                'description': f'JIT DB connect for {db_name} ({region})',
+                'actions': ['rds-db:connect'],
+                'resources': [db_connect_arn]
+            }
         ps_result = create_custom_permission_set(ps_name, permissions_data)
         if 'error' in ps_result:
             err_msg = str(ps_result.get('error') or '')
+            if is_redshift and 'already exists' in err_msg.lower():
+                return {
+                    'error': (
+                        f"Permission set name collision for Redshift request ({ps_name}). "
+                        "Delete the stale request or retry with a fresh request."
+                    )
+                }
             if 'already exists' not in err_msg.lower():
                 return {'error': f"Permission set creation failed: {err_msg}"}
             # Reuse existing permission set and refresh inline policy.
@@ -1988,18 +7990,15 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
                         break
                 if not existing_arn:
                     return {'error': 'Permission set exists but could not be resolved by name.'}
-                policy_doc = {
-                    'Version': '2012-10-17',
-                    'Statement': [{
-                        'Effect': 'Allow',
-                        'Action': ['rds-db:connect'],
-                        'Resource': [db_connect_arn]
-                    }]
-                }
-                sso_admin.put_inline_policy_to_permission_set(
-                    InstanceArn=CONFIG['sso_instance_arn'],
-                    PermissionSetArn=existing_arn,
-                    InlinePolicy=json.dumps(policy_doc)
+                if resource_kind != 'redshift_cluster':
+                    permissions_data = {
+                        'description': permissions_data['description'],
+                        'actions': ['rds-db:connect'],
+                        'resources': [db_connect_arn],
+                    }
+                _apply_permission_set_configuration(
+                    permission_set_arn=existing_arn,
+                    permissions_data=permissions_data,
                 )
                 ps_result = {'arn': existing_arn, 'name': ps_name}
             except Exception as upsert_err:
@@ -2022,6 +8021,19 @@ def _create_and_assign_dbconnect_access(user_email, account_id, db_username, db_
         })
         if 'error' in grant_result:
             return {'error': f"Permission set assignment failed: {grant_result['error']}"}
+        assignment_status = str(grant_result.get('status') or '').strip().upper()
+        if assignment_status and assignment_status != 'SUCCEEDED':
+            return {'error': 'Permission set assignment is still in progress. Please retry shortly.'}
+        try:
+            sso_admin = _sso_admin_client()
+            sso_admin.provision_permission_set(
+                InstanceArn=CONFIG['sso_instance_arn'],
+                PermissionSetArn=ps_result['arn'],
+                TargetType='AWS_ACCOUNT',
+                TargetId=str(account_number),
+            )
+        except Exception:
+            pass
         return {
             'permission_set_arn': ps_result['arn'],
             'permission_set_name': ps_name,
@@ -2050,12 +8062,12 @@ def saml_login():
         return redirect(auth.login())
     except Exception as e:
         print('SAML /api/login error:', e)
-        return jsonify({'error': 'SAML login failed', 'detail': str(e)}), 500
+        return jsonify({'error': 'SSO login is unavailable. Please contact an administrator.'}), 500
 
 
-@app.route('/saml/acs', methods=['GET', 'POST'])
+@app.route('/saml/acs', methods=['POST'])
 def saml_acs():
-    """Accept SAML response via POST (HTTP-POST binding) or GET (HTTP-Redirect binding from AWS IdC)."""
+    """Accept SAML response via POST (HTTP-POST binding)."""
     if not _SAML_AVAILABLE:
         return jsonify({'error': 'SAML not available; install python3-saml'}), 503
     req = prepare_flask_request(request)
@@ -2063,10 +8075,149 @@ def saml_acs():
     auth.process_response()
     errors = auth.get_errors()
     if not errors:
+        session.clear()
         session['user'] = auth.get_nameid()
+        session['auth_type'] = 'sso'
         session['attributes'] = auth.get_attributes() or {}
+        session.permanent = True
+        session['last_activity_at'] = datetime.now(timezone.utc).isoformat()
         return redirect('/saml/complete')
-    return jsonify({'error': errors}), 400
+    try:
+        app.logger.error(
+            'SAML ACS failed: errors=%s reason=%s host=%s prepared_host=%s prepared_port=%s app_base_url=%s',
+            errors,
+            auth.get_last_error_reason(),
+            request.host,
+            req.get('http_host'),
+            req.get('server_port'),
+            _resolve_app_base_url(req),
+        )
+    except Exception:
+        pass
+    return jsonify({'error': 'SSO authentication failed'}), 400
+
+
+def _validate_break_glass_password(password):
+    pwd = str(password or '')
+    if len(pwd) < 14:
+        return 'Password must be at least 14 characters.'
+    if not re.search(r'[A-Z]', pwd):
+        return 'Password must include at least one uppercase letter.'
+    if not re.search(r'[a-z]', pwd):
+        return 'Password must include at least one lowercase letter.'
+    if not re.search(r'\d', pwd):
+        return 'Password must include at least one number.'
+    if not re.search(r'[^A-Za-z0-9]', pwd):
+        return 'Password must include at least one special character.'
+    return ''
+
+@app.route('/api/auth/bootstrap-status', methods=['GET'])
+def break_glass_bootstrap_status():
+    if not _is_break_glass_request_allowed():
+        return jsonify({'bootstrap_required': False, 'break_glass_available': False}), 200
+    if not _BREAK_GLASS_AVAILABLE or not count_break_glass_users or not is_break_glass_bootstrap_required:
+        return jsonify({'bootstrap_required': False, 'break_glass_available': False}), 503
+    total_users = count_break_glass_users()
+    bootstrap_required = bool(is_break_glass_bootstrap_required())
+    pending_user = get_pending_bootstrap_user() if get_pending_bootstrap_user else None
+    return jsonify({
+        'break_glass_available': True,
+        'bootstrap_required': bootstrap_required,
+        'existing_break_glass_users': total_users,
+        'pending_mfa_enrollment': bool(pending_user),
+        'message': (
+            'Create the first break-glass SuperAdmin with MFA enrollment.'
+            if bootstrap_required else
+            'Break-glass bootstrap is already complete.'
+        )
+    })
+
+
+@app.route('/api/auth/bootstrap-break-glass', methods=['POST'])
+def bootstrap_break_glass():
+    if not _is_break_glass_request_allowed():
+        return _break_glass_access_denied_response()
+    if not _BREAK_GLASS_AVAILABLE or not add_break_glass_user_record or not generate_totp_secret:
+        return jsonify({'error': 'Break-glass bootstrap is unavailable'}), 503
+    if not is_break_glass_bootstrap_required():
+        return jsonify({'error': 'Break-glass bootstrap is already complete'}), 409
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email') or '').strip().lower()
+    password = str(data.get('password') or '')
+    confirm_password = str(data.get('confirm_password') or '')
+    if not email or '@' not in email:
+        return jsonify({'error': 'A valid admin email is required'}), 400
+    if not password or not confirm_password:
+        return jsonify({'error': 'Password and confirmation are required'}), 400
+    if password != confirm_password:
+        return jsonify({'error': 'Passwords do not match'}), 400
+    pwd_error = _validate_break_glass_password(password)
+    if pwd_error:
+        return jsonify({'error': pwd_error}), 400
+
+    pending_user = get_pending_bootstrap_user() if get_pending_bootstrap_user else None
+    if pending_user:
+        pending_email = str(pending_user.get('email') or '').strip().lower()
+        if pending_email and pending_email != email:
+            return jsonify({
+                'error': (
+                    'A pending break-glass bootstrap already exists for '
+                    f'{pending_email}. Complete MFA enrollment for that account or recreate it using the same email.'
+                )
+            }), 409
+
+    secret = generate_totp_secret()
+    ok = add_break_glass_user_record(email, password, role='SuperAdmin', totp_secret=secret, mfa_enabled=False)
+    if not ok:
+        return jsonify({'error': 'Failed to prepare break-glass bootstrap user'}), 500
+    payload = _break_glass_bootstrap_payload(email, secret)
+    payload.update({
+        'status': 'pending_mfa_verification',
+        'bootstrap_required': True,
+    })
+    return jsonify(payload)
+
+
+@app.route('/api/auth/bootstrap-break-glass/verify', methods=['POST'])
+def bootstrap_break_glass_verify():
+    if not _is_break_glass_request_allowed():
+        return _break_glass_access_denied_response()
+    if not _BREAK_GLASS_AVAILABLE or not verify_break_glass_totp_code or not enable_break_glass_mfa:
+        return jsonify({'error': 'Break-glass bootstrap is unavailable'}), 503
+
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email') or '').strip().lower()
+    code = str(data.get('mfa_code') or '').strip()
+    if not email or '@' not in email:
+        return jsonify({'error': 'A valid admin email is required'}), 400
+    if len(code) != 6 or not code.isdigit():
+        return jsonify({'error': 'Enter the 6-digit MFA code from your authenticator app.'}), 400
+
+    user = get_break_glass_user_by_email(email) if get_break_glass_user_by_email else None
+    if not user:
+        return jsonify({'error': 'Bootstrap setup not found for that email.'}), 404
+    if user.get('mfa_enabled'):
+        return jsonify({'error': 'Bootstrap is already complete for this account.'}), 409
+    if not verify_break_glass_totp_code(email, code, allow_pending=True):
+        return jsonify({'error': 'Invalid MFA code. Check your authenticator app and try again.'}), 401
+
+    enable_break_glass_mfa(email)
+    session.clear()
+    session['user'] = email
+    session['break_glass_email'] = email
+    session['auth_type'] = 'break_glass'
+    session['attributes'] = {}
+    session.permanent = True
+    session['last_activity_at'] = datetime.now(timezone.utc).isoformat()
+    return jsonify({
+        'ok': True,
+        'email': email,
+        'role': user.get('role') or 'SuperAdmin',
+        'display_name': email.split('@')[0].replace('.', ' ').title(),
+        'auth_type': 'break_glass',
+        'bootstrap_completed': True,
+    })
 
 
 @app.route('/api/auth/break-glass-login', methods=['POST'])
@@ -2075,25 +8226,326 @@ def break_glass_login():
     Break-glass login: username/password against SQLite DB on EC2.
     User has full access and can assign Identity Center users as admins/roles.
     """
+    if not _is_break_glass_request_allowed():
+        return _break_glass_access_denied_response()
     if not _BREAK_GLASS_AVAILABLE or not verify_break_glass_user:
         return jsonify({'error': 'Break-glass login not available'}), 503
     data = request.get_json(silent=True) or {}
     email = str(data.get('email') or data.get('username') or '').strip().lower()
     password = str(data.get('password') or '').strip()
+    mfa_code = str(data.get('mfa_code') or '').strip()
+    _, _, retry_after = _break_glass_lock_state(email)
+    if retry_after > 0:
+        response = jsonify({
+            'error': 'Too many failed sign-in attempts. Try again later.',
+            'retry_after_seconds': retry_after,
+        })
+        response.headers['Retry-After'] = str(retry_after)
+        return response, 429
     if not email or '@' not in email or not password:
         return jsonify({'error': 'Email and password required'}), 400
     user = verify_break_glass_user(email, password)
     if not user:
-        return jsonify({'error': 'Invalid email or password'}), 401
+        try:
+            from audit_log import log_app_activity
+            log_app_activity(
+                email or 'unknown',
+                'break_glass_login_failed',
+                http_method=request.method,
+                path=request.path,
+                status_code=401,
+                auth_type='break_glass',
+                is_admin=True,
+                ip=request.remote_addr,
+                details={'reason': 'invalid_credentials'},
+                error='invalid_credentials',
+                allowed=False,
+            )
+            request.environ['npamx_activity_logged'] = '1'
+        except Exception:
+            pass
+        retry_after = _record_break_glass_failure(email)
+        payload = {'error': 'Invalid email or password'}
+        if retry_after > 0:
+            payload['retry_after_seconds'] = retry_after
+        response = jsonify(payload)
+        if retry_after > 0:
+            response.headers['Retry-After'] = str(retry_after)
+        return response, 401
+    if not (user.get('mfa_enabled') or user.get('mfa_secondary_enabled')):
+        return jsonify({
+            'error': 'MFA enrollment is incomplete for this break-glass account.',
+            'bootstrap_required': bool(is_break_glass_bootstrap_required()) if is_break_glass_bootstrap_required else False,
+        }), 403
+    if len(mfa_code) != 6 or not mfa_code.isdigit():
+        return jsonify({'error': 'MFA code required', 'mfa_required': True}), 401
+    if not verify_break_glass_totp_code or not verify_break_glass_totp_code(email, mfa_code, allow_pending=False):
+        try:
+            from audit_log import log_app_activity
+            log_app_activity(
+                email or 'unknown',
+                'break_glass_login_failed',
+                http_method=request.method,
+                path=request.path,
+                status_code=401,
+                auth_type='break_glass',
+                is_admin=True,
+                ip=request.remote_addr,
+                details={'reason': 'invalid_mfa'},
+                error='invalid_mfa',
+                allowed=False,
+            )
+            request.environ['npamx_activity_logged'] = '1'
+        except Exception:
+            pass
+        return jsonify({'error': 'Invalid MFA code', 'mfa_required': True}), 401
+    _clear_break_glass_failures(email)
+    if user.get('needs_password_upgrade') and upgrade_break_glass_password_hash:
+        try:
+            upgrade_break_glass_password_hash(user['email'], password)
+        except Exception:
+            pass
+    if update_break_glass_last_login:
+        try:
+            update_break_glass_last_login(email)
+        except Exception:
+            pass
+    session.clear()
     session['user'] = user['email']
+    session['break_glass_email'] = user['email']
     session['auth_type'] = 'break_glass'
     session['attributes'] = {}
+    session.permanent = True
+    session['last_activity_at'] = datetime.now(timezone.utc).isoformat()
+    try:
+        from audit_log import log_app_activity
+        log_app_activity(
+            user['email'],
+            'break_glass_login_success',
+            http_method=request.method,
+            path=request.path,
+            status_code=200,
+            auth_type='break_glass',
+            is_admin=True,
+            ip=request.remote_addr,
+            details={'role': user.get('role') or 'SuperAdmin'},
+            allowed=True,
+        )
+        request.environ['npamx_activity_logged'] = '1'
+    except Exception:
+        pass
     return jsonify({
         'ok': True,
         'email': user['email'],
         'role': user.get('role') or 'SuperAdmin',
         'display_name': email.split('@')[0].replace('.', ' ').title(),
+        'auth_type': 'break_glass',
     })
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def logout_session():
+    actor_email = _current_actor_email() or _current_break_glass_email() or str(session.get('user') or '').strip().lower()
+    auth_type = str(session.get('auth_type') or 'sso').strip().lower()
+    is_admin = bool(_current_admin_actor()[1]) or auth_type == 'break_glass'
+    try:
+        from audit_log import log_app_activity
+        log_app_activity(
+            actor_email or 'unknown',
+            'logout_session',
+            http_method=request.method,
+            path=request.path,
+            status_code=200,
+            auth_type=auth_type,
+            is_admin=is_admin,
+            ip=request.remote_addr,
+            allowed=True,
+        )
+        request.environ['npamx_activity_logged'] = '1'
+    except Exception:
+        pass
+    session.clear()
+    response = jsonify({'ok': True})
+    response.delete_cookie(app.config.get('SESSION_COOKIE_NAME', 'session'))
+    response.delete_cookie('XSRF-TOKEN')
+    return response
+
+
+@app.route('/api/profile', methods=['GET'])
+def get_profile():
+    ident = _current_request_identity()
+    email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'error': 'Authentication required'}), 401
+    admin_record = _pam_admin_record_for_identity(
+        email=email,
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    auth_type = str(session.get('auth_type') or 'sso').strip().lower()
+    response = {
+        'email': email,
+        'display_name': _display_name_from_saml_session(email=email, nameid=ident.get('nameid') or '') or email.split('@')[0].replace('.', ' ').title(),
+        'auth_type': auth_type,
+        'is_admin': bool(admin_record),
+        'role': _normalize_pam_role((admin_record or {}).get('role') or ('SuperAdmin' if auth_type == 'break_glass' else 'Employee')),
+    }
+    business_profile = dict(_find_user_business_profile(email) or {})
+    settings = _load_app_settings()
+    try:
+        jumpcloud_mode = str(settings.get('jumpcloud_sync_mode') or 'on_demand').strip() or 'on_demand'
+        if _jumpcloud_enabled(settings) and jumpcloud_mode in ('on_demand', 'login_refresh'):
+            enriched_profile = _jumpcloud_enriched_business_profile(
+                email,
+                current_profile=business_profile,
+                settings=settings,
+            )
+            if isinstance(enriched_profile, dict) and enriched_profile:
+                business_profile = enriched_profile
+                if (
+                    str((business_profile or {}).get('directory_profile_source') or '').strip().lower() == 'jumpcloud'
+                    and (
+                        _normalize_email_address((business_profile or {}).get('manager_email'))
+                        or str((business_profile or {}).get('team') or '').strip()
+                        or str((business_profile or {}).get('job_title') or '').strip()
+                    )
+                ):
+                    existing_profile = dict(_find_user_business_profile(email) or {})
+                    persisted = dict(existing_profile)
+                    persisted.update({
+                        'email': email,
+                        'manager_email': business_profile.get('manager_email') or existing_profile.get('manager_email') or '',
+                        'manager_display_name': business_profile.get('manager_display_name') or existing_profile.get('manager_display_name') or '',
+                        'manager_manager_email': business_profile.get('manager_manager_email') or existing_profile.get('manager_manager_email') or '',
+                        'manager_manager_display_name': business_profile.get('manager_manager_display_name') or existing_profile.get('manager_manager_display_name') or '',
+                        'team': business_profile.get('team') or existing_profile.get('team') or '',
+                        'job_title': business_profile.get('job_title') or existing_profile.get('job_title') or '',
+                        'directory_profile_source': business_profile.get('directory_profile_source') or 'jumpcloud',
+                        'directory_profile_refreshed_at': business_profile.get('directory_profile_refreshed_at') or datetime.now(timezone.utc).isoformat(),
+                    })
+                    _upsert_user_business_profile(persisted)
+    except Exception:
+        app.logger.exception('JumpCloud profile enrichment failed for %s', email)
+    business_profile['rm_change_limit'] = 2
+    business_profile['rm_changes_remaining'] = max(0, 2 - _safe_non_negative_int(business_profile.get('rm_change_count'), 0))
+    business_profile['rm_change_locked'] = business_profile['rm_changes_remaining'] <= 0
+    response['pam_app_roles'] = [
+        {
+            'id': str(role.get('id') or '').strip(),
+            'name': str(role.get('name') or role.get('id') or '').strip(),
+        }
+        for role in _effective_pam_app_roles_for_user(
+            email,
+            pam_role=response.get('role') or 'Employee',
+        )
+        if str(role.get('id') or '').strip()
+    ]
+    response['business_profile'] = business_profile
+    response['business_profile_complete'] = not _business_profile_required_fields(business_profile)
+    response['business_profile_required'] = bool(_business_profile_required_fields(business_profile))
+    response['missing_fields'] = _business_profile_required_fields(business_profile)
+    if auth_type == 'break_glass':
+        user = _current_break_glass_user()
+        response['break_glass'] = {
+            'last_login_at': (user or {}).get('last_login_at', ''),
+            'mfa_devices': [
+                {'slot': 'primary', 'label': 'Primary device', 'enabled': bool((user or {}).get('mfa_enabled'))},
+                {'slot': 'secondary', 'label': 'Backup device', 'enabled': bool((user or {}).get('mfa_secondary_enabled'))},
+            ]
+        }
+    return jsonify(response)
+
+
+@app.route('/api/profile/break-glass/password', methods=['POST'])
+def change_break_glass_password():
+    email = _current_break_glass_email()
+    if not email:
+        return jsonify({'error': 'Break-glass session required'}), 403
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password') or '')
+    new_password = str(data.get('new_password') or '')
+    confirm_password = str(data.get('confirm_password') or '')
+    mfa_code = str(data.get('mfa_code') or '').strip()
+    user = verify_break_glass_user(email, current_password) if verify_break_glass_user else None
+    if not user:
+        return jsonify({'error': 'Current password is invalid'}), 401
+    if new_password != confirm_password:
+        return jsonify({'error': 'New passwords do not match'}), 400
+    pwd_error = _validate_break_glass_password(new_password)
+    if pwd_error:
+        return jsonify({'error': pwd_error}), 400
+    if current_password == new_password:
+        return jsonify({'error': 'New password must be different from the current password'}), 400
+    if not verify_break_glass_totp_code or not verify_break_glass_totp_code(email, mfa_code, allow_pending=False):
+        return jsonify({'error': 'Valid MFA code is required'}), 401
+    if not upgrade_break_glass_password_hash or not upgrade_break_glass_password_hash(email, new_password):
+        return jsonify({'error': 'Failed to update password'}), 500
+    return jsonify({'ok': True, 'message': 'Password updated successfully.'})
+
+
+@app.route('/api/profile/break-glass/mfa/start', methods=['POST'])
+def start_break_glass_mfa_enrollment():
+    email = _current_break_glass_email()
+    user = _current_break_glass_user()
+    if not email or not user:
+        return jsonify({'error': 'Break-glass session required'}), 403
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password') or '')
+    current_mfa_code = str(data.get('current_mfa_code') or '').strip()
+    slot = 'secondary' if str(data.get('slot') or '').strip().lower() == 'secondary' else 'primary'
+    if not verify_break_glass_user or not verify_break_glass_user(email, current_password):
+        return jsonify({'error': 'Current password is invalid'}), 401
+    has_existing_device = bool(user.get('mfa_enabled') or user.get('mfa_secondary_enabled'))
+    if has_existing_device and (not verify_break_glass_totp_code or not verify_break_glass_totp_code(email, current_mfa_code, allow_pending=False)):
+        return jsonify({'error': 'Current MFA code is required to manage MFA devices'}), 401
+    secret = generate_totp_secret()
+    if not set_break_glass_totp_secret or not set_break_glass_totp_secret(email, secret, slot=slot, mfa_enabled=False):
+        return jsonify({'error': 'Failed to prepare MFA enrollment'}), 500
+    payload = _break_glass_bootstrap_payload(email, secret)
+    payload.update({'slot': slot})
+    return jsonify(payload)
+
+
+@app.route('/api/profile/break-glass/mfa/verify', methods=['POST'])
+def verify_break_glass_mfa_enrollment():
+    email = _current_break_glass_email()
+    user = _current_break_glass_user()
+    if not email or not user:
+        return jsonify({'error': 'Break-glass session required'}), 403
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password') or '')
+    slot = 'secondary' if str(data.get('slot') or '').strip().lower() == 'secondary' else 'primary'
+    code = str(data.get('mfa_code') or '').strip()
+    if not verify_break_glass_user or not verify_break_glass_user(email, current_password):
+        return jsonify({'error': 'Current password is invalid'}), 401
+    secret = str(user.get('totp_secret_secondary') if slot == 'secondary' else user.get('totp_secret') or '').strip()
+    if not secret:
+        return jsonify({'error': 'No pending MFA setup found for this device'}), 404
+    if not _verify_specific_totp_secret(secret, code):
+        return jsonify({'error': 'Invalid authenticator code for the new device'}), 401
+    if not enable_break_glass_mfa or not enable_break_glass_mfa(email, slot=slot):
+        return jsonify({'error': 'Failed to enable MFA device'}), 500
+    return jsonify({'ok': True, 'slot': slot, 'message': 'MFA device enrolled successfully.'})
+
+
+@app.route('/api/profile/break-glass/mfa/remove-secondary', methods=['POST'])
+def remove_break_glass_secondary_mfa():
+    email = _current_break_glass_email()
+    user = _current_break_glass_user()
+    if not email or not user:
+        return jsonify({'error': 'Break-glass session required'}), 403
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password') or '')
+    mfa_code = str(data.get('mfa_code') or '').strip()
+    if not bool(user.get('mfa_secondary_enabled')):
+        return jsonify({'error': 'No backup MFA device is configured'}), 400
+    if not verify_break_glass_user or not verify_break_glass_user(email, current_password):
+        return jsonify({'error': 'Current password is invalid'}), 401
+    if not verify_break_glass_totp_code or not verify_break_glass_totp_code(email, mfa_code, allow_pending=False):
+        return jsonify({'error': 'Current MFA code is required'}), 401
+    if not clear_break_glass_totp_secret or not clear_break_glass_totp_secret(email, slot='secondary'):
+        return jsonify({'error': 'Failed to remove backup MFA device'}), 500
+    return jsonify({'ok': True, 'message': 'Backup MFA device removed.'})
 
 
 def _email_from_saml_session():
@@ -2417,6 +8869,716 @@ def _current_request_identity():
     return {'nameid': nameid, 'email': str(email or '').strip(), 'hints': hints}
 
 
+def _current_actor_email():
+    ident = _current_request_identity()
+    return str(ident.get('email') or _email_from_saml_session() or '').strip().lower()
+
+
+def _current_break_glass_email():
+    if session.get('auth_type') != 'break_glass':
+        return ''
+    return str(session.get('user') or '').strip().lower()
+
+
+def _current_break_glass_user():
+    email = _current_break_glass_email()
+    if not email or not get_break_glass_user_by_email:
+        return None
+    return get_break_glass_user_by_email(email)
+
+
+def _current_admin_actor():
+    ident = _current_request_identity()
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    return ident, admin_record
+
+
+def _approval_access_level_for_request(role='', permissions=None):
+    role_value = str(role or '').strip().lower()
+    if role_value in ('admin', 'read_full_write', 'read_limited_write', 'read_only'):
+        return role_value
+    perms_upper = [str(item or '').strip().upper() for item in (permissions or []) if str(item or '').strip()]
+    if 'ALL' in perms_upper or any(item in perms_upper for item in ('GRANT', 'REVOKE')):
+        return 'admin'
+    if any(item in perms_upper for item in ('CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'CREATE INDEX', 'DROP INDEX')):
+        return 'read_full_write'
+    if any(item in perms_upper for item in ('INSERT', 'UPDATE', 'DELETE', 'MERGE')):
+        return 'read_limited_write'
+    return 'read_only'
+
+
+def _parse_request_datetime(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except Exception:
+        return None
+
+
+def _request_approver_email_domain():
+    settings = _load_app_settings()
+    domain = str(settings.get('request_approver_email_domain') or 'nykaa.com').strip().lower()
+    return domain[1:] if domain.startswith('@') else domain
+
+
+def _normalize_request_approver_email(value):
+    email = str(value or '').strip().lower()
+    if not email:
+        return ''
+    if not EMAIL_RE.match(email):
+        raise ValueError('Approver email is invalid.')
+    domain = _request_approver_email_domain()
+    if domain and not email.endswith('@' + domain):
+        raise ValueError(f'Approver email must end with @{domain}.')
+    return email
+
+
+def _normalize_request_approver_email_list(values):
+    emails = []
+    for item in _normalize_email_list(values):
+        normalized = _normalize_request_approver_email(item)
+        if normalized and normalized not in emails:
+            emails.append(normalized)
+    return emails
+
+
+def _pending_request_expires_at(req):
+    item = req if isinstance(req, dict) else {}
+    direct = _parse_request_datetime(item.get('pending_expires_at'))
+    if direct:
+        return direct
+    try:
+        hours = int(item.get('pending_request_expiry_hours') or 0)
+    except Exception:
+        hours = 0
+    if hours < 1:
+        return None
+    created_at = _parse_request_datetime(item.get('created_at'))
+    if not created_at:
+        return None
+    return created_at + timedelta(hours=hours)
+
+
+def _expire_pending_request_if_due(req, request_id='', now=None):
+    item = req if isinstance(req, dict) else {}
+    if str(item.get('status') or '').strip().lower() != 'pending':
+        return False
+    pending_exp = _pending_request_expires_at(item)
+    current = now or datetime.now(timezone.utc)
+    if not pending_exp or pending_exp > current:
+        return False
+    item['status'] = 'expired'
+    item['expired_at'] = current.isoformat()
+    item['modified_at'] = current.isoformat()
+    item['approval_note'] = 'Request expired before approval.'
+    item['denial_reason'] = 'Request expired before approval.'
+    return True
+
+
+def _apply_pending_request_expiry():
+    now = datetime.now(timezone.utc)
+    changed = False
+    for req_id, req in requests_db.items():
+        if _expire_pending_request_if_due(req, request_id=req_id, now=now):
+            changed = True
+    if changed:
+        _save_requests()
+    return changed
+
+
+def _publish_request_notification_to_sns(*, request_obj, event_type, approver_email=''):
+    settings = _load_app_settings()
+    enabled = _as_bool(settings.get('sns_notifications_enabled'), False)
+    topic_arn = str(settings.get('sns_topic_arn') or '').strip()
+    if not enabled or not topic_arn:
+        return {'status': 'skipped', 'reason': 'sns_not_configured'}
+
+    target_email = str(approver_email or request_obj.get('request_approver_email') or '').strip().lower()
+    if not target_email:
+        return {'status': 'skipped', 'reason': 'approver_email_missing'}
+
+    region = (
+        str(settings.get('aws_region') or '').strip()
+        or str(os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
+    )
+    request_id = str(request_obj.get('id') or '').strip()
+    request_type = str(request_obj.get('type') or 'access_request').strip()
+    requester = str(request_obj.get('user_email') or '').strip().lower()
+    summary = {
+        'event_type': event_type,
+        'request_id': request_id,
+        'request_type': request_type,
+        'requester_email': requester,
+        'approver_email': target_email,
+        'account_id': str(request_obj.get('account_id') or '').strip(),
+        'db_instance_id': str(request_obj.get('db_instance_id') or request_obj.get('requested_instance_input') or '').strip(),
+        'database_name': str(request_obj.get('requested_database_name') or '').strip(),
+        'schema_name': str(request_obj.get('requested_schema_name') or '').strip(),
+        'table_name': str(request_obj.get('requested_table_name') or '').strip(),
+        'duration_hours': request_obj.get('duration_hours'),
+        'justification': str(request_obj.get('justification') or '').strip(),
+        'created_at': str(request_obj.get('created_at') or '').strip(),
+        'approval_workflow_name': str(request_obj.get('approval_workflow_name') or '').strip(),
+    }
+    message = json.dumps(summary, indent=2)
+    boto3.client('sns', region_name=region).publish(
+        TopicArn=topic_arn,
+        Subject=f"NPAMX approval request {request_id[:8] or ''}".strip(),
+        Message=message,
+        MessageAttributes={
+            'approver_email': {'DataType': 'String', 'StringValue': target_email},
+            'event_type': {'DataType': 'String', 'StringValue': str(event_type or 'request_submitted')},
+            'request_type': {'DataType': 'String', 'StringValue': request_type},
+        },
+    )
+    return {'status': 'published', 'topic_arn': topic_arn}
+
+
+def _request_category(req):
+    item = req if isinstance(req, dict) else {}
+    req_type = str(item.get('type') or '').strip().lower()
+    if req_type == 'database_access':
+        return 'databases'
+    if req_type == 'instance_access':
+        return 'workloads'
+
+    haystacks = [
+        str(item.get('use_case') or '').lower(),
+        str(item.get('permission_set') or '').lower(),
+        str(item.get('account_id') or '').lower(),
+    ]
+    permissions = item.get('ai_permissions') or {}
+    if isinstance(permissions, dict):
+        haystacks.append(" ".join([str(x).lower() for x in (permissions.get('actions') or [])]))
+        haystacks.append(" ".join([str(x).lower() for x in (permissions.get('resources') or [])]))
+    combined = " ".join(haystacks)
+    if any(token in combined for token in ('s3', 'bucket', 'gcs', 'storage')):
+        return 'storage'
+    return 'cloud'
+
+
+def _request_decision_status(req):
+    status = str((req or {}).get('status') or '').strip().lower()
+    if status in ('approved', 'active', 'completed'):
+        return 'approved'
+    if status in ('denied', 'rejected', 'failed', 'revoked', 'expired'):
+        return 'denied'
+    return 'other'
+
+
+def _request_display_target(req):
+    item = req if isinstance(req, dict) else {}
+    category = _request_category(item)
+    if category == 'databases':
+        dbs = item.get('databases') if isinstance(item.get('databases'), list) else []
+        names = [str(db.get('name') or '').strip() for db in dbs if isinstance(db, dict) and str(db.get('name') or '').strip()]
+        if names:
+            return ", ".join(names[:3])
+        return str(item.get('db_instance_id') or 'Database').strip() or 'Database'
+    if category == 'workloads':
+        return str(item.get('instance_name') or item.get('instance_id') or 'Instance').strip() or 'Instance'
+    if category == 'storage':
+        return str(item.get('use_case') or item.get('permission_set') or 'Storage').strip() or 'Storage'
+    return str(item.get('use_case') or item.get('permission_set') or item.get('account_id') or 'Cloud access').strip() or 'Cloud access'
+
+
+def category_label_for_api(category):
+    labels = {
+        'databases': 'Database Access',
+        'cloud': 'Cloud Access',
+        'workloads': 'Workloads Access',
+        'storage': 'Storage Access',
+    }
+    return labels.get(str(category or '').strip().lower(), 'Requests')
+
+
+def _request_started_at(req):
+    item = req if isinstance(req, dict) else {}
+    for key in ('activated_at', 'granted_at', 'approved_at', 'created_at'):
+        value = str(item.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _request_expires_at(req):
+    item = req if isinstance(req, dict) else {}
+    return str(item.get('expires_at') or item.get('expiry_time') or '').strip()
+
+
+def _is_active_session_request(req, now=None):
+    item = req if isinstance(req, dict) else {}
+    status = str(item.get('status') or '').strip().lower()
+    category = _request_category(item)
+    current = now or datetime.now(timezone.utc)
+    expires_at = _parse_request_datetime(_request_expires_at(item))
+    if expires_at and expires_at <= current:
+        return False
+    if category == 'databases':
+        return status == 'active' and not _is_db_request_expired(item, now=current)
+    if category == 'workloads':
+        return status in ('approved', 'active', 'auto_approved')
+    return status in ('approved', 'active', 'completed')
+
+
+def _active_session_row(req_id, req):
+    item = req if isinstance(req, dict) else {}
+    category = _request_category(item)
+    username = str(item.get('user_email') or '').strip()
+    started_at = _request_started_at(item)
+    expires_at = _request_expires_at(item)
+    row = {
+        'request_id': str(req_id or item.get('id') or '').strip(),
+        'category': category,
+        'user_email': username,
+        'target': _request_display_target(item),
+        'started_at': started_at,
+        'expires_at': expires_at,
+        'status': str(item.get('status') or '').strip().lower(),
+    }
+    if category == 'databases':
+        databases = item.get('databases')
+        if isinstance(databases, list) and databases:
+            first_db = databases[0] if isinstance(databases[0], dict) else {}
+        elif isinstance(databases, dict):
+            first_db = databases
+        else:
+            first_db = {}
+        row['engine'] = str(first_db.get('engine') or item.get('engine') or 'mysql').strip()
+    elif category == 'workloads':
+        instances = item.get('instances') if isinstance(item.get('instances'), list) else []
+        row['target'] = ', '.join([
+            str((instance or {}).get('name') or (instance or {}).get('id') or '').strip()
+            for instance in instances[:3]
+            if isinstance(instance, dict) and str((instance or {}).get('name') or (instance or {}).get('id') or '').strip()
+        ]) or row['target']
+    return row
+
+
+def _collect_admin_active_sessions():
+    _load_requests()
+    now = datetime.now(timezone.utc)
+    categories = {
+        'cloud': {'key': 'cloud', 'label': 'Cloud Access', 'sessions': []},
+        'databases': {'key': 'databases', 'label': 'Database Access', 'sessions': []},
+        'workloads': {'key': 'workloads', 'label': 'Workloads Access', 'sessions': []},
+        'storage': {'key': 'storage', 'label': 'Storage Access', 'sessions': []},
+    }
+    for req_id, req in requests_db.items():
+        if not isinstance(req, dict):
+            continue
+        try:
+            if not _is_active_session_request(req, now=now):
+                continue
+            category = _request_category(req)
+            if category not in categories:
+                continue
+            categories[category]['sessions'].append(_active_session_row(req_id, req))
+        except Exception as exc:
+            try:
+                print(f"Active sessions skip {req_id}: {exc}", flush=True)
+            except Exception:
+                pass
+
+    for item in categories.values():
+        item['sessions'].sort(key=lambda row: str(row.get('started_at') or ''), reverse=True)
+        item['total'] = len(item['sessions'])
+    return categories
+
+
+def _build_home_history_series(items, period='month'):
+    now = datetime.now(timezone.utc)
+    key_order = []
+    buckets = {}
+
+    if period == 'day':
+        for offset in range(29, -1, -1):
+            dt = now - timedelta(days=offset)
+            key = dt.strftime('%Y-%m-%d')
+            key_order.append((key, dt.strftime('%d %b')))
+    elif period == 'week':
+        start_of_week = now - timedelta(days=now.weekday())
+        for offset in range(11, -1, -1):
+            dt = start_of_week - timedelta(weeks=offset)
+            key = dt.strftime('%Y-W%W')
+            key_order.append((key, dt.strftime('Wk %d %b')))
+    else:
+        for offset in range(5, -1, -1):
+            dt = now.replace(day=1) - timedelta(days=offset * 30)
+            key = dt.strftime('%Y-%m')
+            key_order.append((key, dt.strftime('%b %Y')))
+
+    for key, label in key_order:
+        buckets[key] = {'label': label, 'approved': 0, 'denied': 0}
+
+    for req in items:
+        created_at = _parse_request_datetime(req.get('created_at') or req.get('requested_at'))
+        if not created_at:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        if period == 'day':
+            key = created_at.strftime('%Y-%m-%d')
+        elif period == 'week':
+            key = created_at.strftime('%Y-W%W')
+        else:
+            key = created_at.strftime('%Y-%m')
+        bucket = buckets.get(key)
+        if not bucket:
+            continue
+        decision = _request_decision_status(req)
+        if decision == 'approved':
+            bucket['approved'] += 1
+        elif decision == 'denied':
+            bucket['denied'] += 1
+
+    return [buckets[key] for key, _ in key_order]
+
+
+def _verify_specific_totp_secret(secret, code):
+    try:
+        import pyotp
+    except Exception:
+        return False
+    otp = str(code or '').strip().replace(' ', '')
+    secret_value = str(secret or '').strip()
+    if not secret_value or len(otp) != 6 or not otp.isdigit():
+        return False
+    try:
+        return bool(pyotp.TOTP(secret_value).verify(otp, valid_window=1))
+    except Exception:
+        return False
+
+
+def _approval_pending_message(runtime_state):
+    stage = current_approval_stage(runtime_state)
+    if not stage:
+        return 'Pending approval.'
+    emails = [str(item.get('email') or '').strip() for item in (stage.get('approvers') or []) if str(item.get('email') or '').strip()]
+    approver_text = ', '.join(emails)
+    if approver_text:
+        return f"Pending {stage.get('name') or 'approval'} from {approver_text}."
+    return f"Pending {stage.get('name') or 'approval'}."
+
+
+def _database_request_actor_permissions(access_request, actor_email='', is_admin=False):
+    actor = str(actor_email or '').strip().lower()
+    requester = str((access_request or {}).get('user_email') or '').strip().lower()
+    runtime_state = (access_request or {}).get('approval_engine') if isinstance((access_request or {}).get('approval_engine'), dict) else {}
+    current_stage = current_approval_stage(runtime_state) if runtime_state else {}
+    current_stage = current_stage if isinstance(current_stage, dict) else {}
+    approver_type = str(current_stage.get('approver_type') or '').strip().lower()
+    pending_approvers = [
+        str(item.get('email') or '').strip().lower()
+        for item in (current_stage.get('approvers') or [])
+        if str(item.get('email') or '').strip()
+    ]
+    current_stage_open = str(current_stage.get('status') or 'pending').strip().lower() == 'pending'
+    is_requester = bool(actor) and actor == requester
+    is_self_approval_stage = approver_type in ('self', 'self_approval', 'requester', 'requestor')
+    is_current_approver = bool(actor) and current_stage_open and (
+        actor in pending_approvers or (is_self_approval_stage and is_requester)
+    )
+    can_view = bool(is_admin or is_requester or is_current_approver)
+    approval_history = []
+    for item in (runtime_state.get('approval_history') or []):
+        if not isinstance(item, dict):
+            continue
+        approval_history.append({
+            'stage_name': str(item.get('stage_name') or '').strip(),
+            'decision': str(item.get('decision') or '').strip(),
+            'actor_email': str(item.get('actor_email') or '').strip().lower(),
+            'reason': str(item.get('reason') or '').strip(),
+            'acted_at': str(item.get('acted_at') or '').strip(),
+        })
+    return {
+        'is_requester': is_requester,
+        'is_admin': bool(is_admin),
+        'is_current_approver': is_current_approver,
+        'can_view': can_view,
+        'can_approve': is_current_approver,
+        'can_deny': is_current_approver,
+        'current_stage_name': str(current_stage.get('name') or '').strip() if current_stage_open else '',
+        'current_stage_approvers': pending_approvers if current_stage_open else [],
+        'approval_history': approval_history,
+    }
+
+
+def _apply_workflow_decision_to_request(access_request, actor_email, decision, reason='', admin_override=False):
+    runtime_state = access_request.get('approval_engine') if isinstance(access_request.get('approval_engine'), dict) else {}
+    stage = current_approval_stage(runtime_state)
+    if not stage:
+        return {'error': 'Approval workflow is not active for this request.'}
+
+    actor = str(actor_email or '').strip().lower()
+    requester = str((access_request or {}).get('user_email') or '').strip().lower()
+    approver_type = str(stage.get('approver_type') or '').strip().lower()
+    approvers = stage.get('approvers') if isinstance(stage.get('approvers'), list) else []
+    actor_entry = next((item for item in approvers if str(item.get('email') or '').strip().lower() == actor), None)
+    if not actor_entry and approver_type in ('self', 'self_approval', 'requester', 'requestor') and actor and actor == requester:
+        actor_entry = {
+            'email': actor,
+            'kind': 'primary',
+            'status': 'pending',
+            'fallback_reason': '',
+        }
+        approvers.append(actor_entry)
+        stage['approvers'] = approvers
+    if not actor_entry and admin_override and actor:
+        actor_entry = {
+            'email': actor,
+            'kind': 'admin_override',
+            'status': 'pending',
+            'fallback_reason': 'Admin override',
+        }
+        approvers.append(actor_entry)
+        stage['approvers'] = approvers
+    if not actor_entry:
+        return {'error': 'You are not an approver for the current stage.'}
+    if stage.get('status') != 'pending':
+        return {'error': 'Current approval stage is already closed.'}
+
+    stage['status'] = 'approved' if decision == 'approve' else 'denied'
+    stage['decision'] = decision
+    stage['decided_by'] = actor
+    stage['decided_at'] = datetime.now().isoformat()
+    actor_entry['status'] = stage['status']
+    for item in approvers:
+        if item is actor_entry:
+            continue
+        if str(item.get('status') or '').strip().lower() == 'pending':
+            item['status'] = 'superseded'
+
+    runtime_state['approval_history'] = runtime_state.get('approval_history') if isinstance(runtime_state.get('approval_history'), list) else []
+    runtime_state['approval_history'].append({
+        'stage_id': stage.get('id', ''),
+        'stage_name': stage.get('name', ''),
+        'decision': decision,
+        'actor_email': actor,
+        'reason': str(reason or '').strip(),
+        'acted_at': stage['decided_at'],
+        'admin_override': bool(admin_override),
+    })
+
+    if decision == 'deny':
+        runtime_state['status'] = 'denied'
+        access_request['approval_engine'] = runtime_state
+        access_request['status'] = 'denied'
+        access_request['denied_at'] = stage['decided_at']
+        access_request['denial_reason'] = str(reason or 'Denied by approver').strip()
+        access_request['approval_note'] = 'Request denied by approval workflow.'
+        return {'status': 'denied'}
+
+    stages = runtime_state.get('stages') if isinstance(runtime_state.get('stages'), list) else []
+    next_index = int(runtime_state.get('current_stage_index') or 0) + 1
+    if next_index < len(stages):
+        runtime_state['current_stage_index'] = next_index
+        runtime_state['status'] = 'pending'
+        access_request['approval_engine'] = runtime_state
+        access_request['status'] = 'pending'
+        access_request['approval_note'] = _approval_pending_message(runtime_state)
+        return {'status': 'partial_approval', 'pending_stage': current_approval_stage(runtime_state)}
+
+    runtime_state['status'] = 'approved'
+    access_request['approval_engine'] = runtime_state
+    access_request['status'] = 'approved'
+    access_request['approved_at'] = stage['decided_at']
+    access_request['approval_note'] = 'Approval workflow completed.'
+    return {'status': 'approved'}
+
+
+def _pending_request_access_summary(req):
+    item = req if isinstance(req, dict) else {}
+    category = _request_category(item)
+    if category == 'databases':
+        return str(item.get('requested_access_type') or '').strip() or str(item.get('role') or '').strip() or 'Database access'
+    if category == 'workloads':
+        return 'Sudo access' if bool(item.get('sudo_access')) else 'Instance access'
+    return (
+        str(item.get('permission_set') or '').strip()
+        or str(item.get('use_case') or '').strip()
+        or 'Access request'
+    )
+
+
+def _pending_request_recipients(req):
+    item = req if isinstance(req, dict) else {}
+    if _request_category(item) == 'databases':
+        return _pending_database_request_recipients(item)
+    raw_emails = []
+    approver_emails = item.get('approver_emails')
+    if isinstance(approver_emails, list):
+        raw_emails.extend(approver_emails)
+    elif isinstance(approver_emails, str):
+        raw_emails.extend([part.strip() for part in approver_emails.split(',') if part.strip()])
+    raw_emails.extend([
+        item.get('request_approver_email'),
+        item.get('workflow_primary_approver_email'),
+        item.get('security_lead_email'),
+        item.get('manager_email'),
+        item.get('approved_by'),
+        item.get('requested_by'),
+    ])
+    return _normalize_email_list(raw_emails)
+
+
+def _admin_pending_database_approvals_payload():
+    _apply_pending_request_expiry()
+    actor_email = _current_actor_email()
+    rows = []
+    for request_id, req in requests_db.items():
+        if not isinstance(req, dict):
+            continue
+        if str(req.get('status') or '').strip().lower() != 'pending':
+            continue
+        request_type = str(req.get('type') or '').strip().lower()
+        category = _request_category(req)
+        runtime_state = req.get('approval_engine') if isinstance(req.get('approval_engine'), dict) else {}
+        if request_type == 'database_access':
+            safe = _sanitize_database_request_for_client(req, actor_email=actor_email, is_admin=True)
+        else:
+            safe = dict(req)
+            safe['approval_workflow_name'] = str(req.get('approval_workflow_name') or '').strip()
+            safe['approval_note'] = str(req.get('approval_note') or '').strip()
+            safe['request_approver_email'] = str(req.get('request_approver_email') or '').strip()
+            safe['pending_stage'] = ''
+            safe['pending_approvers'] = []
+        pending_stage = str(safe.get('pending_stage') or '').strip()
+        pending_approvers = safe.get('pending_approvers') if isinstance(safe.get('pending_approvers'), list) else []
+        if not pending_stage:
+            current_stage = current_approval_stage(runtime_state) if runtime_state else {}
+            if isinstance(current_stage, dict) and str(current_stage.get('status') or '').strip().lower() == 'pending':
+                pending_stage = str(current_stage.get('name') or '').strip() or 'Pending approval'
+                pending_approvers = [
+                    str(item.get('email') or '').strip()
+                    for item in (current_stage.get('approvers') or [])
+                    if str(item.get('email') or '').strip()
+                ]
+            else:
+                pending_stage = 'Pending approval'
+                pending_approvers = _pending_request_recipients(req)
+        target_primary = _request_display_target(req)
+        target_secondary = ''
+        if category == 'databases':
+            target_secondary = " / ".join([
+                str(req.get('account_id') or '').strip(),
+                str(req.get('requested_instance_input') or req.get('db_instance_id') or '').strip(),
+                str(req.get('requested_database_name') or '').strip(),
+            ]).strip(' /')
+        elif category == 'workloads':
+            target_secondary = " / ".join([
+                str(req.get('account_id') or '').strip(),
+                str(req.get('instance_name') or req.get('instance_id') or '').strip(),
+            ]).strip(' /')
+        else:
+            target_secondary = " / ".join([
+                str(req.get('account_id') or '').strip(),
+                str(req.get('account_env') or '').strip(),
+            ]).strip(' /')
+        rows.append({
+            'request_id': request_id,
+            'request_type': request_type or 'access_request',
+            'category': category,
+            'category_label': category_label_for_api(category),
+            'status': safe.get('status', 'pending'),
+            'created_at': str(req.get('created_at') or '').strip(),
+            'user_email': str(req.get('user_email') or '').strip(),
+            'user_full_name': str(req.get('user_full_name') or '').strip(),
+            'requested_by_email': str(req.get('requested_by_email') or '').strip(),
+            'account_id': str(req.get('account_id') or '').strip(),
+            'account_env': str(req.get('account_env') or '').strip(),
+            'db_instance_id': str(req.get('requested_instance_input') or req.get('db_instance_id') or '').strip(),
+            'database_name': str(req.get('requested_database_name') or '').strip(),
+            'schema_name': str(req.get('requested_schema_name') or '').strip(),
+            'table_name': str(req.get('requested_table_name') or '').strip(),
+            'requested_access_type': str(req.get('requested_access_type') or '').strip(),
+            'access_summary': _pending_request_access_summary(req),
+            'target_primary': target_primary,
+            'target_secondary': target_secondary,
+            'duration_hours': req.get('duration_hours', 2),
+            'approval_workflow_name': safe.get('approval_workflow_name', ''),
+            'pending_stage': pending_stage,
+            'pending_approvers': pending_approvers,
+            'request_approver_email': safe.get('request_approver_email', ''),
+            'approval_note': safe.get('approval_note', ''),
+            'pending_expires_at': safe.get('pending_expires_at', ''),
+            'can_admin_override': request_type == 'database_access',
+        })
+
+    def _sort_key(item):
+        return str(item.get('created_at') or '')
+
+    rows.sort(key=_sort_key, reverse=True)
+    return {
+        'requests': rows,
+        'total': len(rows),
+    }
+
+
+def _pending_database_request_recipients(request_obj):
+    req = request_obj if isinstance(request_obj, dict) else {}
+    runtime_state = req.get('approval_engine') if isinstance(req.get('approval_engine'), dict) else {}
+    stage = current_approval_stage(runtime_state)
+    stage_emails = []
+    if isinstance(stage, dict) and str(stage.get('status') or '').strip().lower() == 'pending':
+        stage_emails = [
+            _normalize_email_address(item.get('email'))
+            for item in (stage.get('approvers') or [])
+            if _normalize_email_address(item.get('email'))
+        ]
+    recipients = stage_emails or [
+        _normalize_email_address(req.get('request_approver_email')),
+        _normalize_email_address(req.get('workflow_primary_approver_email')),
+        _normalize_email_address(req.get('db_owner_email')),
+        _normalize_email_address(req.get('security_lead_email')),
+    ]
+    return _normalize_email_list(recipients)
+
+
+def _admin_reassign_database_request_approver(request_obj, new_emails, *, actor_email='', note=''):
+    req = request_obj if isinstance(request_obj, dict) else {}
+    if str(req.get('type') or '').strip().lower() != 'database_access':
+        raise ValueError('Only database access requests are supported.')
+    if str(req.get('status') or '').strip().lower() != 'pending':
+        raise ValueError('Only pending requests can be reassigned.')
+    runtime_state = req.get('approval_engine') if isinstance(req.get('approval_engine'), dict) else {}
+    stage = current_approval_stage(runtime_state)
+    if not isinstance(stage, dict) or str(stage.get('status') or '').strip().lower() != 'pending':
+        raise ValueError('No open approval stage is available for reassignment.')
+    normalized_emails = _normalize_request_approver_email_list(new_emails)
+    if not normalized_emails:
+        raise ValueError('At least one valid approver email is required.')
+    note_text = ' '.join(str(note or '').strip().split())
+    stage['approvers'] = [{
+        'email': email,
+        'kind': 'primary' if index == 0 else 'additional',
+        'status': 'pending',
+        'fallback_reason': note_text or 'Admin reassigned approver',
+    } for index, email in enumerate(normalized_emails)]
+    stage['decision'] = ''
+    stage['decided_by'] = ''
+    stage['decided_at'] = ''
+    req['request_approver_email'] = normalized_emails[0]
+    req['workflow_primary_approver_email'] = normalized_emails[0]
+    req['workflow_additional_approver_emails'] = normalized_emails[1:]
+    req['approval_engine'] = runtime_state
+    req['approval_note'] = _approval_pending_message(runtime_state)
+    req['modified_at'] = datetime.now().isoformat()
+    req['admin_override_note'] = (
+        f"Approver routing updated by {actor_email or 'admin'} to {', '.join(normalized_emails)}"
+        + (f" | Note: {note_text}" if note_text else '')
+    )
+    return normalized_emails
+
+
 @app.before_request
 def enforce_admin_api_access():
     """
@@ -2447,6 +9609,20 @@ def enforce_admin_api_access():
     )
     if not admin_record:
         return jsonify({'error': 'Admin access required'}), 403
+    admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+    if not _can_access_admin_console_role(admin_role):
+        return jsonify({'error': 'Admin access required'}), 403
+    required_capability = _admin_api_required_capability(path)
+    if required_capability:
+        effective_capabilities = set(_effective_pam_capabilities_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {},
+        ))
+        if required_capability not in effective_capabilities:
+            return jsonify({'error': 'You do not have permission for this admin action.', 'required_capability': required_capability}), 403
+    if not required_capability and _is_engineer_role(admin_role) and _is_admin_only_api_path(path):
+        return jsonify({'error': 'Admin role required for this action'}), 403
     return None
 
 
@@ -2458,7 +9634,46 @@ _SESSION_EXEMPT_PREFIXES = (
     '/api/v1/health', '/api/v1/auth/login',
     '/saml/acs', '/api/v1/auth/saml/acs',
     '/api/auth/break-glass-login',
+    '/api/auth/bootstrap-status',
+    '/api/auth/bootstrap-break-glass',
+    '/api/agent/',
 )
+
+
+@app.before_request
+def enforce_idle_session_timeout():
+    path = (request.path or '').strip()
+    if request.method == 'OPTIONS':
+        return None
+    if path.startswith('/static/') or path.startswith('/favicon'):
+        return None
+    if any(path.startswith(p) for p in _SESSION_EXEMPT_PREFIXES) or path == '/api/auth/logout':
+        return None
+    if not session.get('user'):
+        return None
+
+    now = datetime.now(timezone.utc)
+    last_activity_raw = str(session.get('last_activity_at') or '').strip()
+    last_activity = None
+    if last_activity_raw:
+        try:
+            last_activity = datetime.fromisoformat(last_activity_raw.replace('Z', '+00:00'))
+            if last_activity.tzinfo is None:
+                last_activity = last_activity.replace(tzinfo=timezone.utc)
+        except Exception:
+            last_activity = None
+    if last_activity and (now - last_activity) > timedelta(minutes=IDLE_SESSION_TIMEOUT_MINUTES):
+        session.clear()
+        if path.startswith('/api/'):
+            return jsonify({
+                'error': 'Session expired due to inactivity. Please sign in again.',
+                'code': 'SESSION_EXPIRED',
+            }), 401
+        return redirect('/')
+
+    session['last_activity_at'] = now.isoformat()
+    session.modified = True
+    return None
 
 
 @app.before_request
@@ -2478,14 +9693,135 @@ def require_session_for_api():
     return None
 
 
-def _safe_error_response(e, default_status=500):
+@app.after_request
+def _sanitize_internal_error_payload(response):
+    if response.status_code < 500 or not response.is_json:
+        return response
+    payload = response.get_json(silent=True)
+    if not isinstance(payload, dict) or 'error' not in payload:
+        return response
+    code = str(payload.get('code') or '').strip()
+    if code.startswith('NPAMX-AGENT-DL-'):
+        return response
+    response.set_data(json.dumps({'error': 'Internal server error'}))
+    response.headers['Content-Type'] = 'application/json'
+    response.content_length = len(response.get_data())
+    return response
+
+
+def _safe_error_response(e, default_status=500, extra_payload=None):
     """Log full error server-side; return generic message to client (no info disclosure)."""
     try:
         import traceback
         traceback.print_exc()
     except Exception:
         pass
-    return jsonify({'error': 'An error occurred. Please try again or contact support.'}), default_status
+    payload = dict(extra_payload or {})
+    payload['error'] = 'An error occurred. Please try again or contact support.'
+    return jsonify(payload), default_status
+
+
+def _skip_generic_app_activity_log():
+    path = str(request.path or '').strip()
+    if not path.startswith('/api/') and path != '/saml/complete':
+        return True
+    if request.method == 'OPTIONS':
+        return True
+    if request.environ.get('npamx_activity_logged'):
+        return True
+    noisy_paths = (
+        '/api/v1/health',
+        '/api/agent/v1/heartbeat',
+        '/api/agent/v1/login/poll',
+    )
+    return any(path.startswith(prefix) for prefix in noisy_paths)
+
+
+def _app_activity_action_name():
+    endpoint = str(request.endpoint or '').strip().lower()
+    if endpoint:
+        return re.sub(r'[^a-z0-9_.-]+', '_', endpoint).strip('_') or 'api_request'
+    path = str(request.path or '').strip().strip('/').lower()
+    if not path:
+        return 'api_request'
+    return re.sub(r'[^a-z0-9_.-]+', '_', path.replace('/', '_')).strip('_') or 'api_request'
+
+
+def _app_activity_request_id():
+    view_args = request.view_args if isinstance(request.view_args, dict) else {}
+    value = str(view_args.get('request_id') or '').strip()
+    if value:
+        return value
+    if request.method not in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        return ''
+    data = request.get_json(silent=True) or {}
+    if isinstance(data, dict):
+        return str(data.get('request_id') or data.get('id') or '').strip()
+    return ''
+
+
+def _log_request_application_activity(response):
+    if _skip_generic_app_activity_log():
+        return response
+    user_email = _current_actor_email() or _current_break_glass_email()
+    if not user_email and str(request.path or '').strip() != '/saml/complete':
+        return response
+    ident, admin_record = _current_admin_actor()
+    auth_type = str(session.get('auth_type') or 'sso').strip().lower()
+    details = {
+        'endpoint': str(request.endpoint or '').strip(),
+        'query_keys': sorted([str(key).strip() for key in request.args.keys() if str(key).strip()])[:20],
+    }
+    try:
+        from audit_log import log_app_activity
+        log_app_activity(
+            user_email or (ident.get('email') or ident.get('nameid') or 'unknown'),
+            _app_activity_action_name(),
+            http_method=request.method,
+            path=request.path,
+            status_code=response.status_code,
+            request_id=_app_activity_request_id(),
+            auth_type=auth_type,
+            is_admin=bool(admin_record),
+            ip=request.remote_addr,
+            details=details,
+            error='' if response.status_code < 400 else f'http_{response.status_code}',
+            allowed=response.status_code < 400,
+        )
+    except Exception:
+        pass
+    request.environ['npamx_activity_logged'] = '1'
+    return response
+
+
+@app.after_request
+def _audit_application_activity(response):
+    return _log_request_application_activity(response)
+
+
+def _current_request_can_view_all_accounts():
+    ident = _current_request_identity()
+    if not ident.get('nameid'):
+        return False
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    return bool(admin_record)
+
+
+def _account_visibility_denied_response():
+    return jsonify({'error': 'This account is not available for your access requests.'}), 403
+
+
+def _enforce_request_account_visibility(account_id):
+    account_key = str(account_id or '').strip()
+    if not account_key or _current_request_can_view_all_accounts():
+        return None
+    if _is_account_visible_to_requesters(account_key):
+        return None
+    return _account_visibility_denied_response()
 
 
 @app.errorhandler(Exception)
@@ -2521,47 +9857,72 @@ def saml_complete():
         or _display_name_from_identity_center(email=email)
         or _display_name_from_saml_session(email=email, nameid=nameid)
     )
-    html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title></head><body>
+    html = '''<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in...</title>
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<meta http-equiv="refresh" content="2;url=/">
+</head><body>
 <p>Signing you in...</p>
+<p><a href="/">Continue</a></p>
 <script>
 (function() {
   var email = %s;
   var displayName = %s;
-  var prevEmail = localStorage.getItem('userEmail') || '';
-  var prevName = localStorage.getItem('userName') || '';
-  var prevIsAdmin = (localStorage.getItem('isAdmin') === 'true');
-  var finalEmail = (email && email !== 'Email') ? email : prevEmail;
+  var samlAdmin = %s;
+  var roleName = %s;
+  var redirectTarget = '/';
   function deriveNameFromEmail(em) {
     if (!em || em === 'Email' || em.indexOf('@') < 0) return '';
     var local = em.split('@')[0].replace(/[._-]+/g, ' ').replace(/\\s+/g, ' ').trim();
     if (!local) return '';
     return local.split(' ').map(function(p){ return p ? (p.charAt(0).toUpperCase() + p.slice(1)) : ''; }).join(' ').trim();
   }
-  var finalName = (displayName && displayName !== 'User' && displayName !== 'Email')
-    ? displayName
-    : ((prevName && prevName !== 'User' && prevName !== 'Email') ? prevName : deriveNameFromEmail(finalEmail));
-  var samlAdmin = %s;
-  var finalIsAdmin = samlAdmin;
-  if (!email && (!displayName || displayName === 'User' || displayName === 'Email')) {
-    finalIsAdmin = samlAdmin || prevIsAdmin;
+  function finishRedirect() {
+    try {
+      window.location.replace(redirectTarget);
+    } catch (_) {
+      window.location.href = redirectTarget;
+    }
   }
-  localStorage.setItem('isLoggedIn', 'true');
-  localStorage.setItem('userEmail', finalEmail || '');
-  localStorage.setItem('userName', finalName || 'User');
-  localStorage.setItem('isAdmin', String(finalIsAdmin));
-  localStorage.setItem('userRole', finalIsAdmin ? 'admin' : 'user');
-  localStorage.setItem('loginMethod', 'sso');
-  window.location.replace('/');
+  window.setTimeout(finishRedirect, 1200);
+  try {
+    var prevEmail = localStorage.getItem('userEmail') || '';
+    var prevName = localStorage.getItem('userName') || '';
+    var prevIsAdmin = (localStorage.getItem('isAdmin') === 'true');
+    var finalEmail = (email && email !== 'Email') ? email : prevEmail;
+    var finalName = (displayName && displayName !== 'User' && displayName !== 'Email')
+      ? displayName
+      : ((prevName && prevName !== 'User' && prevName !== 'Email') ? prevName : deriveNameFromEmail(finalEmail));
+    var finalIsAdmin = samlAdmin;
+    if (!email && (!displayName || displayName === 'User' || displayName === 'Email')) {
+      finalIsAdmin = samlAdmin || prevIsAdmin;
+    }
+    localStorage.setItem('isLoggedIn', 'true');
+    localStorage.setItem('userEmail', finalEmail || '');
+    localStorage.setItem('userName', finalName || 'User');
+    localStorage.setItem('isAdmin', String(finalIsAdmin));
+    localStorage.setItem('userRole', roleName);
+    localStorage.setItem('loginMethod', 'sso');
+  } catch (e) {
+    console.warn('NPAMx SSO handoff storage failed', e);
+  }
+  finishRedirect();
 })();
 </script>
 </body></html>'''
-    return html % (
+    response = make_response(html % (
         json.dumps(email),
         json.dumps(display_name or 'User'),
         json.dumps(bool(is_admin)),
-    )
+        json.dumps(_normalize_pam_role((admin_record or {}).get('role') or ('SuperAdmin' if is_admin and session.get('auth_type') == 'break_glass' else 'Employee'))),
+    ))
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
-
+@_rate_limit_exempt
 @app.route('/api/saml/profile', methods=['GET'])
 @app.route('/saml/profile', methods=['GET'])
 def saml_profile():
@@ -2602,33 +9963,47 @@ def saml_profile():
         )
 
         is_admin = bool(admin_record)
-        role = str(admin_record.get('role') or 'Admin') if is_admin else 'user'
+        auth_type = str(session.get('auth_type') or 'sso').strip().lower()
+        role = _normalize_pam_role((admin_record or {}).get('role') or ('SuperAdmin' if auth_type == 'break_glass' and is_admin else 'Employee'))
 
         return jsonify({
             'logged_in': True,
             'email': email,
             'display_name': display_name,
             'is_admin': bool(is_admin),
-            'role': role
+            'role': role,
+            'auth_type': auth_type,
         })
     except Exception as e:
-        return jsonify({'error': str(e), 'logged_in': False}), 500
+        return _safe_error_response(e, extra_payload={'logged_in': False})
 
 
+@_rate_limit_exempt
 @app.route('/api/accounts', methods=['GET'])
 def get_accounts():
     if not CONFIG['accounts']:
-        initialize_aws_config()
-    # Always return something - never block. Fallback for expired AWS creds.
+        _restore_aws_runtime_cache()
     if not CONFIG['accounts']:
-        CONFIG['accounts'] = {'poc': {'id': 'poc', 'name': 'POC Account', 'environment': 'nonprod'}}
-        CONFIG['organization'] = {}
+        initialize_aws_config()
+    if not CONFIG['accounts']:
+        _restore_accounts_from_org_hierarchy_cache()
     # Keep account environments aligned with explicit org/account environment tags.
     CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG.get('accounts') or {})
-    return jsonify(CONFIG['accounts'])
+    accounts = dict(CONFIG.get('accounts') or {})
+    requester_scope = str(request.args.get('scope') or request.args.get('view') or '').strip().lower()
+    requester_only = requester_scope in ('requester', 'request', 'request-only', 'visible')
+    if requester_only or not _current_request_can_view_all_accounts():
+        accounts = {
+            key: value for key, value in accounts.items()
+            if _is_account_visible_to_requesters((value or {}).get('id') or key)
+        }
+    return jsonify(accounts)
 
+@_rate_limit_exempt
 @app.route('/api/permission-sets', methods=['GET'])
 def get_permission_sets():
+    if not CONFIG['permission_sets']:
+        _restore_aws_runtime_cache()
     if not CONFIG['permission_sets']:
         initialize_aws_config()
     return jsonify(CONFIG['permission_sets'])
@@ -2649,63 +10024,42 @@ from unified_assistant import UnifiedAssistant
 
 @app.route('/api/generate-permissions', methods=['POST'])
 def generate_permissions():
-    print("\n" + "="*80)
-    print("🚀 /api/generate-permissions CALLED")
-    print("="*80)
-    data = request.json
-    use_case = data.get('use_case', '')
-    account_id = data.get('account_id', '')
-    conversation_id = data.get('conversation_id')  # For multi-turn conversation
-    user_email = data.get('user_email', 'user@example.com')
-    selected_resources = data.get('selected_resources', {})  # {service: [{id, name}]}
-    
-    print(f"📝 Use case: {use_case}")
-    print(f"🆔 Conversation ID: {conversation_id}")
-    print(f"📦 Selected resources: {list(selected_resources.keys())}")
-    
+    data = request.get_json(silent=True) or {}
+    use_case = str(data.get('use_case') or '').strip()
+    account_id = str(data.get('account_id') or '').strip()
+    conversation_id = data.get('conversation_id')
+    user_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    selected_resources = data.get('selected_resources', {})
+    if not isinstance(selected_resources, dict):
+        selected_resources = {}
+
     if not use_case:
         return jsonify({'error': 'Use case description required'}), 400
+    if not user_email:
+        return jsonify({'error': 'Authentication required'}), 401
     
     # CHECK ACCESS RULES: Enforce group-based restrictions
-    print(f"🔒 Checking access rules for user: {user_email}")
     rules = AccessRules.get_rules()
-    print(f"📋 Total rules: {len(rules.get('rules', []))}")
+    user_groups = _user_group_ids_for_email(user_email)
     
     for rule in rules.get('rules', []):
         if not rule.get('enabled'):
             continue
-        
-        # Check if user is in restricted group
-        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
-        with open(groups_path, 'r') as f:
-            groups_data = json.load(f)
-        
-        user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
-        print(f"👤 User {user_email} is in groups: {user_groups}")
-        print(f"🚫 Rule restricts groups: {rule.get('groups', [])}")
-        
+
         if any(g in rule.get('groups', []) for g in user_groups):
-            print(f"✅ User matched restricted group!")
             # User is in restricted group - check if requesting denied service
             use_case_lower = use_case.lower()
             denied_services = rule.get('denied_services', [])
-            print(f"🚫 Denied services: {denied_services}")
-            print(f"📝 Use case: {use_case_lower}")
             
             # Also check selected_resources for denied services
             selected_service_ids = list(selected_resources.keys()) if selected_resources else []
-            print(f"📦 Selected services: {selected_service_ids}")
             
             for denied_service in denied_services:
                 # Check both use case text and selected resources
                 if denied_service.lower() in use_case_lower or denied_service in selected_service_ids:
-                    print(f"❌ BLOCKED: User requested denied service {denied_service}")
                     return jsonify({
                         'error': f'❌ Access Denied\n\nYour group is restricted from requesting {denied_service.upper()} access.\n\nAllowed services: {", ".join([s.upper() for s in rule.get("allowed_services", [])])}\n\nContact your administrator for access to other services.'
                     }), 403
-    
-    print(f"✅ Access rules check passed for {user_email}")
-    print(f"📦 Selected resources: {list(selected_resources.keys()) if selected_resources else 'None'}")
     
     # Get account environment
     account_env = 'nonprod'
@@ -3097,20 +10451,20 @@ def request_access():
             email=caller_email, nameid=_current_request_identity().get('nameid') or '', hints=_current_request_identity().get('hints') or {}
         ):
             return jsonify({'error': 'You can only request access for yourself unless you are a PAM admin'}), 403
+    if not caller_email:
+        return jsonify({'error': 'Authenticated session required'}), 401
+    account_id = str(data.get('account_id') or '').strip()
+    if not account_id:
+        return jsonify({'error': 'account_id is required'}), 400
+    data['account_id'] = account_id
     
     # CHECK ACCESS RULES: Enforce group-based restrictions
     rules = AccessRules.get_rules()
+    user_groups = _user_group_ids_for_email(user_email)
     for rule in rules.get('rules', []):
         if not rule.get('enabled'):
             continue
-        
-        # Check if user is in restricted group
-        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
-        with open(groups_path, 'r') as f:
-            groups_data = json.load(f)
-        
-        user_groups = [g['id'] for g in groups_data['groups'] if user_email in g.get('members', [])]
-        
+
         if any(g in rule.get('groups', []) for g in user_groups):
             # User is in restricted group - check if requesting denied service
             use_case = data.get('use_case', '').lower()
@@ -3184,7 +10538,7 @@ def request_access():
     access_request = {
         'id': request_id,
         'user_email': data['user_email'],
-        'account_id': data['account_id'],
+        'account_id': account_id,
         'duration_hours': data['duration_hours'],
         'justification': justification,
         'status': 'pending',
@@ -3259,7 +10613,8 @@ def request_access():
 
 @app.route('/api/requests', methods=['GET'])
 def get_requests():
-    """List requests: non-admins see only their own; PAM admins see all."""
+    """List requests visible to the current actor."""
+    _apply_pending_request_expiry()
     caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
     is_admin = bool(_pam_admin_record_for_identity(
         email=caller_email,
@@ -3270,24 +10625,306 @@ def get_requests():
     for r in requests_db.values():
         if not isinstance(r, dict):
             continue
-        if not is_admin:
-            req_email = (r.get('user_email') or '').strip().lower()
-            if req_email != caller_email:
-                continue
+        req_email = (r.get('user_email') or '').strip().lower()
+        is_requester = bool(caller_email) and req_email == caller_email
         if r.get('type') == 'database_access':
-            out.append(_sanitize_database_request_for_client(r))
+            safe = _sanitize_database_request_for_client(r, actor_email=caller_email, is_admin=is_admin)
+            if not safe.get('visible_to_actor') and not is_admin:
+                continue
+            out.append(safe)
         else:
-            out.append(r)
+            required_approvals = set(str(item or '').strip().lower() for item in (r.get('approval_required') or []))
+            is_self_approval = 'self' in required_approvals and is_requester
+            can_approve = str(r.get('status') or '').strip().lower() == 'pending' and bool(
+                (is_admin and not is_requester) or is_self_approval
+            )
+            if not (is_admin or is_requester or can_approve):
+                continue
+            safe = dict(r)
+            safe['is_requester'] = is_requester
+            safe['can_approve'] = can_approve
+            safe['can_deny'] = can_approve
+            safe['visible_to_actor'] = True
+            out.append(safe)
     return jsonify(out)
 
 @app.route('/api/request/<request_id>', methods=['GET'])
 def get_request_details(request_id):
-    if request_id not in requests_db:
+    _apply_pending_request_expiry()
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    ident, admin_record = _current_admin_actor()
+    is_admin = bool(admin_record)
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    req = requests_db.get(request_id)
+    if not isinstance(req, dict):
         return jsonify({'error': 'Request not found'}), 404
-    req = requests_db[request_id]
     if isinstance(req, dict) and req.get('type') == 'database_access':
-        return jsonify(_sanitize_database_request_for_client(req))
+        flags = _database_request_actor_permissions(req, actor_email=caller_email, is_admin=is_admin)
+        if not flags.get('can_view'):
+            return jsonify({'error': 'Request not found'}), 404
+        return jsonify(_sanitize_database_request_for_client(req, actor_email=caller_email, is_admin=is_admin))
+    req_email = str(req.get('user_email') or '').strip().lower()
+    if not is_admin and req_email != caller_email:
+        return jsonify({'error': 'Request not found'}), 404
     return jsonify(req)
+
+
+@app.route('/api/admin/database-approvals/pending', methods=['GET'])
+def get_admin_pending_database_approvals():
+    ident, admin_record = _current_admin_actor()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required'}), 403
+    return jsonify(_admin_pending_database_approvals_payload())
+
+
+@app.route('/api/admin/database-approvals/<request_id>/reassign', methods=['POST'])
+def reassign_admin_pending_database_approval(request_id):
+    ident, admin_record = _current_admin_actor()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required'}), 403
+    req = requests_db.get(request_id)
+    if not isinstance(req, dict):
+        return jsonify({'error': 'Request not found'}), 404
+    data = request.get_json(silent=True) or {}
+    new_emails = data.get('approver_emails')
+    if new_emails is None:
+        new_emails = str(data.get('approver_email') or '').strip()
+    note = ' '.join(str(data.get('note') or data.get('description') or '').strip().split())
+    if not new_emails:
+        return jsonify({'error': 'approver_email is required'}), 400
+    actor_email = _current_actor_email() or _normalize_email_address(ident.get('email')) or ''
+    try:
+        normalized_emails = _admin_reassign_database_request_approver(req, new_emails, actor_email=actor_email, note=note)
+        _save_requests()
+        try:
+            _send_database_request_pending_email(req)
+        except Exception as email_exc:
+            try:
+                print(f"Admin approver reassignment email send failed for request {request_id}: {email_exc}", flush=True)
+            except Exception:
+                pass
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                actor_email or 'unknown',
+                'database_request_approver_reassigned',
+                request_id=request_id,
+                details={'approver_emails': normalized_emails, 'note': note},
+                ip=request.remote_addr
+            )
+        except Exception:
+            pass
+        return jsonify({
+            'status': 'reassigned',
+            'request_id': request_id,
+            'approver_email': normalized_emails[0],
+            'approver_emails': normalized_emails,
+            'message': f'Approver routing updated to {", ".join(normalized_emails)}.',
+        })
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return _safe_error_response(exc)
+
+
+@app.route('/api/admin/database-approvals/<request_id>/decision', methods=['POST'])
+def decide_admin_pending_database_approval(request_id):
+    ident, admin_record = _current_admin_actor()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required'}), 403
+    access_request = requests_db.get(request_id)
+    if not isinstance(access_request, dict):
+        return jsonify({'error': 'Request not found'}), 404
+    if access_request.get('type') != 'database_access':
+        return jsonify({'error': 'Only database access requests are supported.'}), 400
+    if str(access_request.get('status') or '').strip().lower() != 'pending':
+        return jsonify({'error': 'Only pending requests can be updated.'}), 400
+    data = request.get_json(silent=True) or {}
+    decision = str(data.get('decision') or '').strip().lower()
+    if decision not in {'approve', 'deny'}:
+        return jsonify({'error': 'decision must be approve or deny'}), 400
+    actor_email = _current_actor_email() or _normalize_email_address(ident.get('email')) or ''
+    reason = str(data.get('reason') or '').strip()
+    override_reason = ('Admin override' + (f': {reason}' if reason else ''))
+    decision_result = _apply_workflow_decision_to_request(
+        access_request,
+        actor_email=actor_email,
+        decision=decision,
+        reason=override_reason,
+        admin_override=True,
+    )
+    if decision_result.get('error'):
+        return jsonify({'error': decision_result['error']}), 400
+    _save_requests()
+    if decision == 'deny':
+        access_request['denied_by'] = actor_email
+        _save_requests()
+        try:
+            _send_request_denied_email(access_request)
+        except Exception as email_exc:
+            print(f"Database denied email send failed for request {request_id}: {email_exc}", flush=True)
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(actor_email or 'unknown', 'database_request_denied_admin_override', request_id=request_id, details={'reason': override_reason}, ip=request.remote_addr)
+        except Exception:
+            pass
+        return jsonify({'status': 'denied', 'message': 'Request denied by admin override.'})
+
+    if decision_result.get('status') == 'partial_approval':
+        pending_stage = decision_result.get('pending_stage') or {}
+        return jsonify({
+            'status': 'partial_approval',
+            'message': _approval_pending_message(access_request.get('approval_engine') or {}),
+            'pending_stage': pending_stage.get('name', ''),
+            'pending_approvers': [item.get('email', '') for item in (pending_stage.get('approvers') or []) if item.get('email')]
+        })
+
+    activate_result = _activate_database_access_request(request_id)
+    if activate_result.get('error'):
+        try:
+            print(f"❌ Admin override activation failed for request {request_id}: {activate_result.get('error')}", flush=True)
+        except Exception:
+            pass
+        safe_msg, safe_code = _public_db_activation_error(activate_result['error'])
+        return jsonify({
+            'status': 'approved',
+            'message': _activation_message_for_code(safe_code),
+            'error': safe_msg,
+            'activation_progress': _activation_progress_for_response(access_request),
+            'activation_error_code': safe_code,
+            'activation_retryable': _is_retryable_activation_code(safe_code),
+        }), 200
+
+    try:
+        from audit_log import log_pam_action
+        log_pam_action(actor_email or 'unknown', 'database_request_approved_admin_override', request_id=request_id, details={'reason': override_reason}, ip=request.remote_addr)
+    except Exception:
+        pass
+    try:
+        _send_database_access_ready_email(access_request)
+    except Exception as email_exc:
+        try:
+            print(f"Database access-ready email send failed after admin override for request {request_id}: {email_exc}", flush=True)
+        except Exception:
+            pass
+    return jsonify({
+        'status': access_request.get('status', 'active'),
+        'message': 'Database access approved by admin override.',
+        'expires_at': access_request.get('expires_at', '')
+    })
+
+
+@app.route('/api/home/summary', methods=['GET'])
+def get_home_summary():
+    _apply_pending_request_expiry()
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    if not caller_email:
+        return jsonify({'error': 'Authentication required'}), 401
+    flags = _load_feature_flags()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    cards = {
+        'cloud': {'key': 'cloud', 'label': 'Cloud Access', 'total': 0, 'approved': 0, 'denied': 0, 'last_request_at': ''},
+        'storage': {'key': 'storage', 'label': 'Storage Access', 'total': 0, 'approved': 0, 'denied': 0, 'last_request_at': ''},
+        'databases': {'key': 'databases', 'label': 'Database Access', 'total': 0, 'approved': 0, 'denied': 0, 'last_request_at': ''},
+        'workloads': {'key': 'workloads', 'label': 'Workloads Access', 'total': 0, 'approved': 0, 'denied': 0, 'last_request_at': ''},
+    }
+    recent = []
+    for request_id, req in requests_db.items():
+        if not isinstance(req, dict):
+            continue
+        if str(req.get('user_email') or '').strip().lower() != caller_email:
+            continue
+        created_at = _parse_request_datetime(req.get('created_at') or req.get('requested_at'))
+        if not created_at:
+            continue
+        created_utc = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)
+        if created_utc < cutoff:
+            continue
+        category = _request_category(req)
+        card = cards.get(category)
+        if not card:
+            continue
+        card['total'] += 1
+        decision = _request_decision_status(req)
+        if decision == 'approved':
+            card['approved'] += 1
+        elif decision == 'denied':
+            card['denied'] += 1
+        iso_value = created_utc.isoformat()
+        if not card['last_request_at'] or iso_value > card['last_request_at']:
+            card['last_request_at'] = iso_value
+        recent.append({
+            'request_id': request_id,
+            'category': category,
+            'status': str(req.get('status') or '').strip().lower(),
+            'target': _request_display_target(req),
+            'created_at': iso_value,
+        })
+
+    recent.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    ordered_cards = []
+    feature_map = {
+        'cloud': 'cloud_access',
+        'storage': 'storage_access',
+        'databases': 'databases_access',
+        'workloads': 'workloads_access',
+    }
+    for key in ('databases', 'cloud', 'workloads', 'storage'):
+        card = cards[key]
+        card['enabled'] = bool(flags.get(feature_map[key], True))
+        ordered_cards.append(card)
+    return jsonify({'cards': ordered_cards, 'recent': recent[:10]})
+
+
+@app.route('/api/home/history', methods=['GET'])
+def get_home_history():
+    _apply_pending_request_expiry()
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    if not caller_email:
+        return jsonify({'error': 'Authentication required'}), 401
+    category = str(request.args.get('category') or 'cloud').strip().lower()
+    period = str(request.args.get('period') or 'month').strip().lower()
+    if category not in ('cloud', 'storage', 'databases', 'workloads'):
+        return jsonify({'error': 'Unsupported category'}), 400
+    if period not in ('month', 'week', 'day'):
+        return jsonify({'error': 'Unsupported period'}), 400
+    cutoff = datetime.now(timezone.utc) - timedelta(days=90)
+    items = []
+    for request_id, req in requests_db.items():
+        if not isinstance(req, dict):
+            continue
+        if str(req.get('user_email') or '').strip().lower() != caller_email:
+            continue
+        if _request_category(req) != category:
+            continue
+        created_at = _parse_request_datetime(req.get('created_at') or req.get('requested_at'))
+        if not created_at:
+            continue
+        created_utc = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)
+        if created_utc < cutoff:
+            continue
+        items.append({
+            'request_id': request_id,
+            'status': str(req.get('status') or '').strip().lower(),
+            'target': _request_display_target(req),
+            'duration_hours': req.get('duration_hours', 0),
+            'created_at': created_utc.isoformat(),
+        })
+    items.sort(key=lambda item: item.get('created_at') or '', reverse=True)
+    return jsonify({
+        'category': category,
+        'period': period,
+        'series': _build_home_history_series(items, period=period),
+        'requests': items,
+    })
+
 
 @app.route('/api/databases/requests', methods=['GET'])
 def get_database_requests():
@@ -3299,8 +10936,13 @@ def get_database_requests():
     - q: search by request id, db name, instance id, permissions, user email
     - page/page_size: pagination
     """
-    user_email = str(request.args.get('user_email') or '').strip()
+    _apply_pending_request_expiry()
+    caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+    ident, admin_record = _current_admin_actor()
+    is_admin = bool(admin_record)
+    requested_user_email = str(request.args.get('user_email') or '').strip().lower()
     status_filter = str(request.args.get('status') or 'all').strip().lower()
+    flow_mode = str(request.args.get('flow_mode') or 'all').strip().lower()
     q = str(request.args.get('q') or '').strip().lower()
     try:
         page = int(request.args.get('page') or 1)
@@ -3311,8 +10953,10 @@ def get_database_requests():
     except Exception:
         page_size = 20
 
-    if not user_email:
-        return jsonify({'error': 'user_email required'}), 400
+    if not caller_email:
+        return jsonify({'error': 'Authentication required'}), 401
+    if requested_user_email and not is_admin and requested_user_email != caller_email:
+        return jsonify({'error': 'Access denied'}), 403
     if page < 1:
         page = 1
     if page_size < 1:
@@ -3324,14 +10968,16 @@ def get_database_requests():
     for req_id, req in requests_db.items():
         if not isinstance(req, dict) or req.get('type') != 'database_access':
             continue
-        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+        flags = _database_request_actor_permissions(req, actor_email=caller_email, is_admin=is_admin)
+        requester_email = str(req.get('user_email') or '').strip().lower()
+        if not (is_admin or requester_email == caller_email or flags.get('can_view')):
             continue
-        req_account_env = _request_account_env(req)
-        req_plane = _request_execution_plane(req)
-        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
-            account_env=req_account_env,
-            execution_plane=req_plane
-        )
+        if flow_mode == 'mine' and not bool(flags.get('is_requester')):
+            continue
+        if flow_mode == 'approvals' and not bool(flags.get('can_approve') or flags.get('can_deny')):
+            continue
+        if requested_user_email and str(req.get('user_email') or '').strip().lower() != requested_user_email:
+            continue
 
         lifecycle = str(req.get('status', '') or '').strip().lower()
         expires_at = str(req.get('expires_at', '') or '').strip()
@@ -3340,7 +10986,7 @@ def get_database_requests():
         # UI status buckets (stable + searchable)
         if lifecycle == 'pending':
             ui_status = 'pending'
-        elif lifecycle in ('denied', 'rejected', 'failed'):
+        elif lifecycle in ('denied', 'rejected', 'failed', 'cancelled', 'canceled'):
             ui_status = 'rejected'
         elif lifecycle in ('expired', 'revoked'):
             ui_status = 'expired'
@@ -3355,10 +11001,14 @@ def get_database_requests():
         else:
             ui_status = lifecycle or 'pending'
 
-        if status_filter and status_filter != 'all' and ui_status != status_filter:
-            continue
+        if status_filter and status_filter != 'all':
+            if status_filter == 'approved':
+                if ui_status not in ('approved', 'active'):
+                    continue
+            elif ui_status != status_filter:
+                continue
 
-        safe_dbs = []
+        dbs_raw = []
         db_names_for_search = []
         for db in (req.get('databases') or []):
             if not isinstance(db, dict):
@@ -3366,12 +11016,10 @@ def get_database_requests():
             n = str(db.get('name') or '').strip()
             if n:
                 db_names_for_search.append(n.lower())
-            safe_dbs.append({
+            dbs_raw.append({
                 'id': db.get('id', ''),
                 'name': db.get('name', ''),
                 'engine': db.get('engine', ''),
-                'host': proxy_host,
-                'port': proxy_port,
             })
 
         perms = req.get('permissions', [])
@@ -3394,6 +11042,11 @@ def get_database_requests():
                 str(req_id).lower(),
                 str(req.get('account_id') or '').lower(),
                 str(req.get('db_instance_id') or '').lower(),
+                str(req.get('requested_instance_input') or '').lower(),
+                str(req.get('requested_database_name') or '').lower(),
+                str(req.get('requested_schema_name') or '').lower(),
+                str(req.get('requested_table_name') or '').lower(),
+                str(req.get('requested_access_type') or '').lower(),
                 str(req.get('db_resource_id') or '').lower(),
                 " ".join(db_names_for_search),
                 str(tables_text).lower(),
@@ -3411,20 +11064,27 @@ def get_database_requests():
             acct_cfg = (CONFIG.get('accounts') or {}).get(account_id) or {}
             account_name = str(acct_cfg.get('name') or '').strip()
 
+        req_account_env = _request_account_env(req)
+        req_plane = _request_execution_plane(req)
         items.append({
             'request_id': req_id,
             'status': ui_status,
             'lifecycle_status': str(req.get('status') or ''),
             'is_expired': bool(is_expired),
-            'databases': safe_dbs,
-            'proxy_host': proxy_host,
-            'proxy_port': proxy_port,
+            'databases': [],
+            'proxy_host': '',
+            'proxy_port': '',
             'execution_plane': req_plane,
             'account_env': req_account_env,
             'role': req.get('role', 'read_only'),
             'permissions': req.get('permissions', []),
             'query_types': req.get('query_types', []),
             'requested_tables': req.get('requested_tables', []),
+            'requested_instance_input': str(req.get('requested_instance_input') or req.get('db_instance_id') or ''),
+            'requested_database_name': str(req.get('requested_database_name') or ''),
+            'requested_schema_name': str(req.get('requested_schema_name') or ''),
+            'requested_table_name': str(req.get('requested_table_name') or ''),
+            'requested_access_type': str(req.get('requested_access_type') or ''),
             'effective_auth': req.get('effective_auth', 'password'),
             'auth_mode': req.get('auth_mode', 'password_only'),
             'duration_hours': req.get('duration_hours', 2),
@@ -3441,6 +11101,20 @@ def get_database_requests():
             'data_classification': str(req.get('data_classification') or ''),
             'tags_present': bool(req.get('tags_present')),
             'user_email': str(req.get('user_email') or ''),
+            'approval_workflow_name': str(req.get('approval_workflow_name') or ''),
+            'approval_note': str(req.get('approval_note') or ''),
+            'cancellation_reason': str(req.get('cancellation_reason') or ''),
+            'cancelled_at': str(req.get('cancelled_at') or req.get('canceled_at') or ''),
+            'activation_error': _safe_activation_error_for_response(req),
+            'activation_progress': _activation_progress_for_response(req),
+            'pending_stage': flags.get('current_stage_name') or '',
+            'pending_approvers': flags.get('current_stage_approvers') or [],
+            'approval_history': flags.get('approval_history') or [],
+            'is_requester': bool(flags.get('is_requester')),
+            'can_approve': bool(flags.get('can_approve')),
+            'can_deny': bool(flags.get('can_deny')),
+            '_dbs_raw': dbs_raw,
+            '_resolve_req': req,
         })
 
     # Sort newest first
@@ -3455,12 +11129,62 @@ def get_database_requests():
     start = (page - 1) * page_size
     end = start + page_size
     page_items = items[start:end]
+    endpoint_cache = {}
+    for item in page_items:
+        req_obj = item.get('_resolve_req') if isinstance(item, dict) else None
+        req_id = str(item.get('request_id') or '') if isinstance(item, dict) else ''
+        if not isinstance(req_obj, dict):
+            req_obj = {}
+        cache_key = (
+            str(req_obj.get('resource_kind') or '').strip().lower(),
+            str(req_obj.get('engine') or '').strip().lower(),
+            str(req_obj.get('account_id') or '').strip(),
+            str(req_obj.get('db_instance_id') or '').strip(),
+            str(req_obj.get('db_region') or '').strip(),
+            str(item.get('account_env') or '').strip().lower(),
+            str(item.get('execution_plane') or '').strip().lower(),
+        )
+        endpoint = endpoint_cache.get(cache_key)
+        if endpoint is None:
+            try:
+                proxy_host, proxy_port, _, endpoint_mode = _resolve_db_user_connect_endpoint(req_obj)
+            except Exception as endpoint_exc:
+                app.logger.warning(
+                    'DB endpoint resolution failed for request %s during list view: %s',
+                    req_id,
+                    endpoint_exc,
+                )
+                proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+                    account_env=str(item.get('account_env') or '').strip(),
+                    execution_plane=str(item.get('execution_plane') or '').strip(),
+                    account_id=str(item.get('account_id') or '').strip(),
+                )
+                endpoint_mode = 'proxy'
+            endpoint = (proxy_host, proxy_port, endpoint_mode)
+            endpoint_cache[cache_key] = endpoint
+        proxy_host, proxy_port, endpoint_mode = endpoint
+        item['proxy_host'] = proxy_host
+        item['proxy_port'] = proxy_port
+        safe_dbs = []
+        for db in (item.get('_dbs_raw') or []):
+            safe_dbs.append({
+                'id': db.get('id', ''),
+                'name': db.get('name', ''),
+                'engine': db.get('engine', ''),
+                'host': proxy_host,
+                'port': proxy_port,
+                'connect_endpoint_mode': endpoint_mode,
+            })
+        item['databases'] = safe_dbs
+        item.pop('_dbs_raw', None)
+        item.pop('_resolve_req', None)
     return jsonify({'requests': page_items, 'page': page, 'page_size': page_size, 'total': total})
 
 
 @app.route('/api/databases/request/<request_id>/update-duration', methods=['POST'])
 def update_database_request_duration(request_id):
     """Update duration only for pending database requests (no DB name, env, endpoint changes)"""
+    _apply_pending_request_expiry()
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
     req = requests_db[request_id]
@@ -3472,10 +11196,20 @@ def update_database_request_duration(request_id):
     duration = data.get('duration_hours')
     if duration is None:
         return jsonify({'error': 'duration_hours required'}), 400
+    max_duration_hours = _database_request_max_duration_hours(
+        _request_account_env(req),
+        req.get('role'),
+        req.get('permissions'),
+    )
+    max_duration_days = _database_request_max_duration_days(
+        _request_account_env(req),
+        req.get('role'),
+        req.get('permissions'),
+    )
     try:
         duration = int(duration)
-        if duration < 1 or duration > 24:
-            return jsonify({'error': 'Duration must be 1-24 hours'}), 400
+        if duration < 1 or duration > max_duration_hours:
+            return jsonify({'error': f'Duration must be 1-{max_duration_hours} hours (max {max_duration_days} days)'}), 400
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid duration'}), 400
     req['duration_hours'] = duration
@@ -3488,6 +11222,7 @@ def update_database_request_duration(request_id):
 
 @app.route('/api/request/<request_id>/modify', methods=['POST'])
 def modify_request(request_id):
+    _apply_pending_request_expiry()
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
     
@@ -3500,9 +11235,14 @@ def modify_request(request_id):
     # Database access: only duration and justification (no DB name, env, endpoint)
     if access_request.get('type') == 'database_access':
         if 'duration_hours' in data:
+            max_duration_hours = _database_request_max_duration_hours(
+                _request_account_env(access_request),
+                access_request.get('role'),
+                access_request.get('permissions'),
+            )
             try:
                 d = int(data['duration_hours'])
-                if 1 <= d <= 24:
+                if 1 <= d <= max_duration_hours:
                     access_request['duration_hours'] = d
                     # TTL starts at activation (after approvals). Do not set expires_at while pending.
                     access_request['expires_at'] = ''
@@ -3554,19 +11294,67 @@ def modify_request(request_id):
 @app.route('/api/request/<request_id>/deny', methods=['POST'])
 def deny_request(request_id):
     """Deny a pending request (works for cloud, database, instance)"""
-    if request_id not in requests_db:
+    _apply_pending_request_expiry()
+    ident = _current_request_identity()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    access_request = requests_db.get(request_id)
+    if not isinstance(access_request, dict):
         return jsonify({'error': 'Request not found'}), 404
-    access_request = requests_db[request_id]
     if access_request.get('status') != 'pending':
         return jsonify({'error': 'Can only deny pending requests'}), 400
     data = request.get_json(silent=True) or {}
+    if access_request.get('type') == 'database_access' and isinstance(access_request.get('approval_engine'), dict):
+        actor_email = _current_actor_email()
+        if not actor_email:
+            return jsonify({'error': 'Authentication required'}), 401
+        approval_flags = _database_request_actor_permissions(
+            access_request,
+            actor_email=actor_email,
+            is_admin=False,
+        )
+        if not approval_flags.get('can_deny'):
+            return jsonify({'error': 'Forbidden'}), 403
+        decision_result = _apply_workflow_decision_to_request(
+            access_request,
+            actor_email=actor_email,
+            decision='deny',
+            reason=str(data.get('reason') or 'Denied by approver').strip()
+        )
+        if decision_result.get('error'):
+            return jsonify({'error': decision_result['error']}), 403
+        if str(access_request.get('status') or '').strip().lower() == 'denied':
+            access_request['denied_by'] = actor_email
+        _save_requests()
+        try:
+            _send_request_denied_email(access_request)
+        except Exception as email_exc:
+            print(f"Request denied email send failed for request {request_id}: {email_exc}", flush=True)
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(actor_email, 'request_denied', request_id=request_id, details={'reason': access_request.get('denial_reason', ''), 'workflow': access_request.get('approval_workflow_name', '')}, ip=request.remote_addr)
+        except Exception:
+            pass
+        return jsonify({'status': 'denied', 'message': 'Request denied'})
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Request not found'}), 404
     access_request['status'] = 'denied'
     access_request['denied_at'] = datetime.now().isoformat()
     access_request['denial_reason'] = data.get('reason', 'Denied by approver')
+    access_request['denied_by'] = _current_actor_email() or ''
     _save_requests()
     try:
+        _send_request_denied_email(access_request)
+    except Exception as email_exc:
+        print(f"Request denied email send failed for request {request_id}: {email_exc}", flush=True)
+    try:
         from audit_log import log_pam_action
-        actor = _email_from_saml_session() or request.headers.get('X-Forwarded-For', request.remote_addr or '')[:64]
+        actor = _current_actor_email() or 'unknown'
         log_pam_action(actor, 'request_denied', request_id=request_id, details={'reason': data.get('reason', '')}, ip=request.remote_addr)
     except Exception:
         pass
@@ -3575,10 +11363,21 @@ def deny_request(request_id):
 @app.route('/api/request/<request_id>/delete', methods=['DELETE'])
 def delete_request(request_id):
     """Admin function to delete any request"""
+    ident = _current_request_identity()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required for this action'}), 403
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
     
     access_request = requests_db[request_id]
+    _mark_request_ticket_deleted(request_id, deleted_by=_current_actor_email() or '', reason='live_request_deleted')
     
     # Delete from database
     del requests_db[request_id]
@@ -3598,6 +11397,17 @@ def delete_request(request_id):
 @app.route('/api/request/<request_id>/revoke', methods=['POST'])
 def revoke_access(request_id):
     """Admin function to immediately revoke access (AWS or database)."""
+    ident = _current_request_identity()
+    if not ident.get('nameid'):
+        return jsonify({'error': 'Authentication required'}), 401
+    admin_record = _pam_admin_record_for_identity(
+        email=ident.get('email') or '',
+        nameid=ident.get('nameid') or '',
+        hints=ident.get('hints') or {}
+    )
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Request not found'}), 404
+
     if request_id not in requests_db:
         return jsonify({'error': 'Request not found'}), 404
 
@@ -3614,15 +11424,17 @@ def revoke_access(request_id):
         req_plane = _request_execution_plane(access_request)
         access_request['account_env'] = req_account_env
         access_request['execution_plane'] = req_plane
-        lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
-        if lease_id:
-            try:
-                VaultManager.revoke_lease(lease_id, plane=req_plane)
-            except Exception as e:
-                print(f"Vault lease revoke failed for {request_id}: {e}")
-                return jsonify({'error': f'Vault revoke failed: {e}'}), 502
-        else:
-            print(f"Database revoke for {request_id}: no lease_id (e.g. not yet activated); marking revoked only.")
+        revoke_warning = ''
+        had_vault_artifacts = bool(
+            str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
+            or str(access_request.get('vault_role_name') or access_request.get('role_name') or '').strip()
+        )
+        vault_cleanup_result = _cleanup_database_vault_access(access_request, request_id=request_id, reason='admin_revoke')
+        if vault_cleanup_result.get('status') == 'partial':
+            revoke_warning = str(vault_cleanup_result.get('error') or '').strip()
+            print(f"Vault cleanup warning for {request_id}: {revoke_warning}", flush=True)
+        elif not had_vault_artifacts:
+            print(f"Database revoke for {request_id}: no Vault lease or role present; marking revoked only.", flush=True)
         try:
             cleanup_result = _cleanup_database_iam_access(access_request, request_id=request_id, reason='admin_revoke')
             if cleanup_result.get('status') in ('error', 'partial'):
@@ -3632,20 +11444,35 @@ def revoke_access(request_id):
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
+        access_request['revocation_warning'] = revoke_warning
         access_request['vault_token'] = ''
         access_request['password'] = ''
         access_request['db_password'] = ''
+        try:
+            STORE.mark_database_request_revoked(
+                request_id,
+                revoked_at=access_request['revoked_at'],
+                reason=revoke_reason,
+                warning=revoke_warning,
+            )
+        except Exception as persist_err:
+            print(f"Direct persist after revoke failed for {request_id}: {persist_err}", flush=True)
         _save_requests()
+        _sync_request_ticket(request_id)
+        _load_requests()
         try:
             from audit_log import log_pam_action
-            actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+            actor = _current_actor_email() or 'unknown'
             log_pam_action(actor, 'request_revoked', request_id=request_id, details={'reason': revoke_reason, 'type': 'database_access'}, ip=request.remote_addr)
         except Exception:
             pass
-        return jsonify({
+        response = {
             'status': 'revoked',
             'message': f'Database access revoked. Reason: {revoke_reason}',
-        })
+        }
+        if revoke_warning:
+            response['warning'] = 'Vault cleanup returned an error, but the request was marked revoked in PAM.'
+        return jsonify(response)
 
     # AWS / other: revoke SSO assignment
     try:
@@ -3658,12 +11485,7 @@ def revoke_access(request_id):
         base_email = access_request['user_email']
         username_part = base_email.split('@')[0] if '@' in base_email else base_email
         
-        username_variations = [
-            base_email,
-            f"{username_part}@Nykaa.local",
-            f"{username_part.lower()}@Nykaa.local",
-            f"{username_part.title()}@Nykaa.local"
-        ]
+        username_variations = [value for _, value in _identity_center_username_candidates(base_email)]
         
         for username in username_variations:
             try:
@@ -3712,10 +11534,12 @@ def revoke_access(request_id):
         access_request['status'] = 'revoked'
         access_request['revoked_at'] = datetime.now().isoformat()
         access_request['revoke_reason'] = revoke_reason
+        access_request['revoked_by'] = _current_actor_email() or ''
+        _save_requests()
         
         try:
             from audit_log import log_pam_action
-            actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+            actor = _current_actor_email() or 'unknown'
             log_pam_action(actor, 'request_revoked', request_id=request_id, details={'reason': revoke_reason, 'type': 'instance_access'}, ip=request.remote_addr)
         except Exception:
             pass
@@ -3727,12 +11551,15 @@ def revoke_access(request_id):
         
     except Exception as e:
         print(f"Error revoking access: {str(e)}")
-        return jsonify({'error': f'Revocation failed: {str(e)}'}), 500
+        return jsonify({'error': 'Revocation failed'}), 500
 
 
 @app.route('/api/admin/database-sessions', methods=['GET'])
 def admin_list_database_sessions():
     """List all active database access sessions (for admin emergency revoke)."""
+    ident, admin_record = _current_admin_actor()
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required for this action'}), 403
     _load_requests()
     sessions = []
     now = datetime.now()
@@ -3757,9 +11584,27 @@ def admin_list_database_sessions():
     return jsonify({'sessions': sessions})
 
 
+@app.route('/api/admin/active-sessions', methods=['GET'])
+def admin_list_active_sessions():
+    ident, admin_record = _current_admin_actor()
+    actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+    if not admin_record or actor_role not in ('Engineer', 'Admin', 'SuperAdmin'):
+        return jsonify({'error': 'Engineer or admin role required for this action'}), 403
+    categories = _collect_admin_active_sessions()
+    total = sum(int(item.get('total') or 0) for item in categories.values())
+    return jsonify({
+        'status': 'success',
+        'total': total,
+        'categories': categories,
+    })
+
+
 @app.route('/api/admin/revoke-database-sessions', methods=['POST'])
 def admin_revoke_database_sessions():
     """Revoke selected database access sessions. Calls Vault lease revoke with full lease_id; Vault runs revocation_statements."""
+    ident, admin_record = _current_admin_actor()
+    if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+        return jsonify({'error': 'Admin role required for this action'}), 403
     _load_requests()
     data = request.json or {}
     request_ids = data.get('request_ids') or []
@@ -3787,20 +11632,17 @@ def admin_revoke_database_sessions():
         req_plane = _request_execution_plane(req)
         req['account_env'] = req_account_env
         req['execution_plane'] = req_plane
-        lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
-        if lease_id:
-            try:
-                VaultManager.revoke_lease(lease_id, plane=req_plane)
-            except Exception as e:
-                err_str = str(e)
-                if '403' in err_str or 'permission denied' in err_str.lower():
-                    print(f"Vault revoke for {req_id}: permission denied; marking revoked in PAM only. Grant app token sys/leases/revoke.", flush=True)
-                else:
-                    print(f"Vault revoke for {req_id}: {e}", flush=True)
-                    failed.append({'request_id': req_id, 'error': err_str})
-                    continue
-        else:
-            print(f"Admin revoke for {req_id}: no lease_id; marking revoked only.", flush=True)
+        revoke_warning = ''
+        had_vault_artifacts = bool(
+            str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            or str(req.get('vault_role_name') or req.get('role_name') or '').strip()
+        )
+        vault_cleanup_result = _cleanup_database_vault_access(req, request_id=req_id, reason='admin_bulk_revoke')
+        if vault_cleanup_result.get('status') == 'partial':
+            revoke_warning = str(vault_cleanup_result.get('error') or '').strip()
+            print(f"Vault cleanup warning for {req_id}: {revoke_warning}", flush=True)
+        elif not had_vault_artifacts:
+            print(f"Admin revoke for {req_id}: no Vault lease or role present; marking revoked only.", flush=True)
         try:
             cleanup_result = _cleanup_database_iam_access(req, request_id=req_id, reason='admin_bulk_revoke')
             print(f"IAM cleanup result for {req_id}: {cleanup_result}", flush=True)
@@ -3811,22 +11653,106 @@ def admin_revoke_database_sessions():
         req['status'] = 'revoked'
         req['revoked_at'] = datetime.now().isoformat()
         req['revoke_reason'] = reason
+        req['revocation_warning'] = revoke_warning
         req['vault_token'] = ''
         req['password'] = ''
         req['db_password'] = ''
+        try:
+            STORE.mark_database_request_revoked(
+                req_id,
+                revoked_at=req['revoked_at'],
+                reason=reason,
+                warning=revoke_warning,
+            )
+        except Exception as persist_err:
+            print(f"Direct persist after bulk revoke failed for {req_id}: {persist_err}", flush=True)
+        _save_requests()
+        _sync_request_ticket(req_id)
         revoked.append(req_id)
-    _save_requests()
+        if revoke_warning:
+            failed.append({'request_id': req_id, 'error': revoke_warning, 'warning': True})
+    _load_requests()
     print(f"Admin revoke-database-sessions result: revoked={len(revoked)} {revoked}, failed={len(failed)} {failed}", flush=True)
     return jsonify({'revoked': revoked, 'failed': failed, 'reason': reason})
 
 
 @app.route('/api/approve/<request_id>', methods=['POST'])
 def approve_request(request_id):
+    _apply_pending_request_expiry()
     data = request.json or {}
-    if request_id not in requests_db:
+    access_request = requests_db.get(request_id)
+    if not isinstance(access_request, dict):
         return jsonify({'error': 'Request not found'}), 404
-    
-    access_request = requests_db[request_id]
+    if access_request.get('type') == 'database_access' and isinstance(access_request.get('approval_engine'), dict):
+        actor_email = _current_actor_email()
+        if not actor_email:
+            return jsonify({'error': 'Authentication required'}), 401
+        approval_flags = _database_request_actor_permissions(
+            access_request,
+            actor_email=actor_email,
+            is_admin=False,
+        )
+        if not approval_flags.get('can_approve'):
+            return jsonify({'error': 'Forbidden'}), 403
+        decision_result = _apply_workflow_decision_to_request(
+            access_request,
+            actor_email=actor_email,
+            decision='approve',
+            reason=str(data.get('reason') or '').strip()
+        )
+        if decision_result.get('error'):
+            return jsonify({'error': decision_result['error']}), 403
+        _save_requests()
+        if decision_result.get('status') == 'partial_approval':
+            pending_stage = decision_result.get('pending_stage') or {}
+            return jsonify({
+                'status': 'partial_approval',
+                'message': _approval_pending_message(access_request.get('approval_engine') or {}),
+                'pending_stage': pending_stage.get('name', ''),
+                'pending_approvers': [item.get('email', '') for item in (pending_stage.get('approvers') or []) if item.get('email')]
+            })
+
+        activate_result = _activate_database_access_request(request_id)
+        if activate_result.get('error'):
+            try:
+                print(f"❌ Approval-triggered activation failed for request {request_id}: {activate_result.get('error')}")
+            except Exception:
+                pass
+            safe_msg, safe_code = _public_db_activation_error(activate_result['error'])
+            return jsonify({
+                'status': 'approved',
+                'message': _activation_message_for_code(safe_code),
+                'error': safe_msg,
+                'activation_progress': _activation_progress_for_response(access_request),
+                'activation_error_code': safe_code,
+                'activation_retryable': _is_retryable_activation_code(safe_code),
+            }), 200
+
+        effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
+        approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
+        if effective_auth == 'iam':
+            if str(access_request.get('resource_kind') or '').strip().lower() == 'redshift_cluster' or str(access_request.get('engine') or '').strip().lower() == 'redshift':
+                approved_msg = '✅ Redshift access is active. Open My Requests > Databases > Login details to fetch temporary Redshift credentials (expires in ~15 minutes).'
+            else:
+                approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Login details (expires in ~15 minutes).'
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(actor_email, 'request_approved', request_id=request_id, details={'type': 'database_access', 'workflow': access_request.get('approval_workflow_name', '')}, ip=request.remote_addr)
+        except Exception:
+            pass
+        try:
+            _send_database_access_ready_email(access_request)
+        except Exception as email_exc:
+            try:
+                print(f"Database access-ready email send failed for request {request_id}: {email_exc}", flush=True)
+            except Exception:
+                pass
+        return jsonify({
+            'status': access_request.get('status', 'active'),
+            'message': approved_msg,
+            'expires_at': access_request.get('expires_at', '')
+        })
+
     # Derive approver from session; do not trust body for authorization (security: approval bypass fix)
     caller_ident = _current_request_identity()
     caller_email = (caller_ident.get('email') or _email_from_saml_session() or '').strip().lower()
@@ -3844,10 +11770,9 @@ def approve_request(request_id):
         # PAM admin can satisfy any non-self role
         role_norm = next((r for r in required_roles if r != 'self'), 'admin')
     else:
-        return jsonify({'error': 'Not authorized to approve this request'}), 403
+        return jsonify({'error': 'Request not found'}), 404
     
-    # Keep body value for backward-compat response only; authorization uses role_norm above
-    approver_role = data.get('approver_role') or role_norm
+    approver_role = role_norm
     
     # Handle database_access requests
     if access_request.get('type') == 'database_access':
@@ -3857,6 +11782,7 @@ def approve_request(request_id):
             approvals_db[request_id] = []
         approvals_db[request_id].append({
             'approver_role': role_norm,
+            'approver_email': caller_email,
             'approved_at': datetime.now().isoformat()
         })
 
@@ -3879,19 +11805,31 @@ def approve_request(request_id):
                     'status': 'approved',
                     'message': _activation_message_for_code(safe_code),
                     'error': safe_msg,
-                    'activation_progress': _activation_progress_for_response(access_request)
+                    'activation_progress': _activation_progress_for_response(access_request),
+                    'activation_error_code': safe_code,
+                    'activation_retryable': _is_retryable_activation_code(safe_code),
                 }), 200
 
             effective_auth = _normalize_auth_choice(access_request.get('effective_auth')) or 'password'
             approved_msg = '✅ Database access is active. Use PAM Terminal or External Tool credentials under My Requests > Databases.'
             if effective_auth == 'iam':
-                approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Login details (expires in ~15 minutes).'
+                if str(access_request.get('resource_kind') or '').strip().lower() == 'redshift_cluster' or str(access_request.get('engine') or '').strip().lower() == 'redshift':
+                    approved_msg = '✅ Redshift access is active. Open My Requests > Databases > Login details to fetch temporary Redshift credentials (expires in ~15 minutes).'
+                else:
+                    approved_msg = '✅ Database IAM access is active. Generate an IAM token under My Requests > Databases > Login details (expires in ~15 minutes).'
             try:
                 from audit_log import log_pam_action
-                actor = _email_from_saml_session() or (request.headers.get('X-Forwarded-For') or request.remote_addr or '')[:64]
+                actor = _current_actor_email() or 'unknown'
                 log_pam_action(actor, 'request_approved', request_id=request_id, details={'type': 'database_access', 'approver_role': role_norm}, ip=request.remote_addr)
             except Exception:
                 pass
+            try:
+                _send_database_access_ready_email(access_request)
+            except Exception as email_exc:
+                try:
+                    print(f"Database access-ready email send failed for request {request_id}: {email_exc}", flush=True)
+                except Exception:
+                    pass
             return jsonify({
                 'status': access_request.get('status', 'active'),
                 'message': approved_msg,
@@ -3936,6 +11874,7 @@ def approve_request(request_id):
     
     approvals_db[request_id].append({
         'approver_role': role_norm,
+        'approver_email': caller_email,
         'approved_at': datetime.now().isoformat()
     })
     
@@ -3994,24 +11933,8 @@ def grant_access(access_request):
         # Find user by email/username variations
         user_response = {'Users': []}
         base_email = str(access_request.get('user_email') or '').strip()
-        username_part = base_email.split('@')[0] if '@' in base_email else base_email
-        
-        search_inputs = [
-            ('Emails.Value', base_email),
-            ('UserName', base_email),
-            ('UserName', username_part),
-            ('UserName', f"{username_part}@Nykaa.local"),
-            ('UserName', f"{username_part.lower()}@Nykaa.local"),
-            ('UserName', f"{username_part.title()}@Nykaa.local")
-        ]
-        seen = set()
+        search_inputs = _identity_center_username_candidates(base_email)
         for attr_path, attr_value in search_inputs:
-            if not attr_value:
-                continue
-            sig = f"{attr_path}:{str(attr_value).strip().lower()}"
-            if sig in seen:
-                continue
-            seen.add(sig)
             try:
                 user_response = identitystore.list_users(
                     IdentityStoreId=CONFIG['identity_store_id'],
@@ -4094,7 +12017,7 @@ def grant_access(access_request):
                 print(f"Assignment existence check failed: {check_err}")
             return False
 
-        def _wait_for_assignment_status(request_id, timeout_seconds=45, poll_seconds=3):
+        def _wait_for_assignment_status(request_id, timeout_seconds=120, poll_seconds=3):
             """Poll assignment creation status; return SUCCEEDED/FAILED/IN_PROGRESS."""
             if not request_id:
                 return {'status': 'IN_PROGRESS'}
@@ -4169,25 +12092,9 @@ def _find_identity_center_user_by_email(email):
     base_email = str(email or '').strip()
     if not base_email:
         return None
-    username_part = base_email.split('@')[0] if '@' in base_email else base_email
     identitystore = _identitystore_client()
 
-    search_inputs = [
-        ('Emails.Value', base_email),
-        ('UserName', base_email),
-        ('UserName', username_part),
-        ('UserName', f"{username_part}@Nykaa.local"),
-        ('UserName', f"{username_part.lower()}@Nykaa.local"),
-        ('UserName', f"{username_part.title()}@Nykaa.local")
-    ]
-    seen = set()
-    for attr_path, attr_value in search_inputs:
-        if not attr_value:
-            continue
-        sig = f"{attr_path}:{str(attr_value).strip().lower()}"
-        if sig in seen:
-            continue
-        seen.add(sig)
+    for attr_path, attr_value in _identity_center_username_candidates(base_email):
         try:
             resp = identitystore.list_users(
                 IdentityStoreId=CONFIG['identity_store_id'],
@@ -4405,7 +12312,7 @@ def _cleanup_database_iam_access(req, request_id='', reason=''):
             ps_name = str((det.get('PermissionSet') or {}).get('Name') or '').strip()
         except Exception:
             ps_name = ''
-    should_delete_permission_set = ps_name.startswith('JIT-')
+    should_delete_permission_set = str(ps_name or '').strip().upper().startswith('JIT-')
     if should_delete_permission_set and not _db_open_request_uses_permission_set(ps_arn, exclude_request_id=rid):
         if account_id:
             try:
@@ -4460,94 +12367,279 @@ def _cleanup_database_iam_access(req, request_id='', reason=''):
         req['iam_cleanup_detail'] = assignment_error or ps_error
         return {'status': 'partial', 'error': req['iam_cleanup_detail']}
 
+    iam_artifacts_remaining = bool(
+        str(req.get('iam_permission_set_arn') or '').strip()
+        or str(req.get('iam_permission_set_name') or '').strip()
+    )
+    if iam_artifacts_remaining:
+        req['iam_cleanup_status'] = 'partial'
+        req['iam_cleanup_detail'] = (
+            'assignment_removed_but_permission_set_delete_pending'
+            if assignment_deleted
+            else 'permission_set_delete_pending'
+        )
+        return {
+            'status': 'partial',
+            'assignment_deleted': assignment_deleted,
+            'permission_set_deleted': ps_deleted,
+            'error': req['iam_cleanup_detail'],
+        }
+
     req['iam_cleanup_status'] = 'done'
     req['iam_cleanup_detail'] = 'assignment_removed_and_permission_set_deleted' if ps_deleted else (
         'assignment_removed' if assignment_deleted else 'already_absent'
     )
     return {'status': 'deleted' if ps_deleted else 'done', 'assignment_deleted': assignment_deleted, 'permission_set_deleted': ps_deleted}
 
-@app.route('/api/admin/users', methods=['GET'])
+
+def _cleanup_database_vault_access(req, request_id='', reason=''):
+    """
+    Best-effort cleanup of request-scoped Vault DB artifacts.
+
+    Real DB-user cleanup is primarily handled by Vault lease revocation because the
+    revocation statements on the Vault DB role drop the dynamic DB user and revoke
+    its effective permissions. After that, we also delete the temporary Vault DB role
+    config object so per-request roles do not accumulate in Vault.
+
+    Never raises; returns {'status': 'done'|'partial'|'skipped'|'error', ...}.
+    """
+    result = {'status': 'skipped', 'message': 'not_applicable'}
+    if not isinstance(req, dict) or req.get('type') != 'database_access':
+        return result
+
+    rid = str(request_id or req.get('id') or '').strip()
+    req_plane = _request_execution_plane(req)
+    req['execution_plane'] = req_plane
+    req['vault_cleanup_last_attempt_at'] = datetime.now().isoformat()
+    req['vault_cleanup_reason'] = str(reason or '').strip()
+
+    errors = []
+    lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+    role_name = str(req.get('vault_role_name') or req.get('role_name') or '').strip()
+    engine_l = str(req.get('engine') or '').strip().lower()
+
+    # Redshift cleanup is stricter than MySQL/RDS. Refresh the request-scoped Vault
+    # role with the latest revoke statements before revoking the lease so older
+    # requests created with outdated cleanup logic can still be removed cleanly.
+    if role_name and 'redshift' in engine_l:
+        try:
+            dbs = req.get('databases', []) if isinstance(req.get('databases'), list) else []
+            db_names = []
+            for db in dbs:
+                if isinstance(db, dict):
+                    n = str(db.get('name') or '').strip()
+                    if n and n not in db_names:
+                        db_names.append(n)
+            if not db_names:
+                fallback_db_name = str(req.get('db_name') or '').strip()
+                if fallback_db_name:
+                    db_names = [fallback_db_name]
+            if db_names:
+                VaultManager.refresh_redshift_database_role(
+                    role_name=role_name,
+                    request_id=rid or str(req.get('id') or '').strip(),
+                    db_instance_id=str(req.get('db_instance_id') or '').strip(),
+                    connection_name=_resolve_vault_connection_name_override(
+                        account_id=str(req.get('account_id') or '').strip(),
+                        engine=str(req.get('engine') or '').strip(),
+                        db_instance_id=str(req.get('db_instance_id') or '').strip(),
+                        execution_plane=req_plane,
+                    ),
+                    db_names=db_names,
+                    schema_name=str(req.get('requested_schema_name') or '').strip(),
+                    table_names=list(req.get('requested_tables') or []) or [str(req.get('requested_table_name') or '').strip()],
+                    allowed_ops=_normalize_permissions_list(req.get('permissions')),
+                    duration_hours=int(req.get('duration_hours') or 2),
+                    request_role=str(req.get('role') or '').strip().lower(),
+                    requester=_resolve_requester_for_vault(req),
+                    auth_type=_normalize_auth_choice(req.get('effective_auth')) or 'password',
+                    plane=req_plane,
+                )
+        except Exception as exc:
+            errors.append(f"role_refresh={str(exc or '').strip()}")
+
+    if lease_id:
+        try:
+            VaultManager.revoke_lease(lease_id, plane=req_plane)
+        except Exception as exc:
+            if _is_benign_db_revoke_error(exc):
+                pass
+            else:
+                errors.append(f"lease_revoke={str(exc or '').strip()}")
+    if role_name:
+        try:
+            VaultManager.delete_database_role(role_name, plane=req_plane)
+        except Exception as exc:
+            errors.append(f"role_delete={str(exc or '').strip()}")
+
+    if not errors:
+        if lease_id:
+            req['vault_lease_id'] = ''
+            req['lease_id'] = ''
+            req['vault_lease_revoked_at'] = datetime.now().isoformat()
+        if role_name:
+            req['vault_role_name'] = ''
+            req['role_name'] = ''
+            req['vault_role_deleted_at'] = datetime.now().isoformat()
+        req['vault_cleanup_status'] = 'done'
+        req['vault_cleanup_detail'] = 'lease_revoked_and_role_deleted'
+        return {'status': 'done', 'lease_revoked': bool(lease_id), 'role_deleted': bool(role_name)}
+
+    # Keep identifiers only when the specific cleanup step failed so operators can retry.
+    if lease_id and not any(err.startswith('lease_revoke=') for err in errors):
+        req['vault_lease_id'] = ''
+        req['lease_id'] = ''
+        req['vault_lease_revoked_at'] = datetime.now().isoformat()
+    if role_name and not any(err.startswith('role_delete=') for err in errors):
+        req['vault_role_name'] = ''
+        req['role_name'] = ''
+        req['vault_role_deleted_at'] = datetime.now().isoformat()
+
+    req['vault_cleanup_status'] = 'partial'
+    req['vault_cleanup_detail'] = '; '.join(errors)
+    return {
+        'status': 'partial',
+        'lease_revoked': bool(lease_id) and not any(err.startswith('lease_revoke=') for err in errors),
+        'role_deleted': bool(role_name) and not any(err.startswith('role_delete=') for err in errors),
+        'error': req['vault_cleanup_detail'],
+    }
+
+
+def _needs_vault_cleanup_retry(req) -> bool:
+    """Whether background worker should retry Vault DB cleanup for this request."""
+    if not isinstance(req, dict) or req.get('type') != 'database_access':
+        return False
+    status = str(req.get('status') or '').strip().lower()
+    # Active/approved requests are handled by normal expiry/revoke flow.
+    if status in ('active', 'approved'):
+        return False
+    cleanup_status = str(req.get('vault_cleanup_status') or '').strip().lower()
+    if cleanup_status not in ('partial', 'error'):
+        return False
+    has_vault_artifacts = bool(
+        str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+        or str(req.get('vault_role_name') or req.get('role_name') or '').strip()
+    )
+    return has_vault_artifacts
+
+
+def _needs_iam_cleanup_retry(req) -> bool:
+    """Whether background worker should retry IAM permission-set cleanup for this request."""
+    if not isinstance(req, dict) or req.get('type') != 'database_access':
+        return False
+    status = str(req.get('status') or '').strip().lower()
+    # Active/approved requests are handled by normal activation/revoke flow.
+    if status in ('active', 'approved'):
+        return False
+    has_iam_artifacts = bool(
+        str(req.get('iam_permission_set_arn') or '').strip()
+        or str(req.get('iam_permission_set_name') or '').strip()
+    )
+    if not has_iam_artifacts:
+        return False
+    cleanup_status = str(req.get('iam_cleanup_status') or '').strip().lower()
+    if cleanup_status == 'skipped_in_use':
+        return False
+    # Retry until the IAM artifacts are actually gone. A previous "done" state is not enough
+    # if the permission-set ARN/name still remain on the request due to eventual consistency.
+    return True
+
+@_rate_limit_exempt
+@app.route('/api/admin/users', methods=['GET', 'POST'])
 def get_users():
-    """Get all users for admin management. Returns Identity Center synced users if any, else fallback."""
+    """Get or create local user records for admin management."""
     try:
-        if identity_center_synced_users:
-            # Format for Admin Users table: first_name, last_name, email, phone, department, group, role
-            out = []
-            for u in identity_center_synced_users:
-                out.append({
-                    'first_name': u.get('first_name') or (u.get('display_name') or '').split()[0] or u.get('username', ''),
-                    'last_name': u.get('last_name') or (u.get('display_name') or '').split()[-1] if (u.get('display_name') or '').split() else '',
-                    'email': u.get('email') or u.get('username', ''),
-                    'phone': '',
-                    'department': '',
-                    'group': u.get('group', '—'),
-                    'role': 'ReadOnly'
-                })
-            return jsonify(out)
-        # Fallback when no sync has been run
-        users = [
-            {
-                'first_name': 'Satish',
-                'last_name': 'Korra',
-                'email': 'satish.korra@nykaa.com',
-                'phone': '+91-9876543210',
-                'department': 'DevOps',
-                'group': 'DevOps Team',
-                'role': 'admin'
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        if request.method == 'POST' and not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            email = _normalize_email_address(data.get('email'))
+            if not email:
+                return jsonify({'error': 'email is required'}), 400
+            group_id = _group_id_from_name(data.get('group') or data.get('group_id') or 'employees')
+            group_name = group_id or 'employees'
+            role = _normalize_pam_role(data.get('role') or 'Employee')
+            allowed, error = _can_manage_group_definition(
+                actor_role,
+                group_id=group_name,
+                requested_role=role,
+                mutation='create',
+            )
+            if not allowed:
+                return jsonify({'error': error}), 403
+            users_data = _load_local_org_users()
+            users = users_data.get('users') or []
+            display_name = str(
+                data.get('display_name')
+                or ' '.join(part for part in [str(data.get('first_name') or '').strip(), str(data.get('last_name') or '').strip()] if part)
+                or email.split('@')[0].replace('.', ' ').title()
+            ).strip()
+            new_user = {
+                'email': email,
+                'name': display_name,
+                'display_name': display_name,
+                'first_name': str(data.get('first_name') or '').strip(),
+                'last_name': str(data.get('last_name') or '').strip(),
+                'group_id': group_name,
+                'role': role,
+                'created_at': datetime.now(timezone.utc).isoformat(),
             }
-        ]
-        return jsonify(users)
+            replaced = False
+            for idx, item in enumerate(users):
+                if _normalize_email_address(item.get('email')) == email:
+                    users[idx] = {**item, **new_user, 'created_at': str(item.get('created_at') or new_user['created_at'])}
+                    replaced = True
+                    break
+            if not replaced:
+                users.append(new_user)
+            users_data['users'] = users
+            _save_local_org_users(users_data)
+
+            groups_data = _load_local_user_groups()
+            found_group = False
+            for idx, group in enumerate(groups_data.get('groups') or []):
+                normalized = _normalize_local_group_record(group)
+                if normalized.get('id') == group_name:
+                    found_group = True
+                    if email not in normalized['members']:
+                        normalized['members'].append(email)
+                    groups_data['groups'][idx] = normalized
+                    break
+            if not found_group:
+                groups = groups_data.get('groups') or []
+                groups.append(_normalize_local_group_record({
+                    'id': group_name,
+                    'name': group_name,
+                    'role': role,
+                    'members': [email],
+                }))
+                groups_data['groups'] = groups
+            _save_local_user_groups(groups_data)
+            return jsonify({'status': 'success', 'user': new_user})
+
+        search = str(request.args.get('q') or request.args.get('search') or '').strip()
+        return jsonify(_merged_directory_users(search=search))
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/create-user', methods=['POST'])
 def create_user():
     """Create new user in JIT console"""
     try:
-        data = request.get_json()
-        
-        # Validate required fields
-        required = ['first_name', 'last_name', 'email', 'phone', 'department', 'group', 'role']
-        for field in required:
-            if not data.get(field):
-                return jsonify({'error': f'{field} is required'}), 400
-        
-        # Store user (integrate with your user database)
-        print(f"Creating user: {data['first_name']} {data['last_name']} ({data['email']})")
-        print(f"Role: {data['role']}, Group: {data['group']}, Department: {data['department']}")
-        
-        return jsonify({
-            'status': 'success',
-            'message': f"User {data['first_name']} {data['last_name']} created successfully",
-            'user': data
-        })
-        
+        return get_users()
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/create-group', methods=['POST'])
 def create_group():
     """Create new group with permissions"""
     try:
-        data = request.get_json()
-        
-        group_name = data.get('name')
-        permissions = data.get('permissions', [])
-        
-        if not group_name:
-            return jsonify({'error': 'Group name is required'}), 400
-        
-        print(f"Creating group: {group_name}")
-        print(f"Permissions: {', '.join(permissions)}")
-        
-        return jsonify({
-            'status': 'success',
-            'message': f"Group {group_name} created successfully",
-            'group': {'name': group_name, 'permissions': permissions}
-        })
-        
+        return manage_user_groups()
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/onboard-user', methods=['POST'])
 def manual_onboard_user():
@@ -4568,7 +12660,7 @@ def manual_onboard_user():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/request-for-others', methods=['POST'])
 def request_for_others():
@@ -4616,7 +12708,7 @@ def request_for_others():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/audit-logs', methods=['GET'])
 def get_audit_logs():
@@ -4625,60 +12717,455 @@ def get_audit_logs():
         limit = min(500, max(1, int(request.args.get('limit', 100))))
         offset = max(0, int(request.args.get('offset', 0)))
         rows = STORE.list_audit_logs(limit=limit, offset=offset)
-        # Shape for UI: event, resource, status
         audit_logs = []
         for r in rows:
+            payload = {}
+            try:
+                payload = json.loads(r.get('payload_json') or '{}')
+                if not isinstance(payload, dict):
+                    payload = {}
+            except Exception:
+                payload = {}
+            request_id = str(r.get('request_id') or '').strip()
+            action = str(r.get('action') or '').strip()
+            details = []
+            if payload.get('instance'):
+                details.append(f"instance={payload.get('instance')}")
+            if payload.get('database'):
+                details.append(f"database={payload.get('database')}")
+            if payload.get('schema'):
+                details.append(f"schema={payload.get('schema')}")
+            if payload.get('table'):
+                details.append(f"table={payload.get('table')}")
+            if payload.get('access_type'):
+                details.append(f"access={payload.get('access_type')}")
+            if payload.get('http_method'):
+                details.append(f"method={payload.get('http_method')}")
+            if payload.get('path'):
+                details.append(f"path={payload.get('path')}")
+            if payload.get('status_code'):
+                details.append(f"http={payload.get('status_code')}")
+            if payload.get('reason') and not details:
+                details.append(str(payload.get('reason')))
             audit_logs.append({
                 'timestamp': r.get('timestamp', ''),
                 'user': r.get('user', ''),
-                'event': r.get('action', ''),
-                'request_id': r.get('request_id', ''),
+                'event': action,
+                'request_id': request_id,
                 'role': r.get('role', ''),
                 'status': 'Success' if r.get('allowed') else 'Denied',
                 'error': r.get('error') or '',
+                'resource': payload.get('database') or payload.get('instance') or payload.get('path') or request_id or action,
+                'ip': str(payload.get('ip') or payload.get('source_ip') or '').strip(),
+                'details': '; '.join([str(item).strip() for item in details if str(item).strip()]),
             })
         return jsonify(audit_logs)
     except Exception as e:
         return _safe_error_response(e)
 
+
+@app.route('/api/admin/audit-logs/export', methods=['POST'])
+def export_audit_logs():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        from audit_log import export_full_audit_snapshot_to_s3
+        result = export_full_audit_snapshot_to_s3()
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                ident.get('email') or ident.get('nameid') or 'unknown',
+                'audit_logs_exported',
+                details=result,
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+        return jsonify({'status': 'success', 'export': result})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/audit-logs/test', methods=['POST'])
+def test_audit_logs_s3_target():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        from audit_log import test_audit_export_target, log_pam_action
+        data = request.get_json(silent=True) or {}
+        incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        current = _load_app_settings()
+        merged = dict(current)
+        if isinstance(incoming, dict):
+            if 'audit_logs_bucket' in incoming:
+                merged['audit_logs_bucket'] = str(incoming.get('audit_logs_bucket') or '').strip()
+            if 'audit_logs_prefix' in incoming:
+                merged['audit_logs_prefix'] = str(incoming.get('audit_logs_prefix') or '').strip() or 'npamx/audit'
+            if 'audit_logs_auto_export' in incoming:
+                merged['audit_logs_auto_export'] = _as_bool(incoming.get('audit_logs_auto_export'), False)
+        result = test_audit_export_target(merged)
+        try:
+            log_pam_action(
+                ident.get('email') or ident.get('nameid') or 'unknown',
+                'audit_logs_s3_tested',
+                details={'bucket': result.get('bucket'), 'prefix': result.get('prefix'), 'probe_key': result.get('probe_key')},
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+        return jsonify({'status': 'success', 'result': result})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e or 'Failed to test S3 archive target').strip() or 'Failed to test S3 archive target'}), 200
+
+
+@app.route('/api/admin/tickets', methods=['GET'])
+def get_request_tickets():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        filters = _ticket_filters_from_request_args()
+        offset = (filters['page'] - 1) * filters['page_size']
+        rows, total = STORE.list_request_tickets(
+            category=filters['category'],
+            status=filters['status'],
+            q=filters['q'],
+            date_from=filters['date_from'],
+            date_to=filters['date_to'],
+            limit=filters['page_size'],
+            offset=offset,
+        )
+        return jsonify({
+            'tickets': rows,
+            'page': filters['page'],
+            'page_size': filters['page_size'],
+            'total': total,
+            'can_delete': session.get('auth_type') == 'break_glass',
+            'actor_email': ident.get('email') or ident.get('nameid') or '',
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/tickets/export', methods=['GET'])
+def export_request_tickets():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        filters = _ticket_filters_from_request_args()
+        selected_ids = [
+            str(item or '').strip()
+            for item in str(request.args.get('request_ids') or '').split(',')
+            if str(item or '').strip()
+        ]
+        rows, _total = STORE.list_request_tickets(
+            category=filters['category'],
+            status=filters['status'],
+            q=filters['q'],
+            date_from=filters['date_from'],
+            date_to=filters['date_to'],
+            limit=5000,
+            offset=0,
+        )
+        if selected_ids:
+            selected = set(selected_ids)
+            rows = [row for row in rows if str(row.get('request_id') or '') in selected]
+        output = io.StringIO()
+        fieldnames = [
+            'request_id', 'category', 'request_type', 'raised_by_email', 'beneficiary_email',
+            'account_id', 'resource_target', 'requested_actions', 'request_reason', 'status',
+            'approval_workflow_name', 'approver_emails', 'approved_by', 'declined_by',
+            'decline_reason', 'requested_at', 'decision_at', 'expires_at', 'deleted_at', 'deleted_by',
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, '') for key in fieldnames})
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                ident.get('email') or ident.get('nameid') or 'unknown',
+                'ticket_exported',
+                details={'count': len(rows), 'category': filters['category'], 'status': filters['status']},
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+        filename = f"npamx_tickets_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+        return Response(
+            output.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename=\"{filename}\"'},
+        )
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/tickets/delete', methods=['POST'])
+def delete_request_ticket_history():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        if session.get('auth_type') != 'break_glass':
+            return jsonify({'error': 'Only break-glass SuperAdmin can delete ticket history'}), 403
+        data = request.get_json(silent=True) or {}
+        request_ids = data.get('request_ids') or []
+        if not isinstance(request_ids, list) or not request_ids:
+            return jsonify({'error': 'request_ids must be a non-empty list'}), 400
+        deleted = STORE.delete_request_ticket_history(request_ids)
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                ident.get('email') or ident.get('nameid') or 'unknown',
+                'ticket_history_deleted',
+                details={'request_ids': request_ids, 'deleted': deleted},
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+        return jsonify({'status': 'success', 'deleted': deleted})
+    except Exception as e:
+        return _safe_error_response(e)
+
+def _analytics_request_rows():
+    _apply_pending_request_expiry()
+    rows = []
+    now = datetime.now(timezone.utc)
+    for request_id, req in requests_db.items():
+        if not isinstance(req, dict):
+            continue
+        created_at = _parse_request_datetime(req.get('created_at') or req.get('requested_at'))
+        if not created_at:
+            continue
+        created_utc = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at.astimezone(timezone.utc)
+        category = _request_category(req)
+        env = 'prod' if _request_account_env(req) == 'prod' else 'nonprod'
+        user_email = str(req.get('user_email') or '').strip().lower()
+        rows.append({
+            'request_id': str(request_id or req.get('id') or '').strip(),
+            'created_at': created_utc,
+            'category': category,
+            'env': env,
+            'user_email': user_email,
+            'decision': _request_decision_status(req),
+            'status': str(req.get('status') or '').strip().lower(),
+            'database_engine_bucket': (
+                'redshift'
+                if (str(req.get('resource_kind') or '').strip().lower() == 'redshift_cluster' or str(req.get('engine') or '').strip().lower() == 'redshift')
+                else ('rds' if category == 'databases' and any(token in str(req.get('engine') or '').strip().lower() for token in ('mysql', 'postgres', 'maria', 'aurora')) else ('others' if category == 'databases' else ''))
+            ),
+        })
+    rows.sort(key=lambda item: item['created_at'])
+    return rows, now
+
+
+def _analytics_count_window(rows, start_at):
+    counts = {'total': 0, 'databases': 0, 'cloud': 0, 'workloads': 0, 'storage': 0}
+    for item in rows:
+        if item['created_at'] < start_at:
+            continue
+        counts['total'] += 1
+        category = str(item.get('category') or '').strip().lower()
+        if category in counts:
+            counts[category] += 1
+    return counts
+
+
+def _analytics_series(rows, now, period='day_30'):
+    period_key = str(period or 'day_30').strip().lower()
+    buckets = []
+    bucket_map = {}
+    if period_key == 'month_12':
+        anchor = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        for offset in range(11, -1, -1):
+            dt = anchor
+            year = dt.year
+            month = dt.month - offset
+            while month <= 0:
+                year -= 1
+                month += 12
+            while month > 12:
+                year += 1
+                month -= 12
+            bucket_dt = datetime(year, month, 1, tzinfo=timezone.utc)
+            key = bucket_dt.strftime('%Y-%m')
+            row = {'key': key, 'label': bucket_dt.strftime('%b %Y'), 'total': 0, 'databases': 0, 'cloud': 0, 'workloads': 0, 'storage': 0}
+            buckets.append(row)
+            bucket_map[key] = row
+        for item in rows:
+            key = item['created_at'].strftime('%Y-%m')
+            bucket = bucket_map.get(key)
+            if not bucket:
+                continue
+            bucket['total'] += 1
+            if item['category'] in bucket:
+                bucket[item['category']] += 1
+        return buckets
+
+    if period_key == 'week_12':
+        start_of_week = now - timedelta(days=now.weekday())
+        start_of_week = datetime(start_of_week.year, start_of_week.month, start_of_week.day, tzinfo=timezone.utc)
+        for offset in range(11, -1, -1):
+            bucket_dt = start_of_week - timedelta(weeks=offset)
+            key = bucket_dt.strftime('%Y-W%W')
+            row = {'key': key, 'label': bucket_dt.strftime('%d %b'), 'total': 0, 'databases': 0, 'cloud': 0, 'workloads': 0, 'storage': 0}
+            buckets.append(row)
+            bucket_map[key] = row
+        for item in rows:
+            item_week = item['created_at'] - timedelta(days=item['created_at'].weekday())
+            item_week = datetime(item_week.year, item_week.month, item_week.day, tzinfo=timezone.utc)
+            key = item_week.strftime('%Y-W%W')
+            bucket = bucket_map.get(key)
+            if not bucket:
+                continue
+            bucket['total'] += 1
+            if item['category'] in bucket:
+                bucket[item['category']] += 1
+        return buckets
+
+    start_of_day = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    for offset in range(29, -1, -1):
+        bucket_dt = start_of_day - timedelta(days=offset)
+        key = bucket_dt.strftime('%Y-%m-%d')
+        row = {'key': key, 'label': bucket_dt.strftime('%d %b'), 'total': 0, 'databases': 0, 'cloud': 0, 'workloads': 0, 'storage': 0}
+        buckets.append(row)
+        bucket_map[key] = row
+    for item in rows:
+        key = item['created_at'].strftime('%Y-%m-%d')
+        bucket = bucket_map.get(key)
+        if not bucket:
+            continue
+        bucket['total'] += 1
+        if item['category'] in bucket:
+            bucket[item['category']] += 1
+    return buckets
+
+
 @app.route('/api/admin/analytics', methods=['GET'])
 def get_admin_analytics():
-    """Get analytics data for admin dashboard"""
+    """Get analytics data for the admin trends board."""
     try:
-        thirtyDaysAgo = datetime.now() - timedelta(days=30)
-        
-        user_first_request = {}
-        for req in requests_db.values():
-            email = req['user_email']
-            req_date = datetime.fromisoformat(req['created_at'].replace('Z', '+00:00'))
-            if email not in user_first_request or req_date < user_first_request[email]:
-                user_first_request[email] = req_date
-        
-        new_users = sum(1 for date in user_first_request.values() if date >= thirtyDaysAgo)
-        
-        user_request_counts = {}
-        for req in requests_db.values():
-            email = req['user_email']
-            user_request_counts[email] = user_request_counts.get(email, 0) + 1
-        
-        repeated_users = sum(1 for count in user_request_counts.values() if count > 3)
-        
-        exceptional_users = set()
-        for req in requests_db.values():
-            if req.get('permission_set', '').lower().find('admin') != -1:
-                exceptional_users.add(req['user_email'])
-        
+        rows, now = _analytics_request_rows()
+        start_today = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        start_this_week = start_today - timedelta(days=now.weekday())
+        start_last_7_days = start_today - timedelta(days=6)
+        start_last_30_days = start_today - timedelta(days=29)
+        start_last_12_weeks = start_this_week - timedelta(weeks=11)
+        start_last_12_months = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        month = start_last_12_months.month - 11
+        year = start_last_12_months.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        start_last_12_months = datetime(year, month, 1, tzinfo=timezone.utc)
+
+        windows = {
+            'today': {'label': 'Today', 'counts': _analytics_count_window(rows, start_today)},
+            'last_7_days': {'label': 'Last 7 Days', 'counts': _analytics_count_window(rows, start_last_7_days)},
+            'this_week': {'label': 'This Week', 'counts': _analytics_count_window(rows, start_this_week)},
+            'last_30_days': {'label': 'Last 30 Days', 'counts': _analytics_count_window(rows, start_last_30_days)},
+            'last_12_weeks': {'label': 'Last 12 Weeks', 'counts': _analytics_count_window(rows, start_last_12_weeks)},
+            'last_12_months': {'label': 'Last 12 Months', 'counts': _analytics_count_window(rows, start_last_12_months)},
+        }
+
+        status_mix = {'pending': 0, 'approved': 0, 'denied': 0}
+        env_breakdown = {
+            key: {
+                'prod_requests': 0,
+                'nonprod_requests': 0,
+                'prod_users': set(),
+                'nonprod_users': set(),
+            }
+            for key in ('databases', 'cloud', 'workloads', 'storage')
+        }
+        category_repeat_tracker = {key: Counter() for key in ('databases', 'cloud', 'workloads', 'storage')}
+        db_engine_repeat_tracker = {key: Counter() for key in ('rds', 'redshift', 'others')}
+        top_requesters = defaultdict(lambda: {'total_requests': 0, 'databases': 0, 'cloud': 0, 'workloads': 0, 'storage': 0})
+
+        for item in rows:
+            decision = item['decision']
+            if decision in status_mix:
+                status_mix[decision] += 1
+            category = item['category']
+            email = item['user_email']
+            if category in env_breakdown:
+                env_key = 'prod' if item['env'] == 'prod' else 'nonprod'
+                env_breakdown[category][f'{env_key}_requests'] += 1
+                if email:
+                    env_breakdown[category][f'{env_key}_users'].add(email)
+            if category in category_repeat_tracker and email:
+                category_repeat_tracker[category][email] += 1
+            if category == 'databases' and email:
+                db_engine_repeat_tracker[item['database_engine_bucket'] or 'others'][email] += 1
+            if email:
+                top_requesters[email]['total_requests'] += 1
+                if category in top_requesters[email]:
+                    top_requesters[email][category] += 1
+
+        repeated_by_category = [
+            {
+                'category': key,
+                'label': category_label_for_api(key),
+                'users': sum(1 for count in counter.values() if count > 1),
+            }
+            for key, counter in category_repeat_tracker.items()
+        ]
+        repeated_db_by_engine = [
+            {
+                'engine': key,
+                'label': 'RDS Family' if key == 'rds' else ('Redshift' if key == 'redshift' else 'Others'),
+                'users': sum(1 for count in counter.values() if count > 1),
+            }
+            for key, counter in db_engine_repeat_tracker.items()
+        ]
+        env_summary = {
+            key: {
+                'label': category_label_for_api(key),
+                'prod_requests': value['prod_requests'],
+                'nonprod_requests': value['nonprod_requests'],
+                'prod_users': len(value['prod_users']),
+                'nonprod_users': len(value['nonprod_users']),
+            }
+            for key, value in env_breakdown.items()
+        }
+        top_requesters_rows = [
+            {
+                'email': email,
+                **value,
+            }
+            for email, value in top_requesters.items()
+            if value['total_requests'] > 1
+        ]
+        top_requesters_rows.sort(key=lambda item: (item['total_requests'], item['databases'], item['cloud']), reverse=True)
+
         return jsonify({
-            'new_users': new_users,
-            'repeated_users': repeated_users,
-            'exceptional_users': len(exceptional_users),
-            'pending_approvals': len([r for r in requests_db.values() if r['status'] == 'pending']),
-            'weekly_activity': [12, 19, 8, 15, 22, 3, 7],
-            'request_types': {'AWS': 45, 'Applications': 25, 'Databases': 20, 'Kubernetes': 10}
+            'generated_at': now.isoformat(),
+            'windows': windows,
+            'status_mix': status_mix,
+            'series': {
+                'day_30': _analytics_series(rows, now, 'day_30'),
+                'week_12': _analytics_series(rows, now, 'week_12'),
+                'month_12': _analytics_series(rows, now, 'month_12'),
+            },
+            'repeated_users': {
+                'by_category': repeated_by_category,
+                'database_by_engine': repeated_db_by_engine,
+                'top_requesters': top_requesters_rows[:10],
+            },
+            'environment_breakdown': env_summary,
+            'extras': {
+                'total_unique_requesters': len({item['user_email'] for item in rows if item['user_email']}),
+                'pending_approvals': status_mix['pending'],
+                'approved_or_active': status_mix['approved'],
+                'closed_or_denied': status_mix['denied'],
+            },
         })
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/sync-users', methods=['POST'])
 def sync_users():
@@ -4693,7 +13180,7 @@ def sync_users():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/security/anomaly', methods=['POST'])
 def log_security_anomaly():
@@ -4757,7 +13244,7 @@ def send_to_siem():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/account/<account_id>/tag', methods=['PUT'])
 def update_account_tag(account_id):
@@ -4774,7 +13261,7 @@ def update_account_tag(account_id):
             return jsonify({'error': 'Account not found'}), 404
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/account/<account_id>/jit', methods=['PUT'])
 def update_account_jit(account_id):
@@ -4791,7 +13278,7 @@ def update_account_jit(account_id):
             return jsonify({'error': 'Account not found'}), 404
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/account/<account_id>/duration', methods=['PUT'])
 def update_account_duration(account_id):
@@ -4808,7 +13295,7 @@ def update_account_duration(account_id):
             return jsonify({'error': 'Account not found'}), 404
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/sync-accounts-from-ou', methods=['POST'])
 def sync_accounts_from_ou():
@@ -4858,14 +13345,15 @@ def sync_accounts_from_ou():
         
     except Exception as e:
         print(f"Error syncing from OU: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/instances', methods=['GET'])
 def get_instances():
     """Get all EC2 instances across accounts"""
     try:
-        ec2 = boto3.client('ec2', region_name='ap-south-1')
-        sts = boto3.client('sts')
+        account_id = request.args.get('account_id', '')
+        ec2 = _resource_client('ec2', region_name='ap-south-1', account_id=account_id)
+        sts = _resource_client('sts', account_id=account_id)
         current_account = sts.get_caller_identity()['Account']
         
         instances = []
@@ -4888,7 +13376,7 @@ def get_instances():
         
     except Exception as e:
         print(f"Error fetching instances: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/instances/start-session', methods=['POST'])
 def start_ssm_session():
@@ -4926,7 +13414,7 @@ def start_ssm_session():
         
     except Exception as e:
         print(f"Error starting session: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/instances/request-access', methods=['POST'])
 def request_instance_access():
@@ -4935,7 +13423,18 @@ def request_instance_access():
         data = request.get_json()
         instances = data.get('instances', [])
         account_id = data.get('account_id')
-        user_email = data.get('user_email', 'satish.korra@nykaa.com') or 'satish.korra@nykaa.com'
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        if not caller_email:
+            return jsonify({'error': 'Authenticated session required'}), 401
+        user_email = str(data.get('user_email') or '').strip().lower() or caller_email
+        if user_email != caller_email:
+            admin_record = _pam_admin_record_for_identity(
+                email=caller_email,
+                nameid=_current_request_identity().get('nameid') or '',
+                hints=_current_request_identity().get('hints') or {}
+            )
+            if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+                return jsonify({'error': 'You can only request instance access for yourself unless you are a PAM admin'}), 403
         request_for = data.get('request_for', 'myself')
         justification = data.get('justification')
         duration_hours = data.get('duration_hours', 2)
@@ -4984,7 +13483,7 @@ def request_instance_access():
         
     except Exception as e:
         print(f"Error requesting access: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
 
@@ -4992,7 +13491,19 @@ def request_instance_access():
 def get_approved_instances():
     """Get approved instances for current user"""
     try:
-        user_email = request.args.get('user_email', 'satish.korra@nykaa.com')
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        if not caller_email:
+            return jsonify({'error': 'Authenticated session required'}), 401
+        requested_email = str(request.args.get('user_email') or '').strip().lower()
+        user_email = requested_email or caller_email
+        if user_email != caller_email:
+            admin_record = _pam_admin_record_for_identity(
+                email=caller_email,
+                nameid=_current_request_identity().get('nameid') or '',
+                hints=_current_request_identity().get('hints') or {}
+            )
+            if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+                return jsonify({'error': 'You can only view your own approved instances unless you are a PAM admin'}), 403
         approved_instances = []
         
         print(f"Looking for approved instances for {user_email}")
@@ -5022,7 +13533,7 @@ def get_approved_instances():
         
     except Exception as e:
         print(f"Error getting approved instances: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 def create_user_on_instance(instance_id, username, sudo_access=False):
     """Create user on EC2 instance via SSM Run Command"""
@@ -5125,7 +13636,7 @@ def cleanup_expired_instance_access():
         
     except Exception as e:
         print(f"Error cleaning up expired access: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/instances/log-session', methods=['POST'])
 def log_instance_session():
@@ -5138,17 +13649,20 @@ def log_instance_session():
         return jsonify({'status': 'logged'})
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/discover-services', methods=['GET'])
 def discover_services():
     """Discover all AWS services with resources in the account using Resource Explorer"""
     try:
         account_id = request.args.get('account_id')
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
         region = 'ap-south-1'
         
         # Use AWS Resource Groups Tagging API to discover all resources
-        tagging = boto3.client('resourcegroupstaggingapi', region_name=region)
+        tagging = _resource_client('resourcegroupstaggingapi', region_name=region, account_id=account_id)
         
         discovered_services = set()
         paginator = tagging.get_paginator('get_resources')
@@ -5161,6 +13675,12 @@ def discover_services():
                 if len(parts) >= 3:
                     service = parts[2]
                     discovered_services.add(service)
+
+        # Tagging API misses untagged resources, which can make service discovery
+        # look empty for accounts like the org management account. Fall back to
+        # direct service probes so the picker still populates when listing works.
+        if not discovered_services:
+            discovered_services = _discover_services_via_direct_apis(account_id or '', region)
         
         # Map AWS service names to friendly names
         service_map = {
@@ -5200,18 +13720,21 @@ def discover_services():
         
     except Exception as e:
         print(f"Error discovering services: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/resources/<service>', methods=['GET'])
 def get_resources(service):
     """Get AWS resources for selected service from current account"""
     try:
         account_id = request.args.get('account_id')
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
         resources = []
         region = 'ap-south-1'
         
         if service == 'ec2':
-            ec2 = boto3.client('ec2', region_name=region)
+            ec2 = _resource_client('ec2', region_name=region, account_id=account_id)
             response = ec2.describe_instances()
             for reservation in response['Reservations']:
                 for instance in reservation['Instances']:
@@ -5223,12 +13746,12 @@ def get_resources(service):
                         'state': instance['State']['Name']
                     })
         elif service == 's3':
-            s3 = boto3.client('s3')
+            s3 = _resource_client('s3', account_id=account_id)
             response = s3.list_buckets()
             for bucket in response['Buckets']:
                 resources.append({'id': bucket['Name'], 'name': bucket['Name']})
         elif service == 'rds':
-            rds = boto3.client('rds', region_name=region)
+            rds = _resource_client('rds', region_name=region, account_id=account_id)
             response = rds.describe_db_instances()
             for db in response['DBInstances']:
                 resources.append({
@@ -5238,7 +13761,7 @@ def get_resources(service):
                     'status': db['DBInstanceStatus']
                 })
         elif service == 'lambda':
-            lambda_client = boto3.client('lambda', region_name=region)
+            lambda_client = _resource_client('lambda', region_name=region, account_id=account_id)
             response = lambda_client.list_functions()
             for func in response['Functions']:
                 resources.append({
@@ -5247,22 +13770,22 @@ def get_resources(service):
                     'runtime': func['Runtime']
                 })
         elif service == 'dynamodb':
-            dynamodb = boto3.client('dynamodb', region_name=region)
+            dynamodb = _resource_client('dynamodb', region_name=region, account_id=account_id)
             response = dynamodb.list_tables()
             for table_name in response['TableNames']:
                 resources.append({'id': table_name, 'name': table_name})
         elif service == 'secretsmanager':
-            secrets = boto3.client('secretsmanager', region_name=region)
+            secrets = _resource_client('secretsmanager', region_name=region, account_id=account_id)
             response = secrets.list_secrets()
             for secret in response['SecretList']:
                 resources.append({'id': secret['ARN'], 'name': secret['Name']})
         elif service == 'logs':
-            logs = boto3.client('logs', region_name=region)
+            logs = _resource_client('logs', region_name=region, account_id=account_id)
             response = logs.describe_log_groups()
             for log_group in response['logGroups']:
                 resources.append({'id': log_group['logGroupName'], 'name': log_group['logGroupName']})
         elif service == 'eks':
-            eks = boto3.client('eks', region_name=region)
+            eks = _resource_client('eks', region_name=region, account_id=account_id)
             response = eks.list_clusters()
             for cluster_name in response['clusters']:
                 cluster = eks.describe_cluster(name=cluster_name)['cluster']
@@ -5272,13 +13795,13 @@ def get_resources(service):
                     'status': cluster['status']
                 })
         elif service == 'ecs':
-            ecs = boto3.client('ecs', region_name=region)
+            ecs = _resource_client('ecs', region_name=region, account_id=account_id)
             response = ecs.list_clusters()
             for cluster_arn in response['clusterArns']:
                 cluster_name = cluster_arn.split('/')[-1]
                 resources.append({'id': cluster_arn, 'name': cluster_name})
         elif service == 'elasticloadbalancing':
-            elb = boto3.client('elbv2', region_name=region)
+            elb = _resource_client('elbv2', region_name=region, account_id=account_id)
             response = elb.describe_load_balancers()
             for lb in response['LoadBalancers']:
                 resources.append({
@@ -5287,19 +13810,19 @@ def get_resources(service):
                     'type': lb['Type']
                 })
         elif service == 'sns':
-            sns = boto3.client('sns', region_name=region)
+            sns = _resource_client('sns', region_name=region, account_id=account_id)
             response = sns.list_topics()
             for topic in response['Topics']:
                 topic_name = topic['TopicArn'].split(':')[-1]
                 resources.append({'id': topic['TopicArn'], 'name': topic_name})
         elif service == 'sqs':
-            sqs = boto3.client('sqs', region_name=region)
+            sqs = _resource_client('sqs', region_name=region, account_id=account_id)
             response = sqs.list_queues()
             for queue_url in response.get('QueueUrls', []):
                 queue_name = queue_url.split('/')[-1]
                 resources.append({'id': queue_url, 'name': queue_name})
         elif service == 'kms':
-            kms = boto3.client('kms', region_name=region)
+            kms = _resource_client('kms', region_name=region, account_id=account_id)
             response = kms.list_keys()
             for key in response['Keys']:
                 key_metadata = kms.describe_key(KeyId=key['KeyId'])['KeyMetadata']
@@ -5313,7 +13836,84 @@ def get_resources(service):
         
     except Exception as e:
         print(f"Error fetching resources for {service}: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
+
+_JIT_PERMISSION_SET_WEEKLY_CLEANUP_STATE = {
+    'last_run_key': '',
+}
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name) or '').strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def _maybe_run_weekly_jit_permission_set_cleanup(now_utc: datetime):
+    if not _bool_env('JIT_PERMISSION_SET_WEEKLY_CLEANUP_ENABLED', default=False):
+        return {'status': 'disabled'}
+
+    weekday_map = {
+        'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4, 'SAT': 5, 'SUN': 6,
+    }
+    day_raw = str(os.getenv('JIT_PERMISSION_SET_WEEKLY_CLEANUP_DAY') or 'FRI').strip().upper()
+    target_weekday = weekday_map.get(day_raw, 4)
+    try:
+        target_hour = int(str(os.getenv('JIT_PERMISSION_SET_WEEKLY_CLEANUP_HOUR') or '6').strip())
+    except Exception:
+        target_hour = 6
+    try:
+        target_minute = int(str(os.getenv('JIT_PERMISSION_SET_WEEKLY_CLEANUP_MINUTE') or '0').strip())
+    except Exception:
+        target_minute = 0
+    try:
+        window_minutes = int(str(os.getenv('JIT_PERMISSION_SET_WEEKLY_CLEANUP_WINDOW_MINUTES') or '20').strip())
+    except Exception:
+        window_minutes = 20
+    target_hour = max(0, min(23, target_hour))
+    target_minute = max(0, min(59, target_minute))
+    window_minutes = max(1, min(90, window_minutes))
+
+    tz_name = str(os.getenv('JIT_PERMISSION_SET_WEEKLY_CLEANUP_TZ') or 'Asia/Kolkata').strip() or 'Asia/Kolkata'
+    try:
+        run_tz = ZoneInfo(tz_name)
+    except Exception:
+        run_tz = timezone.utc
+
+    local_now = now_utc.astimezone(run_tz)
+    if int(local_now.weekday()) != int(target_weekday):
+        return {'status': 'not_due'}
+    local_minutes = local_now.hour * 60 + local_now.minute
+    target_minutes = target_hour * 60 + target_minute
+    if abs(local_minutes - target_minutes) > window_minutes:
+        return {'status': 'not_due'}
+
+    iso = local_now.isocalendar()
+    run_key = f"{int(iso.year):04d}-W{int(iso.week):02d}"
+    if _JIT_PERMISSION_SET_WEEKLY_CLEANUP_STATE.get('last_run_key') == run_key:
+        return {'status': 'already_ran'}
+
+    inventory = _collect_jit_permission_set_inventory(stale_only=True)
+    stale = inventory.get('jit_permission_sets') or []
+    stale_arns = [str(item.get('arn') or '').strip() for item in stale if str(item.get('arn') or '').strip()]
+    delete_result = _delete_selected_stale_jit_permission_sets(stale_arns) if stale_arns else {
+        'deleted': [],
+        'skipped': [],
+        'errors': [],
+        'deleted_count': 0,
+    }
+    _JIT_PERMISSION_SET_WEEKLY_CLEANUP_STATE['last_run_key'] = run_key
+    return {
+        'status': 'completed',
+        'run_key': run_key,
+        'timezone': tz_name,
+        'candidate_count': len(stale_arns),
+        'deleted_count': int(delete_result.get('deleted_count') or 0),
+        'skipped_count': len(delete_result.get('skipped') or []),
+        'error_count': len(delete_result.get('errors') or []),
+    }
+
 
 # Background cleanup job
 def background_cleanup():
@@ -5362,18 +13962,16 @@ def background_cleanup():
                 if expires_at <= now:
                     try:
                         # Vault handles revocation automatically via lease TTL. We only:
-                        # 1) best-effort revoke the lease early (optional)
-                        # 2) mark request expired in NPAMX and clear sensitive fields
+                        # 1) best-effort revoke the lease early
+                        # 2) delete the temporary request-scoped Vault DB role
+                        # 3) mark request expired in NPAMX and clear sensitive fields
                         req_account_env = _request_account_env(access_request)
                         req_plane = _request_execution_plane(access_request)
                         access_request['account_env'] = req_account_env
                         access_request['execution_plane'] = req_plane
-                        lease_id = str(access_request.get('vault_lease_id') or access_request.get('lease_id') or '').strip()
-                        if lease_id:
-                            try:
-                                VaultManager.revoke_lease(lease_id, plane=req_plane)
-                            except Exception:
-                                pass
+                        vault_cleanup_result = _cleanup_database_vault_access(access_request, request_id=request_id, reason='expired_cleanup')
+                        if vault_cleanup_result.get('status') == 'partial':
+                            print(f"Vault cleanup warning for expired request {request_id}: {vault_cleanup_result}", flush=True)
                         try:
                             cleanup_result = _cleanup_database_iam_access(access_request, request_id=request_id, reason='expired_cleanup')
                             if cleanup_result.get('status') in ('error', 'partial'):
@@ -5388,6 +13986,60 @@ def background_cleanup():
                     except Exception as db_err:
                         print(f"❌ DB expiry handling error: {db_err}")
                     changed = True
+
+            # Retry partial Vault cleanup for non-active DB requests.
+            # This handles transient Redshift revoke failures so orphaned users are eventually removed.
+            for request_id, access_request in list(requests_db.items()):
+                if not _needs_vault_cleanup_retry(access_request):
+                    continue
+                try:
+                    req_account_env = _request_account_env(access_request)
+                    req_plane = _request_execution_plane(access_request)
+                    access_request['account_env'] = req_account_env
+                    access_request['execution_plane'] = req_plane
+                    retry_result = _cleanup_database_vault_access(
+                        access_request,
+                        request_id=request_id,
+                        reason='background_partial_cleanup_retry',
+                    )
+                    if retry_result.get('status') in ('partial', 'error'):
+                        print(f"Vault cleanup retry still pending for {request_id}: {retry_result}", flush=True)
+                    else:
+                        print(f"✅ Vault cleanup retry completed for {request_id}", flush=True)
+                    changed = True
+                except Exception as retry_err:
+                    print(f"❌ Vault cleanup retry error for {request_id}: {retry_err}", flush=True)
+
+            # Retry IAM cleanup for non-active DB requests.
+            # This handles eventual-consistency delays where assignment/permission-set
+            # deletion partially fails during revoke/expiry and leaves stale JIT sets.
+            for request_id, access_request in list(requests_db.items()):
+                if not _needs_iam_cleanup_retry(access_request):
+                    continue
+                try:
+                    retry_result = _cleanup_database_iam_access(
+                        access_request,
+                        request_id=request_id,
+                        reason='background_partial_iam_cleanup_retry',
+                    )
+                    if retry_result.get('status') in ('error', 'partial'):
+                        print(f"IAM cleanup retry still pending for {request_id}: {retry_result}", flush=True)
+                    else:
+                        print(f"✅ IAM cleanup retry completed for {request_id}: {retry_result}", flush=True)
+                    changed = True
+                except Exception as retry_err:
+                    print(f"❌ IAM cleanup retry error for {request_id}: {retry_err}", flush=True)
+
+            # Optional scheduled cleanup for stale JIT permission sets.
+            # Enable with env:
+            #   JIT_PERMISSION_SET_WEEKLY_CLEANUP_ENABLED=true
+            # Defaults: Friday 06:00 Asia/Kolkata
+            try:
+                weekly_result = _maybe_run_weekly_jit_permission_set_cleanup(datetime.now(timezone.utc))
+                if isinstance(weekly_result, dict) and weekly_result.get('status') == 'completed':
+                    print(f"🧹 Weekly JIT permission set cleanup result: {weekly_result}", flush=True)
+            except Exception as weekly_err:
+                print(f"❌ Weekly JIT permission set cleanup error: {weekly_err}", flush=True)
 
             # Cleanup stale in-memory DB chat conversations/state to prevent unbounded growth.
             try:
@@ -5411,11 +14063,20 @@ def background_cleanup():
                     _save_requests()
                 except Exception:
                     pass
+
+            try:
+                schedule_settings = _load_app_settings()
+                if _db_user_audit_schedule_due(schedule_settings, now_utc=datetime.now(timezone.utc)):
+                    print("🛡️ Running scheduled DB user inventory audit...", flush=True)
+                    _run_scheduled_db_user_audit()
+            except Exception as audit_err:
+                print(f"❌ Scheduled DB user inventory audit error: {audit_err}", flush=True)
         except Exception as e:
             print(f"❌ Background cleanup error: {e}")
 
 def _list_idc_users_raw():
     """Fetch all users from Identity Center. Returns list of dicts or raises."""
+    _ensure_identity_center_runtime_config()
     identity_store_id = CONFIG.get('identity_store_id')
     if not identity_store_id:
         raise ValueError('Identity Store ID not configured')
@@ -5444,7 +14105,7 @@ def search_identity_center_users():
     try:
         q = (request.args.get('q') or request.args.get('search') or '').strip()
         if not q:
-            return jsonify({'error': 'Query parameter q or search is required (e.g. ?q=satish)', 'users': []}), 400
+            return jsonify({'error': 'Query parameter q or search is required (e.g. ?q=alex)', 'users': []}), 400
         users = _list_idc_users_raw()
         q_lower = q.lower()
         users = [u for u in users
@@ -5455,16 +14116,23 @@ def search_identity_center_users():
                  or q_lower in (u.get('username') or '').lower()]
         return jsonify({'users': users})
     except ValueError as e:
-        return jsonify({'error': str(e), 'users': []}), 400
+        return jsonify({'error': 'Identity Center user search is not configured correctly.', 'users': []}), 400
     except Exception as e:
-        return jsonify({'error': str(e), 'users': []}), 500
+        try:
+            print(f"Identity Center user search failed: {e}", flush=True)
+        except Exception:
+            pass
+        return jsonify({'error': 'Failed to search Identity Center users.', 'users': []}), 500
 
 
 @app.route('/api/admin/identity-center/users', methods=['GET'])
 def list_identity_center_users():
     """List users from AWS Identity Center (live pull). Optional ?search= filters by name/email (case-insensitive)."""
     try:
+        global identity_center_synced_users
         users = _list_idc_users_raw()
+        identity_center_synced_users = users
+        _save_aws_runtime_cache()
         search = (request.args.get('search') or request.args.get('q') or '').strip()
         if search:
             q = search.lower()
@@ -5473,9 +14141,41 @@ def list_identity_center_users():
                      or q in (u.get('username') or '').lower()]
         return jsonify({'users': users})
     except ValueError as e:
-        return jsonify({'error': str(e), 'users': []}), 400
+        cached_users = _cached_identity_center_users()
+        if cached_users:
+            search = (request.args.get('search') or request.args.get('q') or '').strip().lower()
+            users = cached_users
+            if search:
+                users = [
+                    u for u in users
+                    if search in str(u.get('email') or '').lower()
+                    or search in str(u.get('display_name') or '').lower()
+                    or search in str(u.get('first_name') or '').lower()
+                    or search in str(u.get('last_name') or '').lower()
+                    or search in str(u.get('username') or '').lower()
+                ]
+            return jsonify({'users': users, 'warning': 'Showing cached Identity Center users.'})
+        return jsonify({'error': 'Identity Center user listing is not configured correctly.', 'users': []}), 400
     except Exception as e:
-        return jsonify({'error': str(e), 'users': []}), 500
+        try:
+            print(f"Identity Center user listing failed: {e}", flush=True)
+        except Exception:
+            pass
+        cached_users = _cached_identity_center_users()
+        if cached_users:
+            search = (request.args.get('search') or request.args.get('q') or '').strip().lower()
+            users = cached_users
+            if search:
+                users = [
+                    u for u in users
+                    if search in str(u.get('email') or '').lower()
+                    or search in str(u.get('display_name') or '').lower()
+                    or search in str(u.get('first_name') or '').lower()
+                    or search in str(u.get('last_name') or '').lower()
+                    or search in str(u.get('username') or '').lower()
+                ]
+            return jsonify({'users': users, 'warning': 'Showing cached Identity Center users.'})
+        return jsonify({'error': 'Failed to load Identity Center users.', 'users': []}), 500
 
 
 @app.route('/api/admin/identity-center/groups/search', methods=['GET'])
@@ -5485,6 +14185,7 @@ def search_identity_center_groups():
         q = (request.args.get('q') or request.args.get('search') or '').strip()
         if not q:
             return jsonify({'error': 'Query parameter q or search is required (e.g. ?q=devops)', 'groups': []}), 400
+        _ensure_identity_center_runtime_config()
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
             return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
@@ -5503,15 +14204,24 @@ def search_identity_center_groups():
                   or q_lower in (g.get('description') or '').lower()]
         return jsonify({'groups': groups})
     except Exception as e:
-        return jsonify({'error': str(e), 'groups': []}), 500
+        try:
+            print(f"Identity Center group search failed: {e}", flush=True)
+        except Exception:
+            pass
+        return jsonify({'error': 'Failed to search Identity Center groups.', 'groups': []}), 500
 
 
 @app.route('/api/admin/identity-center/groups', methods=['GET'])
 def list_identity_center_groups():
     """List groups from AWS Identity Center (live pull). Optional ?q= or ?search= filters."""
     try:
+        global identity_center_synced_groups
+        _ensure_identity_center_runtime_config()
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
+            cached_groups = _cached_identity_center_groups()
+            if cached_groups:
+                return jsonify({'groups': cached_groups, 'warning': 'Showing cached Identity Center groups.'})
             return jsonify({'error': 'Identity Store ID not configured', 'groups': []}), 400
         identitystore = _identitystore_client()
         groups = []
@@ -5522,6 +14232,8 @@ def list_identity_center_groups():
                     'display_name': g.get('DisplayName', ''),
                     'description': g.get('Description', ''),
                 })
+        identity_center_synced_groups = list(groups)
+        _save_aws_runtime_cache()
         search = (request.args.get('search') or request.args.get('q') or '').strip()
         if search:
             q_lower = search.lower()
@@ -5530,19 +14242,306 @@ def list_identity_center_groups():
                       or q_lower in (g.get('description') or '').lower()]
         return jsonify({'groups': groups})
     except Exception as e:
-        return jsonify({'error': str(e), 'groups': []}), 500
+        try:
+            print(f"Identity Center group listing failed: {e}", flush=True)
+        except Exception:
+            pass
+        cached_groups = _cached_identity_center_groups()
+        if cached_groups:
+            search = (request.args.get('search') or request.args.get('q') or '').strip().lower()
+            groups = cached_groups
+            if search:
+                groups = [
+                    g for g in groups
+                    if search in str(g.get('display_name') or '').lower()
+                    or search in str(g.get('description') or '').lower()
+                ]
+            return jsonify({'groups': groups, 'warning': 'Showing cached Identity Center groups.'})
+        return jsonify({'error': 'Failed to load Identity Center groups.', 'groups': []}), 500
 
 
 @app.route('/api/admin/identity-center/permission-sets', methods=['GET'])
 def list_identity_center_permission_sets():
     """List permission sets from IAM Identity Center (uses CONFIG populated by initialize_aws_config or sso-admin:ListPermissionSets)."""
     try:
+        _ensure_identity_center_runtime_config()
         if not CONFIG.get('permission_sets'):
             initialize_aws_config()
         sets = [{'name': ps.get('name'), 'arn': ps.get('arn')} for ps in CONFIG.get('permission_sets', [])]
         return jsonify({'permission_sets': sets})
     except Exception as e:
-        return jsonify({'error': str(e), 'permission_sets': []}), 500
+        return _safe_error_response(e, extra_payload={'permission_sets': []})
+
+
+def _configured_account_ids_for_identity_center() -> list[str]:
+    account_ids = []
+    accounts = CONFIG.get('accounts') if isinstance(CONFIG.get('accounts'), dict) else {}
+    if not accounts:
+        try:
+            initialize_aws_config()
+            accounts = CONFIG.get('accounts') if isinstance(CONFIG.get('accounts'), dict) else {}
+        except Exception:
+            accounts = {}
+    for key, meta in (accounts or {}).items():
+        if isinstance(meta, dict):
+            account_id = str(meta.get('id') or '').strip()
+            if account_id:
+                account_ids.append(account_id)
+                continue
+        key_txt = str(key or '').strip()
+        if key_txt.isdigit() and len(key_txt) == 12:
+            account_ids.append(key_txt)
+    return sorted(set(account_ids))
+
+
+def _list_identity_center_permission_sets_live():
+    _ensure_identity_center_runtime_config()
+    sso_admin = _sso_admin_client()
+    instance_arn = str(CONFIG.get('sso_instance_arn') or '').strip()
+    if not instance_arn:
+        raise RuntimeError('IAM Identity Center instance ARN is not configured.')
+
+    permission_sets = []
+    next_token = None
+    while True:
+        kwargs = {'InstanceArn': instance_arn}
+        if next_token:
+            kwargs['NextToken'] = next_token
+        page = sso_admin.list_permission_sets(**kwargs)
+        for ps_arn in page.get('PermissionSets', []) or []:
+            ps_arn = str(ps_arn or '').strip()
+            if not ps_arn:
+                continue
+            name = ''
+            created_at = ''
+            try:
+                det = sso_admin.describe_permission_set(
+                    InstanceArn=instance_arn,
+                    PermissionSetArn=ps_arn,
+                )
+                ps = det.get('PermissionSet') or {}
+                name = str(ps.get('Name') or '').strip()
+                created = ps.get('CreatedDate')
+                created_at = created.isoformat() if hasattr(created, 'isoformat') else str(created or '').strip()
+            except Exception:
+                name = ps_arn.rsplit('/', 1)[-1]
+            permission_sets.append({
+                'name': name or ps_arn.rsplit('/', 1)[-1],
+                'arn': ps_arn,
+                'created_at': created_at,
+            })
+        next_token = page.get('NextToken')
+        if not next_token:
+            break
+    return instance_arn, permission_sets
+
+
+def _permission_set_assignment_summary(*, instance_arn: str, permission_set_arn: str, account_ids_hint: list[str]):
+    sso_admin = _sso_admin_client()
+    hints = sorted(set([str(a or '').strip() for a in (account_ids_hint or []) if str(a or '').strip()]))
+    candidate_accounts = list(hints)
+    warnings = []
+    # Prefer direct API that returns provisioned accounts for this permission set.
+    try:
+        provisioned_accounts = []
+        next_token = None
+        while True:
+            kwargs = {
+                'InstanceArn': instance_arn,
+                'PermissionSetArn': permission_set_arn,
+                'ProvisioningStatus': 'LATEST_PERMISSION_SET_PROVISIONED',
+            }
+            if next_token:
+                kwargs['NextToken'] = next_token
+            resp = sso_admin.list_accounts_for_provisioned_permission_set(**kwargs)
+            provisioned_accounts.extend([str(a or '').strip() for a in (resp.get('AccountIds') or []) if str(a or '').strip()])
+            next_token = resp.get('NextToken')
+            if not next_token:
+                break
+        provisioned_accounts = sorted(set(provisioned_accounts))
+        if provisioned_accounts:
+            candidate_accounts = sorted(set(candidate_accounts + provisioned_accounts))
+    except Exception as e:
+        warnings.append(f'list_accounts_for_provisioned_permission_set: {e}')
+
+    assigned_accounts = []
+    assignment_count = 0
+    for account_id in candidate_accounts:
+        try:
+            next_token = None
+            account_has_assignment = False
+            while True:
+                kwargs = {
+                    'InstanceArn': instance_arn,
+                    'AccountId': account_id,
+                    'PermissionSetArn': permission_set_arn,
+                    'MaxResults': 100,
+                }
+                if next_token:
+                    kwargs['NextToken'] = next_token
+                page = sso_admin.list_account_assignments(**kwargs)
+                assignments = page.get('AccountAssignments') or []
+                if assignments:
+                    assignment_count += len(assignments)
+                    account_has_assignment = True
+                next_token = page.get('NextToken')
+                if not next_token:
+                    break
+            if account_has_assignment:
+                assigned_accounts.append(account_id)
+        except Exception as e:
+            warnings.append(f'list_account_assignments({account_id}): {e}')
+    assigned_accounts = sorted(set(assigned_accounts))
+    return {
+        'assigned_account_ids': assigned_accounts,
+        'assigned_accounts_count': len(assigned_accounts),
+        'assignment_count': assignment_count,
+        'warnings': warnings,
+    }
+
+
+def _collect_jit_permission_set_inventory(*, stale_only: bool = False):
+    instance_arn, sets = _list_identity_center_permission_sets_live()
+    account_ids_hint = _configured_account_ids_for_identity_center()
+    jit_sets = []
+    warnings = []
+    for ps in sets:
+        name = str(ps.get('name') or '').strip()
+        arn = str(ps.get('arn') or '').strip()
+        if not arn:
+            continue
+        if not name.upper().startswith('JIT-'):
+            continue
+        summary = _permission_set_assignment_summary(
+            instance_arn=instance_arn,
+            permission_set_arn=arn,
+            account_ids_hint=account_ids_hint,
+        )
+        is_stale = int(summary.get('assigned_accounts_count') or 0) == 0
+        if stale_only and not is_stale:
+            continue
+        jit_sets.append({
+            'name': name or arn.rsplit('/', 1)[-1],
+            'arn': arn,
+            'created_at': str(ps.get('created_at') or '').strip(),
+            'assigned_accounts_count': int(summary.get('assigned_accounts_count') or 0),
+            'assignment_count': int(summary.get('assignment_count') or 0),
+            'assigned_account_ids': list(summary.get('assigned_account_ids') or []),
+            'stale': bool(is_stale),
+        })
+        warnings.extend(summary.get('warnings') or [])
+
+    jit_sets = sorted(
+        jit_sets,
+        key=lambda item: (
+            0 if item.get('stale') else 1,
+            str(item.get('name') or '').lower(),
+        ),
+    )
+    return {
+        'instance_arn': instance_arn,
+        'jit_permission_sets': jit_sets,
+        'warnings': sorted(set([str(w or '').strip() for w in warnings if str(w or '').strip()])),
+    }
+
+
+@app.route('/api/admin/identity-center/permission-sets/jit-stale', methods=['GET'])
+def list_identity_center_stale_jit_permission_sets():
+    """List stale JIT permission sets (no active account assignment)."""
+    try:
+        include_all = str(request.args.get('include_all') or '').strip().lower() in ('1', 'true', 'yes', 'all')
+        inventory = _collect_jit_permission_set_inventory(stale_only=not include_all)
+        sets = inventory.get('jit_permission_sets') or []
+        stale_count = sum(1 for item in sets if bool(item.get('stale')))
+        return jsonify({
+            'instance_arn': inventory.get('instance_arn') or '',
+            'stale_jit_permission_sets': sets,
+            'total': len(sets),
+            'stale_count': stale_count,
+            'warnings': inventory.get('warnings') or [],
+            'advisory': (
+                'If stale JIT permission sets keep appearing, there may be a cleanup bug in NPAMX revoke/expiry flow '
+                'or an IAM Identity Center permission/consistency issue that needs investigation.'
+            ),
+        })
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'stale_jit_permission_sets': []})
+
+
+def _delete_selected_stale_jit_permission_sets(arns: list[str]):
+    _ensure_identity_center_runtime_config()
+    instance_arn = str(CONFIG.get('sso_instance_arn') or '').strip()
+    if not instance_arn:
+        raise RuntimeError('Identity Center instance is not configured.')
+    sso_admin = _sso_admin_client()
+    account_ids_hint = _configured_account_ids_for_identity_center()
+
+    deleted = []
+    skipped = []
+    errors = []
+    for arn in sorted(set([str(a or '').strip() for a in (arns or []) if str(a or '').strip()])):
+        try:
+            det = sso_admin.describe_permission_set(
+                InstanceArn=instance_arn,
+                PermissionSetArn=arn,
+            )
+            ps = det.get('PermissionSet') or {}
+            name = str(ps.get('Name') or '').strip()
+            if not name.upper().startswith('JIT-'):
+                skipped.append({'arn': arn, 'reason': 'not_jit_permission_set'})
+                continue
+            summary = _permission_set_assignment_summary(
+                instance_arn=instance_arn,
+                permission_set_arn=arn,
+                account_ids_hint=account_ids_hint,
+            )
+            if int(summary.get('assigned_accounts_count') or 0) > 0:
+                skipped.append({
+                    'arn': arn,
+                    'name': name,
+                    'reason': 'still_assigned',
+                    'assigned_account_ids': list(summary.get('assigned_account_ids') or []),
+                })
+                continue
+            sso_admin.delete_permission_set(
+                InstanceArn=instance_arn,
+                PermissionSetArn=arn,
+            )
+            deleted.append({'arn': arn, 'name': name})
+        except Exception as e:
+            errors.append({'arn': arn, 'error': str(e)})
+
+    return {
+        'deleted': deleted,
+        'skipped': skipped,
+        'errors': errors,
+        'deleted_count': len(deleted),
+    }
+
+
+@app.route('/api/admin/identity-center/permission-sets/jit-stale/delete', methods=['POST'])
+def delete_identity_center_stale_jit_permission_sets():
+    """Delete selected stale JIT permission sets by ARN."""
+    try:
+        _ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        if not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        payload = request.get_json(silent=True) or {}
+        arns = payload.get('arns') if isinstance(payload.get('arns'), list) else []
+        arns = [str(a or '').strip() for a in arns if str(a or '').strip()]
+        if not arns:
+            return jsonify({'error': 'arns is required'}), 400
+        result = _delete_selected_stale_jit_permission_sets(arns)
+        return jsonify({
+            'status': 'ok',
+            'deleted': result.get('deleted') or [],
+            'skipped': result.get('skipped') or [],
+            'errors': result.get('errors') or [],
+            'deleted_count': int(result.get('deleted_count') or 0),
+        })
+    except Exception as e:
+        return _safe_error_response(e)
 
 
 @app.route('/api/admin/identity-center/org-hierarchy', methods=['GET'])
@@ -5563,7 +14562,7 @@ def list_identity_center_org_hierarchy():
             live_errors = payload.get('errors') if isinstance(payload.get('errors'), list) else []
             cached_errors = cached.get('errors') if isinstance(cached.get('errors'), list) else []
             cached['errors'] = list(cached_errors) + list(live_errors) + ['Using cached organization hierarchy due to live fetch issue.']
-            cached['tags'] = payload.get('tags') or _load_org_hierarchy_tags()
+            cached = _apply_org_hierarchy_tags_to_cached_payload(cached, payload.get('tags') or _load_org_hierarchy_tags())
             cached['cached'] = True
             return jsonify(cached)
         return jsonify(payload)
@@ -5572,7 +14571,7 @@ def list_identity_center_org_hierarchy():
         if isinstance(cached.get('roots'), list) and cached['roots']:
             existing_errors = cached.get('errors') if isinstance(cached.get('errors'), list) else []
             cached['errors'] = list(existing_errors) + [f'live_fetch_error: {e}']
-            cached['tags'] = _load_org_hierarchy_tags()
+            cached = _apply_org_hierarchy_tags_to_cached_payload(cached, _load_org_hierarchy_tags())
             cached['cached'] = True
             return jsonify(cached)
         return jsonify({
@@ -5614,6 +14613,10 @@ def set_identity_center_environment_tag():
 
         if isinstance(CONFIG.get('accounts'), dict):
             CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG['accounts'])
+        cached = _load_org_hierarchy_cache()
+        if isinstance(cached.get('roots'), list) and cached['roots']:
+            cached = _apply_org_hierarchy_tags_to_cached_payload(cached, tags)
+            _save_org_hierarchy_cache(cached)
 
         return jsonify({
             'status': 'success',
@@ -5623,7 +14626,47 @@ def set_identity_center_environment_tag():
             'tags': tags
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/identity-center/account-visibility', methods=['POST'])
+def set_identity_center_account_visibility():
+    """Set whether an account is visible to non-admin requesters."""
+    try:
+        data = request.get_json() or {}
+        account_id = str(data.get('account_id') or data.get('target_id') or '').strip()
+        visible_raw = data.get('visible')
+        if not account_id:
+            return jsonify({'error': 'account_id is required'}), 400
+
+        tags = _load_org_hierarchy_tags()
+        visibility = (tags.get('visibility') or {}).get('accounts') if isinstance(tags.get('visibility'), dict) else {}
+        if not isinstance(visibility, dict):
+            visibility = {}
+        visible = _normalize_visibility_value(visible_raw, default=True)
+        if visible:
+            visibility.pop(account_id, None)
+        else:
+            visibility[account_id] = False
+        tags['visibility'] = {'accounts': visibility}
+        tags = _save_org_hierarchy_tags(tags)
+
+        if isinstance(CONFIG.get('accounts'), dict):
+            CONFIG['accounts'] = _apply_org_tag_overrides_to_accounts(CONFIG['accounts'])
+            _save_aws_runtime_cache()
+        cached = _load_org_hierarchy_cache()
+        if isinstance(cached.get('roots'), list) and cached['roots']:
+            cached = _apply_org_hierarchy_tags_to_cached_payload(cached, tags)
+            _save_org_hierarchy_cache(cached)
+
+        return jsonify({
+            'status': 'success',
+            'account_id': account_id,
+            'visible': bool(visible),
+            'tags': tags,
+        })
+    except Exception as e:
+        return _safe_error_response(e)
 
 
 @app.route('/api/admin/identity-center/account-permission-sets', methods=['GET'])
@@ -5686,7 +14729,7 @@ def list_identity_center_account_permission_sets():
             'remaining': max(0, len(found) - len(shown))
         })
     except Exception as e:
-        return jsonify({'error': str(e), 'permission_sets': []}), 500
+        return _safe_error_response(e, extra_payload={'permission_sets': []})
 
 
 # --- PAM solution admins (who can manage this PAM; separate from Identity Center list) ---
@@ -5712,7 +14755,7 @@ def get_pam_admins():
             'is_super_admin': _is_super_admin_role(actor_role)
         })
     except Exception as e:
-        return jsonify({'error': str(e), 'emails': [], 'pam_admins': []}), 500
+        return _safe_error_response(e, extra_payload={'emails': [], 'pam_admins': []})
 
 
 @app.route('/api/admin/pam-admins', methods=['POST'])
@@ -5741,6 +14784,26 @@ def add_pam_admin():
             return jsonify({'error': 'Only SuperAdmin can assign SuperAdmin role'}), 403
 
         admins = _load_pam_admins()
+        if role == 'Employee':
+            email_lower = email.lower()
+            target = next((a for a in admins if str(a.get('email') or '').strip().lower() == email_lower), None)
+            if target and _is_super_admin_role(target.get('role')) and not actor_is_super:
+                return jsonify({'error': 'Only SuperAdmin can modify another SuperAdmin'}), 403
+            remaining = [a for a in admins if str(a.get('email') or '').strip().lower() != email_lower]
+            if len(remaining) != len(admins):
+                _save_pam_admins(remaining)
+                _sync_privileged_group_membership(email_lower, 'Employee')
+                return jsonify({
+                    'status': 'removed',
+                    'message': f'{email} reverted to Employee',
+                    'pam_admins': _load_pam_admins()
+                })
+            return jsonify({
+                'status': 'no_change',
+                'message': f'{email} already has Employee access',
+                'pam_admins': admins
+            })
+
         existing_admin_count = sum(1 for a in admins if _normalize_pam_role(a.get('role')) == 'Admin')
         if role == 'Admin' and existing_admin_count == 0 and not actor_is_super:
             return jsonify({'error': 'Only break-glass SuperAdmin can create the first Admin user'}), 403
@@ -5760,13 +14823,15 @@ def add_pam_admin():
                 return jsonify({'error': 'Only SuperAdmin can modify another SuperAdmin'}), 403
             existing['role'] = role
             _save_pam_admins(admins)
+            _sync_privileged_group_membership(email_lower, role)
             return jsonify({'status': 'updated', 'message': f'{email} role updated to {role}', 'pam_admins': _load_pam_admins()})
 
         admins.append({'email': email_lower, 'role': role})
         _save_pam_admins(admins)
+        _sync_privileged_group_membership(email_lower, role)
         return jsonify({'status': 'ok', 'message': f'{email} added as PAM admin ({role})', 'pam_admins': _load_pam_admins()})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
 @app.route('/api/admin/pam-admins/<path:email>', methods=['DELETE'])
@@ -5802,11 +14867,13 @@ def remove_pam_admin(email):
         if len(new_list) == len(admins):
             return jsonify({'status': 'not_found', 'message': 'User was not a PAM admin', 'pam_admins': admins})
         _save_pam_admins(new_list)
+        _sync_privileged_group_membership(email_lower, 'Employee')
         return jsonify({'status': 'ok', 'message': f'{email} removed from PAM admins', 'pam_admins': _load_pam_admins()})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
+@_rate_limit_exempt
 @app.route('/api/admin/check-pam-admin', methods=['GET'])
 def check_pam_admin():
     """
@@ -5814,6 +14881,25 @@ def check_pam_admin():
     Security: requires SAML session and does not allow arbitrary email enumeration.
     """
     try:
+        if session.get('auth_type') == 'break_glass':
+            bg_email = _current_break_glass_email()
+            if bg_email and get_break_glass_user_by_email and get_break_glass_user_by_email(bg_email):
+                effective_roles = _effective_pam_app_roles_for_user(bg_email, pam_role='SuperAdmin')
+                return jsonify({
+                    'isAdmin': True,
+                    'role': 'SuperAdmin',
+                    'canAccessAdmin': True,
+                    'email': bg_email,
+                    'display_name': _display_name_from_saml_session(email=bg_email, nameid='') or bg_email.split('@')[0].replace('.', ' ').title(),
+                    'capabilities': sorted(PAM_APP_CAPABILITY_IDS),
+                    'app_roles': [
+                        {'id': str(role.get('id') or '').strip(), 'name': str(role.get('name') or role.get('id') or '').strip()}
+                        for role in effective_roles
+                        if str(role.get('id') or '').strip()
+                    ],
+                })
+            return jsonify({'isAdmin': False, 'email': '', 'display_name': ''}), 401
+
         ident = _current_request_identity()
         nameid = str(ident.get('nameid') or '').strip()
         if not nameid:
@@ -5853,17 +14939,40 @@ def check_pam_admin():
         if str(resolved_display).strip().lower() in ('user', 'email'):
             resolved_display = ''
 
+        resolved_role = _normalize_pam_role((admin_record or {}).get('role') or 'Employee')
+        effective_capabilities = _effective_pam_capabilities_for_identity(
+            email=resolved_email,
+            nameid=nameid,
+            hints=identity_hints,
+        )
+        effective_roles = _effective_pam_app_roles_for_user(resolved_email, pam_role=resolved_role)
+        can_access_admin = 'admin.console.view' in set(effective_capabilities)
         if admin_record:
             return jsonify({
-                'isAdmin': True,
-                'role': admin_record.get('role', 'Admin'),
+                'isAdmin': _is_admin_role(resolved_role),
+                'role': resolved_role,
+                'canAccessAdmin': can_access_admin,
                 'email': resolved_email,
-                'display_name': resolved_display
+                'display_name': resolved_display,
+                'capabilities': effective_capabilities,
+                'app_roles': [
+                    {'id': str(role.get('id') or '').strip(), 'name': str(role.get('name') or role.get('id') or '').strip()}
+                    for role in effective_roles
+                    if str(role.get('id') or '').strip()
+                ],
             })
         return jsonify({
             'isAdmin': False,
+            'role': resolved_role,
+            'canAccessAdmin': can_access_admin,
             'email': resolved_email,
-            'display_name': resolved_display
+            'display_name': resolved_display,
+            'capabilities': effective_capabilities,
+            'app_roles': [
+                {'id': str(role.get('id') or '').strip(), 'name': str(role.get('name') or role.get('id') or '').strip()}
+                for role in effective_roles
+                if str(role.get('id') or '').strip()
+            ],
         })
     except Exception:
         return jsonify({'isAdmin': False, 'email': '', 'display_name': ''})
@@ -5874,6 +14983,7 @@ def sync_from_identity_center():
     """Sync users and groups from AWS Identity Center and store for Admin Users/Groups tab."""
     global identity_center_synced_users, identity_center_synced_groups
     try:
+        _ensure_identity_center_runtime_config()
         identity_store_id = CONFIG.get('identity_store_id')
         if not identity_store_id:
             return jsonify({'error': 'Identity Store ID not configured'}), 400
@@ -5882,6 +14992,7 @@ def sync_from_identity_center():
         if status.get('status') == 'success':
             identity_center_synced_users = users
             identity_center_synced_groups = groups
+            _save_aws_runtime_cache()
 
         return jsonify({
             'status': status['status'],
@@ -5890,7 +15001,7 @@ def sync_from_identity_center():
             'summary': status
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/sync-from-ad', methods=['POST'])
 def sync_from_ad():
@@ -5913,7 +15024,7 @@ def sync_from_ad():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/request-feature', methods=['POST'])
 def request_feature():
@@ -5930,7 +15041,7 @@ def request_feature():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/toggle-feature', methods=['POST'])
 def toggle_feature():
@@ -5955,7 +15066,7 @@ def toggle_feature():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
 @app.route('/api/features', methods=['GET'])
@@ -5965,7 +15076,18 @@ def get_features():
         flags = _load_feature_flags()
         return jsonify({'features': flags})
     except Exception as e:
-        return jsonify({'error': str(e), 'features': dict(FEATURE_FLAG_DEFAULTS)}), 200
+        app.logger.exception('Failed to load public feature flags')
+        return jsonify({'error': 'Feature flags unavailable', 'features': dict(FEATURE_FLAG_DEFAULTS)}), 200
+
+
+@app.route('/api/settings', methods=['GET'])
+def get_public_settings():
+    try:
+        settings = _load_app_settings()
+        return jsonify({'settings': _public_app_settings(settings)})
+    except Exception as e:
+        app.logger.exception('Failed to load public app settings')
+        return jsonify({'error': 'Settings unavailable', 'settings': _public_app_settings(dict(APP_SETTINGS_DEFAULTS))}), 200
 
 
 @app.route('/api/admin/features', methods=['GET'])
@@ -5975,7 +15097,7 @@ def get_admin_features():
         flags = _load_feature_flags()
         return jsonify({'status': 'success', 'features': flags})
     except Exception as e:
-        return jsonify({'error': str(e), 'features': dict(FEATURE_FLAG_DEFAULTS)}), 500
+        return _safe_error_response(e, extra_payload={'features': dict(FEATURE_FLAG_DEFAULTS)})
 
 
 @app.route('/api/admin/features', methods=['POST'])
@@ -5995,7 +15117,2085 @@ def save_admin_features():
 
         return jsonify({'status': 'success', 'features': updated})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/settings', methods=['GET'])
+def get_admin_settings():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        return jsonify({'status': 'success', 'settings': _admin_app_settings_response(_load_app_settings())})
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'settings': dict(APP_SETTINGS_DEFAULTS)})
+
+
+@app.route('/api/admin/settings', methods=['POST'])
+def save_admin_settings():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json() or {}
+        incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        if not isinstance(incoming, dict):
+            incoming = {}
+        current = _load_app_settings()
+        settings = dict(current)
+        settings.update(incoming)
+        if not incoming.get('saml_idp_metadata_xml') and not _as_bool(incoming.get('clear_saml_idp_metadata'), False):
+            settings['saml_idp_metadata_xml'] = str(current.get('saml_idp_metadata_xml') or '')
+        if _as_bool(incoming.get('clear_saml_idp_metadata'), False):
+            settings['saml_idp_metadata_xml'] = ''
+        saved = _save_app_settings(settings)
+        changed_keys = sorted([
+            key for key in set(list(current.keys()) + list(saved.keys()))
+            if current.get(key) != saved.get(key)
+        ])
+        actor_email = _current_actor_email() or _normalize_email_address(ident.get('email')) or 'unknown'
+        try:
+            from audit_log import log_pam_action, log_app_activity
+            change_payload = {'changed_keys': changed_keys[:100], 'changed_count': len(changed_keys)}
+            log_pam_action(actor_email, 'admin_settings_updated', details=change_payload, ip=request.remote_addr)
+            log_app_activity(
+                actor_email,
+                'admin_settings_updated',
+                http_method=request.method,
+                path=request.path,
+                status_code=200,
+                auth_type=str(session.get('auth_type') or 'sso').strip().lower(),
+                is_admin=True,
+                ip=request.remote_addr,
+                details=change_payload,
+                allowed=True,
+            )
+            request.environ['npamx_activity_logged'] = '1'
+        except Exception:
+            pass
+        if saved.get('audit_logs_bucket') and any(key in changed_keys for key in ('audit_logs_bucket', 'audit_logs_prefix', 'audit_logs_auto_export')):
+            try:
+                from audit_log import backfill_request_tickets_to_s3
+                backfill_result = backfill_request_tickets_to_s3()
+                try:
+                    from audit_log import log_pam_action
+                    log_pam_action(
+                        actor_email,
+                        'request_tickets_s3_backfilled',
+                        details={'ticket_count': backfill_result.get('ticket_count', 0), 'prefix': backfill_result.get('prefix', '')},
+                        ip=request.remote_addr,
+                    )
+                except Exception:
+                    pass
+            except Exception as ticket_backfill_err:
+                print(f"Could not backfill request tickets after S3 settings save: {ticket_backfill_err}")
+        return jsonify({'status': 'success', 'settings': _admin_app_settings_response(saved)})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/aws/test', methods=['POST'])
+def test_admin_aws_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        settings = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        payload = _build_aws_integration_test_payload(settings)
+        payload['tested_by'] = ident.get('email') or ident.get('nameid') or ''
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/sns/test', methods=['POST'])
+def test_admin_sns_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        settings = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        topic_arn = str(settings.get('sns_topic_arn') or '').strip()
+        if not topic_arn:
+            return jsonify({'error': 'SNS topic ARN is required.'}), 400
+        region = str(settings.get('aws_region') or '').strip() or str(os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
+        payload = {
+            'event_type': 'integration_test',
+            'tested_by': ident.get('email') or ident.get('nameid') or '',
+            'tested_at': datetime.now(timezone.utc).isoformat(),
+            'message': 'NPAMX SNS integration test notification'
+        }
+        boto3.client('sns', region_name=region).publish(
+            TopicArn=topic_arn,
+            Subject='NPAMX SNS integration test',
+            Message=json.dumps(payload, indent=2),
+        )
+        return jsonify({'status': 'success', 'tested_at': payload['tested_at'], 'topic_arn': topic_arn})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/identity-center-login/test', methods=['POST'])
+def test_admin_identity_center_login_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        if not _SAML_AVAILABLE:
+            return jsonify({'error': 'SAML support is not installed on the PAM backend.'}), 503
+
+        data = request.get_json(silent=True) or {}
+        incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        merged = dict(_load_app_settings())
+        if isinstance(incoming, dict):
+            merged.update(incoming)
+
+        base_url = str(merged.get('app_base_url') or '').strip().rstrip('/')
+        metadata_xml = str(merged.get('saml_idp_metadata_xml') or '').strip()
+        if not base_url:
+            return jsonify({'error': 'Identity Center / SAML base URL is required.'}), 400
+        if not metadata_xml:
+            return jsonify({'error': 'Identity Center SAML metadata XML is required.'}), 400
+
+        idp_data = OneLogin_Saml2_IdPMetadataParser.parse(metadata_xml) or {}
+        idp = idp_data.get('idp') or {}
+        sso_service = idp.get('singleSignOnService') or {}
+        slo_service = idp.get('singleLogoutService') or {}
+        x509cert = str(idp.get('x509cert') or '').strip()
+
+        return jsonify({
+            'status': 'success',
+            'tested_at': datetime.now(timezone.utc).isoformat(),
+            'tested_by': ident.get('email') or ident.get('nameid') or '',
+            'result': {
+                'base_url': base_url,
+                'acs_url': f'{base_url}/saml/acs',
+                'audience_url': f'{base_url}/saml/metadata',
+                'idp_entity_id': str(idp.get('entityId') or '').strip(),
+                'sso_url': str(sso_service.get('url') or '').strip(),
+                'slo_url': str(slo_service.get('url') or '').strip(),
+                'signing_cert_configured': bool(x509cert),
+                'metadata_size': len(metadata_xml),
+            }
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/desktop-agent/status', methods=['GET'])
+def get_admin_desktop_agent_status():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        snapshot = _desktop_agent_status_snapshot(_load_app_settings())
+        return jsonify({
+            'status': 'success',
+            'tested_by': ident.get('email') or ident.get('nameid') or '',
+            'tested_at': datetime.now(timezone.utc).isoformat(),
+            'result': snapshot,
+        })
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'result': {}})
+
+
+@app.route('/api/admin/integrations/desktop-agent/test', methods=['POST'])
+def test_admin_desktop_agent_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        settings = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        payload = _build_desktop_agent_integration_test_payload(
+            settings,
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/database-connection/test', methods=['POST'])
+def test_admin_database_connection_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        return jsonify({
+            'status': 'error',
+            'error': 'Vault DB connection testing is disabled by policy.',
+            'result': {
+                'scope': 'vault_database_connection_test',
+                'label': 'Vault DB Connection Test',
+                'ok': False,
+                'checks': [
+                    {
+                        'name': 'Connection test',
+                        'status': 'error',
+                        'code': 'NPAMX-VCONN-410',
+                        'message': 'Vault DB connection testing is disabled by policy.',
+                    }
+                ],
+            },
+        }), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc or 'Invalid request').strip() or 'Invalid request'}), 400
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/database-connections', methods=['GET'])
+def list_admin_vault_database_connections():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        plane = _normalize_vault_plane(request.args.get('plane'), 'nonprod')
+        payload = _build_vault_db_connection_inventory_payload(
+            {'plane': plane},
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'connections': []})
+
+
+@app.route('/api/admin/integrations/database-connections/test', methods=['POST'])
+def test_admin_vault_database_connection():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        return jsonify({
+            'status': 'error',
+            'error': 'Vault DB connection testing is disabled by policy.',
+            'result': {
+                'scope': 'vault_database_connection_inventory_test',
+                'label': 'Vault DB Connection Test',
+                'ok': False,
+                'checks': [
+                    {
+                        'name': 'Connection test',
+                        'status': 'error',
+                        'code': 'NPAMX-VCONN-410',
+                        'message': 'Vault DB connection testing is disabled by policy.',
+                    }
+                ],
+            },
+        }), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc or 'Invalid request').strip() or 'Invalid request'}), 400
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/database-connections/push', methods=['POST'])
+def push_admin_vault_database_connection():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        settings = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        payload = _build_vault_db_connection_push_payload(
+            settings,
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        payload['tested_by'] = ident.get('email') or ident.get('nameid') or ''
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload)
+    except ValueError as exc:
+        return jsonify({'error': str(exc or 'Invalid request').strip() or 'Invalid request'}), 400
+    except Exception as exc:
+        code, message = _admin_vault_connection_error_detail(exc, phase='push')
+        return jsonify({
+            'status': 'error',
+            'error': message,
+            'result': {
+                'scope': 'vault_database_connection_push',
+                'label': 'Vault DB Connection Push',
+                'ok': False,
+                'checks': [
+                    {
+                        'name': 'Push',
+                        'status': 'error',
+                        'code': code,
+                        'message': message,
+                    }
+                ],
+            },
+        }), 200
+
+
+def _desktop_agent_current_user_email():
+    ident = _current_request_identity()
+    email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+    return email
+
+
+@app.route('/api/desktop-agent/download/<os_name>', methods=['GET'])
+def download_desktop_agent_package(os_name):
+    try:
+        user_email = _desktop_agent_current_user_email()
+        if not user_email:
+            return jsonify({'error': 'Authenticated session required', 'code': 'NPAMX-AGENT-DL-401'}), 401
+        settings = _normalize_app_settings(_load_app_settings())
+        if not bool(settings.get('desktop_agent_enabled')):
+            return jsonify({'error': 'Desktop agent is not enabled.', 'code': 'NPAMX-AGENT-DL-404'}), 404
+        target = _desktop_agent_download_target(settings, os_name)
+        if not target:
+            return jsonify({'error': 'Requested agent package is not configured.', 'code': 'NPAMX-AGENT-DL-404'}), 404
+
+        os_key = str(os_name or '').strip().lower()
+        if os_key == 'mac':
+            os_key = 'macos'
+        default_name = f'npamx-agent-{os_key}'
+        if target.get('mode') == 's3_proxy':
+            filename = os.path.basename(str(target.get('key') or '').strip()) or default_name
+            content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+            s3 = boto3.client(
+                's3',
+                region_name=str(target.get('region') or '').strip() or _aws_region_for_runtime(),
+                config=Config(connect_timeout=5, read_timeout=30),
+            )
+            signed_url = s3.generate_presigned_url(
+                'get_object',
+                Params={
+                    'Bucket': target['bucket'],
+                    'Key': target['key'],
+                    'ResponseContentDisposition': f'attachment; filename="{filename}"',
+                    'ResponseContentType': content_type,
+                },
+                ExpiresIn=300,
+            )
+            resp = redirect(signed_url, code=302)
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp
+
+        package_url = str(target.get('url') or '').strip()
+        if not package_url:
+            return jsonify({'error': 'Package URL is missing.', 'code': 'NPAMX-AGENT-DL-404'}), 404
+        req = urllib.request.Request(package_url, headers={'User-Agent': 'NPAMX-Desktop-Agent-Download/1.0'})
+        upstream = urllib.request.urlopen(req, timeout=60)
+        content_type = str(upstream.headers.get('Content-Type') or '').strip() or 'application/octet-stream'
+        content_len = str(upstream.headers.get('Content-Length') or '').strip()
+        filename = os.path.basename(urlparse(package_url).path or '') or default_name
+
+        def _iter_http():
+            try:
+                while True:
+                    chunk = upstream.read(64 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            finally:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+
+        resp = Response(stream_with_context(_iter_http()), mimetype=content_type)
+        if content_len.isdigit():
+            resp.headers['Content-Length'] = content_len
+        resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    except ClientError as exc:
+        err = (getattr(exc, 'response', {}) or {}).get('Error') or {}
+        code = str(err.get('Code') or '').strip()
+        if code in ('AccessDenied', 'AccessDeniedException', 'AllAccessDisabled'):
+            return jsonify({'error': 'Desktop agent package access is denied.', 'code': 'NPAMX-AGENT-DL-403'}), 403
+        if code in ('NoSuchBucket', 'NoSuchKey', 'NotFound'):
+            return jsonify({'error': 'Requested agent package was not found.', 'code': 'NPAMX-AGENT-DL-404'}), 404
+        return jsonify({'error': 'Agent package backend is unavailable.', 'code': 'NPAMX-AGENT-DL-502'}), 502
+    except (NoCredentialsError, EndpointConnectionError, BotoCoreError):
+        return jsonify({'error': 'Agent package backend is unavailable.', 'code': 'NPAMX-AGENT-DL-502'}), 502
+    except urllib.error.HTTPError as exc:
+        status = int(getattr(exc, 'code', 502) or 502)
+        if status == 404:
+            return jsonify({'error': 'Requested agent package was not found.', 'code': 'NPAMX-AGENT-DL-404'}), 404
+        if status in (401, 403):
+            return jsonify({'error': 'Desktop agent package access is denied.', 'code': 'NPAMX-AGENT-DL-403'}), 403
+        return jsonify({'error': 'Agent package backend is unavailable.', 'code': 'NPAMX-AGENT-DL-502'}), 502
+    except urllib.error.URLError:
+        return jsonify({'error': 'Agent package backend is unavailable.', 'code': 'NPAMX-AGENT-DL-502'}), 502
+    except Exception as exc:
+        app.logger.exception('Desktop agent package download failed')
+        return jsonify({'error': 'Agent package download failed.', 'code': 'NPAMX-AGENT-DL-500'}), 500
+
+
+@app.route('/api/desktop-agent/bootstrap-config', methods=['GET'])
+def download_desktop_agent_bootstrap_config():
+    user_email = _desktop_agent_current_user_email()
+    if not user_email:
+        return jsonify({'error': 'Authenticated session required', 'code': 'NPAMX-AGENT-401'}), 401
+    settings = _normalize_app_settings(_load_app_settings())
+    if not bool(settings.get('desktop_agent_enabled')):
+        return jsonify({'error': 'Desktop agent is not enabled.', 'code': 'NPAMX-AGENT-405'}), 503
+
+    display_name = (
+        _display_name_from_saml_session(email=user_email, nameid=str(session.get('user') or '').strip())
+        or user_email.split('@')[0].replace('.', ' ').title()
+    )
+    server_url = str(settings.get('app_base_url') or '').strip().rstrip('/')
+    if not server_url:
+        server_url = request.url_root.rstrip('/')
+    network_scope = str(settings.get('desktop_agent_network_scope') or '').strip() or 'netskope'
+    agent_version = str(settings.get('desktop_agent_version') or '1.3.4').strip() or '1.3.4'
+    payload = {
+        'type': 'npamx_desktop_agent_bootstrap',
+        'server_url': server_url,
+        'user_email': user_email,
+        'user_name': display_name,
+        'network_scope': network_scope,
+        'agent_version': agent_version,
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'pairing_mode': 'identity_center_pairing',
+        'pairing_hint': 'Launch the NPAMX desktop agent and click Login. The agent will show a pairing code for approval in NPAMX.',
+    }
+    safe_stub = re.sub(r'[^A-Za-z0-9_.-]+', '-', user_email.split('@')[0]).strip('-') or 'user'
+    filename = f'npamx-agent-{safe_stub}.bootstrap.json'
+    resp = Response(json.dumps(payload, indent=2) + '\n', mimetype='application/json')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/agent/v1/login/start', methods=['POST'])
+@_rate_limit_exempt
+def desktop_agent_login_start():
+    settings = _normalize_app_settings(_load_app_settings())
+    if not bool(settings.get('desktop_agent_enabled')):
+        return jsonify({'error': 'Desktop agent integration is disabled.', 'code': 'NPAMX-AGENT-405'}), 503
+    if _desktop_agent_auth_mode(settings) != 'identity_center':
+        return jsonify({'error': 'Identity Center login flow is disabled for agent.', 'code': 'NPAMX-AGENT-406'}), 400
+
+    data = request.get_json(silent=True) or {}
+    agent_id = _normalize_desktop_agent_id(
+        data.get('agent_id')
+        or data.get('device_id')
+        or data.get('installation_id')
+    )
+    user_email = str(data.get('user_email') or '').strip().lower()
+    user_name = str(data.get('user_name') or data.get('user') or '').strip()
+    host = str(data.get('host') or data.get('hostname') or '').strip()
+    platform_name = str(data.get('platform') or data.get('os') or '').strip()
+    version = str(data.get('version') or '').strip()
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=_desktop_agent_pairing_code_ttl_seconds(settings))
+
+    state = _load_desktop_agent_state()
+    state, _ = _prune_desktop_agent_state(state, now=now)
+    pairing_sessions = state.get('pairing_sessions') if isinstance(state.get('pairing_sessions'), dict) else {}
+
+    user_code = ''
+    while not user_code:
+        candidate = ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(8))
+        if not any(str(item.get('user_code') or '') == candidate and str(item.get('status') or '') == 'pending' for item in pairing_sessions.values() if isinstance(item, dict)):
+            user_code = candidate
+    device_code = secrets.token_urlsafe(36).replace('.', '').replace('=', '')
+    while device_code in pairing_sessions:
+        device_code = secrets.token_urlsafe(36).replace('.', '').replace('=', '')
+
+    pairing_sessions[device_code] = _normalize_desktop_agent_pairing_record({
+        'device_code': device_code,
+        'user_code': user_code,
+        'agent_id': agent_id,
+        'user_email': user_email,
+        'user_name': user_name,
+        'host': host,
+        'platform': platform_name,
+        'version': version,
+        'status': 'pending',
+        'requested_at': now.isoformat(),
+        'expires_at': expires_at.isoformat(),
+        'approved_at': '',
+        'token_expires_at': '',
+        'token_hash': '',
+        'access_token': '',
+    }, device_code=device_code)
+    state['pairing_sessions'] = pairing_sessions
+    state['updated_at'] = now.isoformat()
+    _save_desktop_agent_state(state)
+
+    base_url = str(settings.get('app_base_url') or '').strip().rstrip('/')
+    verification_url = f'{base_url}/' if base_url else '/'
+    return jsonify({
+        'status': 'authorization_pending',
+        'device_code': device_code,
+        'user_code': user_code,
+        'verification_url': verification_url,
+        'expires_in': _desktop_agent_pairing_code_ttl_seconds(settings),
+        'interval': _desktop_agent_pairing_poll_interval_seconds(settings),
+        'message': 'Open NPAMX in browser with your Identity Center login and complete Desktop Agent pairing using the code.',
+    })
+
+
+@app.route('/api/desktop-agent/login/complete', methods=['POST'])
+def desktop_agent_login_complete():
+    user_email = _desktop_agent_current_user_email()
+    if not user_email:
+        return jsonify({'error': 'Authenticated session required', 'code': 'NPAMX-AGENT-401'}), 401
+    settings = _normalize_app_settings(_load_app_settings())
+    if not bool(settings.get('desktop_agent_enabled')):
+        return jsonify({'error': 'Desktop agent integration is disabled.', 'code': 'NPAMX-AGENT-405'}), 503
+    if _desktop_agent_auth_mode(settings) != 'identity_center':
+        return jsonify({'error': 'Identity Center login flow is disabled for agent.', 'code': 'NPAMX-AGENT-406'}), 400
+
+    data = request.get_json(silent=True) or {}
+    user_code = str(data.get('user_code') or '').strip().upper()
+    if not re.fullmatch(r'[A-Z0-9]{6,12}', user_code or ''):
+        return jsonify({'error': 'Valid user_code is required.', 'code': 'NPAMX-AGENT-400'}), 400
+    now = datetime.now(timezone.utc)
+    state = _load_desktop_agent_state()
+    state, _ = _prune_desktop_agent_state(state, now=now)
+    pairing_sessions = state.get('pairing_sessions') if isinstance(state.get('pairing_sessions'), dict) else {}
+
+    matched_device_code = ''
+    matched = {}
+    for device_code, record in pairing_sessions.items():
+        rec = record if isinstance(record, dict) else {}
+        if str(rec.get('user_code') or '').strip().upper() != user_code:
+            continue
+        if str(rec.get('status') or '').strip().lower() != 'pending':
+            continue
+        expires_at = _parse_iso_datetime_utc(rec.get('expires_at'))
+        if expires_at and now > expires_at:
+            rec['status'] = 'expired'
+            pairing_sessions[device_code] = _normalize_desktop_agent_pairing_record(rec, device_code=device_code)
+            continue
+        matched_device_code = device_code
+        matched = rec
+        break
+    if not matched_device_code:
+        state['pairing_sessions'] = pairing_sessions
+        state['updated_at'] = now.isoformat()
+        _save_desktop_agent_state(state)
+        return jsonify({'error': 'Pairing code not found or expired.', 'code': 'NPAMX-AGENT-404'}), 404
+
+    display_name = _display_name_from_saml_session(email=user_email, nameid=str(session.get('user') or '').strip()) or user_email.split('@')[0].replace('.', ' ').title()
+    token_value, token_record = _desktop_agent_issue_access_token(
+        state,
+        agent_id=str(matched.get('agent_id') or '').strip(),
+        user_email=user_email,
+        user_name=display_name,
+        created_by=user_email,
+        settings=settings,
+    )
+    matched['status'] = 'approved'
+    matched['approved_at'] = now.isoformat()
+    matched['token_hash'] = str(token_record.get('token_hash') or '').strip().lower()
+    matched['access_token'] = token_value
+    matched['token_expires_at'] = str(token_record.get('expires_at') or '').strip()
+    matched['user_email'] = user_email
+    matched['user_name'] = display_name
+    pairing_sessions[matched_device_code] = _normalize_desktop_agent_pairing_record(matched, device_code=matched_device_code)
+    state['pairing_sessions'] = pairing_sessions
+    state['updated_at'] = now.isoformat()
+    _save_desktop_agent_state(state)
+    return jsonify({
+        'status': 'success',
+        'agent_id': str(matched.get('agent_id') or '').strip(),
+        'user_email': user_email,
+        'expires_at': str(token_record.get('expires_at') or '').strip(),
+        'message': 'Desktop agent paired successfully.',
+    })
+
+
+@app.route('/api/agent/v1/login/poll', methods=['POST'])
+@_rate_limit_exempt
+def desktop_agent_login_poll():
+    settings = _normalize_app_settings(_load_app_settings())
+    if not bool(settings.get('desktop_agent_enabled')):
+        return jsonify({'error': 'Desktop agent integration is disabled.', 'code': 'NPAMX-AGENT-405'}), 503
+    if _desktop_agent_auth_mode(settings) != 'identity_center':
+        return jsonify({'error': 'Identity Center login flow is disabled for agent.', 'code': 'NPAMX-AGENT-406'}), 400
+
+    data = request.get_json(silent=True) or {}
+    device_code = str(data.get('device_code') or '').strip()
+    if not device_code:
+        return jsonify({'error': 'device_code is required', 'code': 'NPAMX-AGENT-400'}), 400
+    now = datetime.now(timezone.utc)
+    state = _load_desktop_agent_state()
+    state, _ = _prune_desktop_agent_state(state, now=now)
+    pairing_sessions = state.get('pairing_sessions') if isinstance(state.get('pairing_sessions'), dict) else {}
+    record = pairing_sessions.get(device_code) if isinstance(pairing_sessions.get(device_code), dict) else {}
+    if not record:
+        return jsonify({'error': 'Invalid device_code.', 'code': 'NPAMX-AGENT-404'}), 404
+
+    status = str(record.get('status') or '').strip().lower()
+    expires_at = _parse_iso_datetime_utc(record.get('expires_at'))
+    if status == 'pending' and expires_at and now > expires_at:
+        record['status'] = 'expired'
+        pairing_sessions[device_code] = _normalize_desktop_agent_pairing_record(record, device_code=device_code)
+        state['pairing_sessions'] = pairing_sessions
+        state['updated_at'] = now.isoformat()
+        _save_desktop_agent_state(state)
+        return jsonify({'error': 'Pairing code expired. Start login again.', 'code': 'NPAMX-AGENT-408'}), 400
+
+    if status == 'consumed':
+        return jsonify({'error': 'Pairing already consumed. Start login again.', 'code': 'NPAMX-AGENT-409'}), 400
+
+    if status != 'approved':
+        return jsonify({
+            'status': 'authorization_pending',
+            'code': 'NPAMX-AGENT-PENDING',
+            'interval': _desktop_agent_pairing_poll_interval_seconds(settings),
+        }), 200
+
+    access_token = str(record.get('access_token') or '').strip()
+    if not access_token:
+        return jsonify({'error': 'Pairing already consumed. Start login again.', 'code': 'NPAMX-AGENT-409'}), 400
+
+    response = {
+        'status': 'success',
+        'access_token': access_token,
+        'agent_id': str(record.get('agent_id') or '').strip(),
+        'user_email': str(record.get('user_email') or '').strip().lower(),
+        'expires_at': str(record.get('token_expires_at') or '').strip(),
+        'heartbeat_ttl_seconds': _desktop_agent_heartbeat_ttl_seconds(settings),
+    }
+    record['access_token'] = ''
+    record['status'] = 'consumed'
+    pairing_sessions[device_code] = _normalize_desktop_agent_pairing_record(record, device_code=device_code)
+    state['pairing_sessions'] = pairing_sessions
+    state['updated_at'] = now.isoformat()
+    _save_desktop_agent_state(state)
+    return jsonify(response), 200
+
+
+@app.route('/api/agent/v1/register', methods=['POST'])
+@_rate_limit_exempt
+def desktop_agent_register():
+    settings, token_record, auth_error = _require_desktop_agent_auth()
+    if auth_error:
+        return auth_error
+    data = request.get_json(silent=True) or {}
+    now = datetime.now(timezone.utc).isoformat()
+    agent_id = _normalize_desktop_agent_id(
+        data.get('agent_id')
+        or data.get('device_id')
+        or data.get('installation_id')
+    )
+    token_agent_id = str((token_record or {}).get('agent_id') or '').strip()
+    if token_agent_id and token_agent_id != agent_id:
+        return jsonify({'error': 'Agent token does not match this agent_id.', 'code': 'NPAMX-AGENT-403'}), 401
+    state = _load_desktop_agent_state()
+    agents = state.get('agents') if isinstance(state.get('agents'), dict) else {}
+    current = agents.get(agent_id) if isinstance(agents.get(agent_id), dict) else {}
+    updated = dict(current)
+    updated.update({
+        'agent_id': agent_id,
+        'user_email': str(data.get('user_email') or (token_record or {}).get('user_email') or current.get('user_email') or '').strip().lower(),
+        'user_name': str(data.get('user_name') or data.get('user') or current.get('user_name') or '').strip(),
+        'host': str(data.get('host') or data.get('hostname') or current.get('host') or '').strip(),
+        'platform': str(data.get('platform') or data.get('os') or current.get('platform') or '').strip(),
+        'version': str(data.get('version') or current.get('version') or '').strip(),
+        'network_scope': str(data.get('network_scope') or data.get('network') or current.get('network_scope') or settings.get('desktop_agent_network_scope') or '').strip(),
+        'last_status': 'connected',
+        'last_error': '',
+        'last_seen_at': now,
+        'registered_at': str(current.get('registered_at') or now).strip(),
+        'updated_at': now,
+    })
+    agents[agent_id] = _normalize_desktop_agent_record(updated, agent_id=agent_id)
+    state['agents'] = agents
+    state['updated_at'] = now
+    _save_desktop_agent_state(state)
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'heartbeat_ttl_seconds': _desktop_agent_heartbeat_ttl_seconds(settings),
+        'server_time': now,
+    })
+
+
+@app.route('/api/agent/v1/heartbeat', methods=['POST'])
+@_rate_limit_exempt
+def desktop_agent_heartbeat():
+    settings, token_record, auth_error = _require_desktop_agent_auth()
+    if auth_error:
+        return auth_error
+    data = request.get_json(silent=True) or {}
+    raw_agent_id = str(data.get('agent_id') or data.get('device_id') or '').strip()
+    if not raw_agent_id:
+        return jsonify({'error': 'agent_id is required', 'code': 'NPAMX-AGENT-400'}), 400
+    agent_id = _normalize_desktop_agent_id(raw_agent_id)
+    token_agent_id = str((token_record or {}).get('agent_id') or '').strip()
+    if token_agent_id and token_agent_id != agent_id:
+        return jsonify({'error': 'Agent token does not match this agent_id.', 'code': 'NPAMX-AGENT-403'}), 401
+    status_raw = str(data.get('status') or '').strip().lower()
+    status = 'error' if status_raw in ('error', 'failed', 'failure', 'disconnected') else 'connected'
+    error_text = str(data.get('error') or data.get('reason') or '').strip()[:500]
+    now = datetime.now(timezone.utc).isoformat()
+    state = _load_desktop_agent_state()
+    agents = state.get('agents') if isinstance(state.get('agents'), dict) else {}
+    current = agents.get(agent_id) if isinstance(agents.get(agent_id), dict) else {}
+    updated = dict(current)
+    updated.update({
+        'agent_id': agent_id,
+        'user_email': str(data.get('user_email') or (token_record or {}).get('user_email') or current.get('user_email') or '').strip().lower(),
+        'user_name': str(data.get('user_name') or data.get('user') or current.get('user_name') or '').strip(),
+        'host': str(data.get('host') or data.get('hostname') or current.get('host') or '').strip(),
+        'platform': str(data.get('platform') or data.get('os') or current.get('platform') or '').strip(),
+        'version': str(data.get('version') or current.get('version') or '').strip(),
+        'network_scope': str(data.get('network_scope') or data.get('network') or current.get('network_scope') or settings.get('desktop_agent_network_scope') or '').strip(),
+        'last_status': status,
+        'last_error': error_text if status == 'error' else '',
+        'last_seen_at': now,
+        'registered_at': str(current.get('registered_at') or now).strip(),
+        'updated_at': now,
+    })
+    agents[agent_id] = _normalize_desktop_agent_record(updated, agent_id=agent_id)
+    state['agents'] = agents
+    state['updated_at'] = now
+    _save_desktop_agent_state(state)
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'server_time': now,
+    })
+
+
+@app.route('/api/admin/security/database-user-audit/scan', methods=['POST'])
+def scan_admin_database_user_inventory():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        payload = _build_vault_db_user_inventory_payload(
+            data,
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        payload['tested_by'] = ident.get('email') or ident.get('nameid') or ''
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        _persist_db_user_audit_run(payload, trigger='manual', tested_by=payload['tested_by'])
+        try:
+            _send_db_user_inventory_red_flag_email(payload)
+        except Exception:
+            app.logger.exception('Failed to send manual DB user inventory red-flag email')
+        return jsonify(payload)
+    except ValueError as exc:
+        return jsonify({'error': str(exc or 'Invalid request').strip() or 'Invalid request'}), 400
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'connections': [], 'rows': []})
+
+
+@app.route('/api/admin/security/database-user-audit/state', methods=['GET'])
+def get_admin_database_user_audit_state():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        payload = _db_user_audit_state_payload()
+        payload['schedule'] = {
+            'enabled': bool(_load_app_settings().get('db_user_audit_schedule_enabled')),
+            'weekday': str(_load_app_settings().get('db_user_audit_schedule_weekday') or 'Sun').strip() or 'Sun',
+            'time_ist': str(_load_app_settings().get('db_user_audit_schedule_time_ist') or '09:00').strip() or '09:00',
+            'notify_on_red_flag': bool(_load_app_settings().get('db_user_audit_notify_on_red_flag')),
+        }
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'last_run': {}, 'latest_summary': {}, 'latest_rows': []})
+
+
+def _build_jumpcloud_integration_test_payload(settings, tested_by=''):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else {})
+    checks = []
+
+    enabled = bool(source.get('jumpcloud_enabled'))
+    base_url = str(source.get('jumpcloud_api_base_url') or '').strip()
+    api_key_secret_name = str(source.get('jumpcloud_api_key_secret_name') or '').strip()
+    parsed_base = urlparse(base_url) if base_url else None
+    lookup_field = str(source.get('jumpcloud_user_lookup_field') or 'email').strip() or 'email'
+    manager_attr = str(source.get('jumpcloud_manager_attribute_name') or 'manager').strip() or 'manager'
+    department_attr = str(source.get('jumpcloud_department_attribute_name') or 'department').strip() or 'department'
+    job_title_attr = str(source.get('jumpcloud_job_title_attribute_name') or 'jobTitle').strip() or 'jobTitle'
+    sync_mode = str(source.get('jumpcloud_sync_mode') or 'on_demand').strip() or 'on_demand'
+
+    checks.append({
+        'name': 'Integration enabled',
+        'status': 'success' if enabled else 'error',
+        'message': 'JumpCloud enrichment is enabled.' if enabled else 'Turn on JumpCloud attribute sync to use this integration.',
+    })
+    checks.append({
+        'name': 'API base URL',
+        'status': 'success' if base_url.startswith('http') else 'error',
+        'message': base_url if base_url.startswith('http') else 'Provide a valid JumpCloud API base URL.',
+    })
+    checks.append({
+        'name': 'API key secret reference',
+        'status': 'success' if api_key_secret_name else 'error',
+        'message': ('Direct API key configured' if api_key_secret_name.startswith('jca_') else api_key_secret_name) if api_key_secret_name else 'Provide the secret name that stores the JumpCloud API key.',
+    })
+    checks.append({
+        'name': 'User lookup field',
+        'status': 'success' if lookup_field else 'error',
+        'message': lookup_field if lookup_field else 'Set the field used to match NPAMx users to JumpCloud users.',
+    })
+    checks.append({
+        'name': 'Profile attribute mapping',
+        'status': 'success' if manager_attr and department_attr and job_title_attr else 'error',
+        'message': f"manager={manager_attr}, department={department_attr}, jobTitle={job_title_attr}",
+    })
+    checks.append({
+        'name': 'Sync mode',
+        'status': 'success',
+        'message': 'Configured for ' + ('login refresh' if sync_mode == 'login_refresh' else 'on-demand') + ' enrichment.',
+    })
+
+    ok = all(str((item or {}).get('status') or '').lower() == 'success' for item in checks)
+    summary = {
+        'passed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'success'),
+        'failed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'error'),
+        'skipped': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'skipped'),
+    }
+    management_card = {
+        'label': 'JumpCloud Profile Sync',
+        'ok': ok,
+        'checks': checks,
+        'role_arn': '',
+        'account_id': '',
+        'host': str((parsed_base.hostname if parsed_base else '') or base_url).strip(),
+        'port': parsed_base.port if parsed_base and parsed_base.port else '',
+        'lookup_field': lookup_field,
+        'sync_mode': sync_mode,
+        'directory_id': str(source.get('jumpcloud_directory_id') or '').strip(),
+    }
+    return {
+        'status': 'success' if ok else 'error',
+        'tested_by': tested_by,
+        'results': {
+            'summary': summary,
+            'management': management_card,
+            'resources': [],
+            'db_connect': [],
+        },
+        'result': {
+            'provider': 'jumpcloud',
+            'ok': ok,
+            'checks': checks,
+            'sync_mode': sync_mode,
+            'lookup_field': lookup_field,
+            'api_base_url': base_url,
+            'directory_id': str(source.get('jumpcloud_directory_id') or '').strip(),
+        }
+    }
+
+
+def _build_gmail_integration_test_payload(settings, tested_by=''):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else {})
+    checks = []
+
+    enabled = bool(source.get('gmail_notifications_enabled'))
+    sender_email = str(source.get('gmail_sender_email') or '').strip()
+    sender_name = str(source.get('gmail_sender_display_name') or 'NPAMx').strip() or 'NPAMx'
+    workspace_domain = str(source.get('gmail_workspace_domain') or '').strip()
+    workspace_admin = str(source.get('gmail_workspace_admin_contact') or '').strip()
+    project_id = str(source.get('gmail_project_id') or '').strip()
+    client_id = str(source.get('gmail_oauth_client_id') or '').strip()
+    client_secret_ref = str(source.get('gmail_client_secret_name') or '').strip()
+    refresh_token_ref = str(source.get('gmail_refresh_token_secret_name') or '').strip()
+
+    checks.append({
+        'name': 'Integration enabled',
+        'status': 'success' if enabled else 'error',
+        'message': 'Google Workspace mail is enabled.' if enabled else 'Turn on Gmail notifications to use this integration.',
+    })
+    checks.append({
+        'name': 'Sender mailbox',
+        'status': 'success' if sender_email and '@' in sender_email else 'error',
+        'message': sender_email if sender_email else 'Provide the Workspace sender mailbox that NPAMX should use.',
+    })
+    checks.append({
+        'name': 'Workspace metadata',
+        'status': 'success' if workspace_domain or workspace_admin else 'skipped',
+        'message': ', '.join([item for item in [
+            f"domain={workspace_domain}" if workspace_domain else '',
+            f"admin={workspace_admin}" if workspace_admin else '',
+            f"display={sender_name}" if sender_name else '',
+        ] if item]) or 'Optional Workspace metadata is not filled.',
+    })
+    checks.append({
+        'name': 'Google Cloud project',
+        'status': 'success' if project_id else 'error',
+        'message': project_id if project_id else 'Provide the Google Cloud project id used for the Gmail API client.',
+    })
+    checks.append({
+        'name': 'OAuth client id',
+        'status': 'success' if client_id else 'error',
+        'message': client_id if client_id else 'Provide the OAuth client id for the Gmail API app.',
+    })
+    checks.append({
+        'name': 'Secret references',
+        'status': 'success' if client_secret_ref and refresh_token_ref else 'error',
+        'message': (
+            f"client_secret={client_secret_ref or '(missing)'}, refresh_token={refresh_token_ref or '(missing)'}"
+        ),
+    })
+
+    client_secret = ''
+    refresh_token = ''
+    if client_secret_ref:
+        try:
+            client_secret = _get_runtime_secret(client_secret_ref)
+            checks.append({
+                'name': 'Client secret lookup',
+                'status': 'success',
+                'message': f'Secrets Manager returned a client secret from {client_secret_ref}.',
+            })
+        except Exception as exc:
+            checks.append({
+                'name': 'Client secret lookup',
+                'status': 'error',
+                'message': f'NPAMX could not read the client secret from Secrets Manager ({client_secret_ref}).',
+                'code': 'NPAMX-GMAIL-002',
+            })
+            try:
+                print(f"Gmail integration test client secret lookup failed: {exc}", flush=True)
+            except Exception:
+                pass
+    if refresh_token_ref:
+        try:
+            refresh_token = _get_runtime_secret(refresh_token_ref)
+            checks.append({
+                'name': 'Refresh token lookup',
+                'status': 'success',
+                'message': f'Secrets Manager returned a refresh token from {refresh_token_ref}.',
+            })
+        except Exception as exc:
+            checks.append({
+                'name': 'Refresh token lookup',
+                'status': 'error',
+                'message': f'NPAMX could not read the refresh token from Secrets Manager ({refresh_token_ref}).',
+                'code': 'NPAMX-GMAIL-003',
+            })
+            try:
+                print(f"Gmail integration test refresh token lookup failed: {exc}", flush=True)
+            except Exception:
+                pass
+
+    if client_id and client_secret and refresh_token:
+        try:
+            token_body = urlencode({
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'refresh_token': refresh_token,
+                'grant_type': 'refresh_token',
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                url='https://oauth2.googleapis.com/token',
+                data=token_body,
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read().decode('utf-8')
+                token_payload = json.loads(raw or '{}') if raw else {}
+            access_token = str(token_payload.get('access_token') or '').strip()
+            token_type = str(token_payload.get('token_type') or '').strip()
+            if access_token:
+                checks.append({
+                    'name': 'OAuth refresh exchange',
+                    'status': 'success',
+                    'message': f'Google accepted the refresh token and returned a {token_type or "Bearer"} access token.',
+                })
+            else:
+                checks.append({
+                    'name': 'OAuth refresh exchange',
+                    'status': 'error',
+                    'message': 'Google did not return an access token for this refresh request.',
+                    'code': 'NPAMX-GMAIL-004',
+                })
+        except Exception as exc:
+            low = str(exc or '').lower()
+            code = 'NPAMX-GMAIL-004'
+            message = 'Google rejected the OAuth refresh flow. Recheck the client id, client secret, refresh token, and Gmail API configuration.'
+            if 'invalid_grant' in low:
+                code = 'NPAMX-GMAIL-005'
+                message = 'The Gmail refresh token is invalid, expired, or was issued for a different client.'
+            elif 'invalid_client' in low:
+                code = 'NPAMX-GMAIL-006'
+                message = 'Google rejected the OAuth client credentials. Recheck the client id and client secret.'
+            elif 'access_denied' in low or 'unauthorized_client' in low:
+                code = 'NPAMX-GMAIL-007'
+                message = 'Google blocked this OAuth client for the requested Gmail API flow.'
+            checks.append({
+                'name': 'OAuth refresh exchange',
+                'status': 'error',
+                'message': message,
+                'code': code,
+            })
+            try:
+                print(f"Gmail integration test token exchange failed: {exc}", flush=True)
+            except Exception:
+                pass
+
+    ok = all(str((item or {}).get('status') or '').lower() != 'error' for item in checks)
+    summary = {
+        'passed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'success'),
+        'failed': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'error'),
+        'skipped': sum(1 for item in checks if str((item or {}).get('status') or '').lower() == 'skipped'),
+    }
+    management_card = {
+        'label': 'Google Workspace Mail',
+        'ok': ok,
+        'checks': checks,
+        'role_arn': '',
+        'account_id': '',
+        'host': 'oauth2.googleapis.com',
+        'port': '443',
+        'sender_email': sender_email,
+        'workspace_domain': workspace_domain,
+        'project_id': project_id,
+    }
+    return {
+        'status': 'success' if ok else 'error',
+        'tested_by': tested_by,
+        'results': {
+            'summary': summary,
+            'management': management_card,
+            'resources': [],
+            'db_connect': [],
+        },
+        'result': {
+            'provider': 'gmail',
+            'ok': ok,
+            'checks': checks,
+            'sender_email': sender_email,
+            'workspace_domain': workspace_domain,
+            'project_id': project_id,
+        }
+    }
+
+
+def _gmail_notification_settings(settings=None):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    return {
+        'enabled': bool(source.get('gmail_notifications_enabled')),
+        'sender_email': str(source.get('gmail_sender_email') or '').strip(),
+        'sender_name': str(source.get('gmail_sender_display_name') or 'NPAMx').strip() or 'NPAMx',
+        'workspace_domain': str(source.get('gmail_workspace_domain') or '').strip(),
+        'workspace_admin_contact': str(source.get('gmail_workspace_admin_contact') or '').strip(),
+        'support_email': str(source.get('support_email') or '').strip(),
+        'project_id': str(source.get('gmail_project_id') or '').strip(),
+        'client_id': str(source.get('gmail_oauth_client_id') or '').strip(),
+        'client_secret_name': str(source.get('gmail_client_secret_name') or '').strip(),
+        'refresh_token_name': str(source.get('gmail_refresh_token_secret_name') or '').strip(),
+        'footer_note': str(source.get('notification_email_footer_note') or NPAMX_NOTIFICATION_FOOTER_DEFAULT).strip() or NPAMX_NOTIFICATION_FOOTER_DEFAULT,
+    }
+
+
+def _gmail_access_token(settings=None):
+    cfg = _gmail_notification_settings(settings)
+    if not cfg['enabled']:
+        raise RuntimeError('Gmail notifications are disabled in NPAMX settings.')
+    if not cfg['client_id'] or not cfg['client_secret_name'] or not cfg['refresh_token_name']:
+        raise RuntimeError('Gmail OAuth settings are incomplete.')
+    client_secret = _get_runtime_secret(cfg['client_secret_name'])
+    refresh_token = _get_runtime_secret(cfg['refresh_token_name'])
+    token_body = urlencode({
+        'client_id': cfg['client_id'],
+        'client_secret': client_secret,
+        'refresh_token': refresh_token,
+        'grant_type': 'refresh_token',
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        url='https://oauth2.googleapis.com/token',
+        data=token_body,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        raw = resp.read().decode('utf-8')
+        payload = json.loads(raw or '{}') if raw else {}
+    token = str(payload.get('access_token') or '').strip()
+    if not token:
+        raise RuntimeError('Google did not return an access token.')
+    return token, cfg
+
+
+def _build_notification_playground_preview(payload, actor_email=''):
+    src = payload if isinstance(payload, dict) else {}
+    template_type = str(src.get('template_type') or 'announcement').strip().lower()
+    subject_override = ' '.join(str(src.get('subject') or '').strip().split())
+    message_override = ' '.join(str(src.get('message') or '').strip().split())
+    actor = _normalize_email_address(actor_email) or 'admin@npamx.local'
+    label_map = {
+        'approval_reminder': 'Pending approval reminder',
+        'access_ready': 'Access approved',
+        'feedback_to_admins': 'User feedback submitted',
+        'feedback_update_to_user': 'Feedback update',
+        'admin_activity': 'Admin activity alert',
+        'announcement': 'Announcement',
+    }
+    default_subject = {
+        'approval_reminder': 'NPAMx approval pending for your action',
+        'access_ready': 'NPAMx access request approved',
+        'feedback_to_admins': 'New NPAMx feedback requires review',
+        'feedback_update_to_user': 'Your NPAMx feedback has an update',
+        'admin_activity': 'NPAMx admin activity alert',
+        'announcement': 'NPAMx announcement',
+    }.get(template_type, 'NPAMx notification')
+    lines = {
+        'approval_reminder': [
+            'Hello,',
+            '',
+            'An NPAMX access request is still waiting for approval.',
+            'Requester: satish.korra@nykaa.com',
+            'Access type: Database read-only access',
+            'Next step: Open NPAMX and review the pending approval item.',
+        ],
+        'access_ready': [
+            'Hello,',
+            '',
+            'Your NPAMX access request has been approved.',
+            'Next step: Open NPAMX and click Get login details to fetch the latest credentials or access instructions.',
+        ],
+        'feedback_to_admins': [
+            'Hello Admin Team,',
+            '',
+            'A user submitted new feedback in NPAMX.',
+            'Category: Databases Access',
+            'Type: Access Workflow Related',
+            'Next step: Open the Feedback admin tab to review and respond.',
+        ],
+        'feedback_update_to_user': [
+            'Hello,',
+            '',
+            'Your NPAMX feedback request has a new update from the admin team.',
+            'Next step: Open the notification bell or feedback section in NPAMX to review the response.',
+        ],
+        'admin_activity': [
+            'Hello Admin Team,',
+            '',
+            f'An admin action was recorded in NPAMX by {actor}.',
+            'Action: Example configuration update',
+            'Next step: Review the audit trail if this change was unexpected.',
+        ],
+        'announcement': [
+            'Hello,',
+            '',
+            message_override or 'This is a preview of an NPAMX announcement.',
+            '',
+            'Please review the message before enabling or sending it broadly.',
+        ],
+    }.get(template_type, [
+        'Hello,',
+        '',
+        message_override or 'This is a preview of an NPAMX notification.',
+    ])
+    body_text = '\n'.join(lines).strip()
+    subject = subject_override or default_subject
+    return {
+        'template_type': template_type,
+        'template_label': label_map.get(template_type, 'Notification'),
+        'subject': subject,
+        'body_text': body_text,
+        'message': message_override,
+        'target_roles': _normalize_notification_roles(src.get('target_roles') or []),
+        'target_group_ids': _normalize_notification_group_ids(src.get('target_group_ids') or []),
+    }
+
+
+def _build_announcement_email_preview(payload):
+    announcement = _normalize_announcement_entry(payload)
+    subject = ' '.join(str(payload.get('subject') or '').strip().split()) or 'NPAMx announcement'
+    body_text = str(announcement.get('message') or '').strip()
+    if not body_text:
+        raise RuntimeError('Announcement message is required.')
+    words = [token for token in body_text.split() if token]
+    if len(words) > 1000:
+        raise RuntimeError('Announcement message must be 1000 words or less.')
+    return {
+        'template_type': 'announcement',
+        'template_label': 'Announcement',
+        'subject': subject,
+        'body_text': body_text,
+        'message': body_text,
+        'target_roles': announcement.get('target_roles') or [],
+        'target_group_ids': announcement.get('target_group_ids') or [],
+        'direct_emails': announcement.get('direct_emails') or [],
+        'cc_emails': announcement.get('cc_emails') or [],
+        'bcc_emails': announcement.get('bcc_emails') or [],
+    }
+
+
+def _feedback_admin_audience_settings(settings=None):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    return {
+        'send_to_all': _as_bool(source.get('feedback_admin_send_to_all'), False),
+        'target_roles': _normalize_notification_roles(source.get('feedback_admin_target_roles') or []),
+        'target_group_ids': _normalize_notification_group_ids(source.get('feedback_admin_target_group_ids') or []),
+        'direct_emails': _normalize_email_list(source.get('feedback_admin_direct_emails') or []),
+        'cc_emails': _normalize_email_list(source.get('feedback_admin_cc_emails') or []),
+        'bcc_emails': _normalize_email_list(source.get('feedback_admin_bcc_emails') or []),
+    }
+
+
+def _feedback_admin_recipient_records(settings=None):
+    cfg = _feedback_admin_audience_settings(settings)
+    recipients = []
+    seen = set()
+    known_recipients = _notification_known_recipients()
+    target_roles = list(cfg.get('target_roles') or [])
+    target_group_ids = list(cfg.get('target_group_ids') or [])
+    if cfg.get('send_to_all'):
+        target_roles = []
+        target_group_ids = []
+    if not cfg.get('send_to_all') and not target_roles and not target_group_ids and not (cfg.get('direct_emails') or []):
+        target_roles = ['Admin', 'SuperAdmin']
+    audience_stub = {
+        'target_roles': target_roles,
+        'target_group_ids': target_group_ids,
+    }
+    if cfg.get('send_to_all'):
+        for record in known_recipients:
+            email = _normalize_email_address(record.get('email'))
+            if email and email not in seen:
+                recipients.append(record)
+                seen.add(email)
+    elif target_roles or target_group_ids:
+        for record in known_recipients:
+            if _announcement_targets_user(
+                audience_stub,
+                record.get('email'),
+                role=record.get('role'),
+                group_ids=record.get('group_ids') or [],
+            ):
+                email = _normalize_email_address(record.get('email'))
+                if email and email not in seen:
+                    recipients.append(record)
+                    seen.add(email)
+    for raw_email in (cfg.get('direct_emails') or []):
+        email = _normalize_email_address(raw_email)
+        if not email or email in seen:
+            continue
+        recipients.append({
+            'email': email,
+            'display_name': email,
+            'role': 'Direct',
+            'group_ids': [],
+            'delivery_source': 'direct',
+        })
+        seen.add(email)
+    return {
+        'recipients': recipients,
+        'cc_emails': cfg.get('cc_emails') or [],
+        'bcc_emails': cfg.get('bcc_emails') or [],
+        'send_to_all': cfg.get('send_to_all') is True,
+        'target_roles': target_roles,
+        'target_group_ids': target_group_ids,
+    }
+
+
+def _notification_footer_note(settings=None):
+    cfg = _gmail_notification_settings(settings)
+    return str(cfg.get('footer_note') or '').strip() or NPAMX_NOTIFICATION_FOOTER_DEFAULT
+
+
+def _notification_body_paragraphs(body_text):
+    text = str(body_text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not text:
+        return []
+    blocks = [block.strip() for block in re.split(r'\n\s*\n', text) if block.strip()]
+    return blocks or [text]
+
+
+def _render_notification_email_content(settings, *, body_text):
+    cfg = _gmail_notification_settings(settings)
+    core_blocks = _notification_body_paragraphs(body_text)
+    footer_note = _notification_footer_note(settings)
+    footer_blocks = _notification_body_paragraphs(footer_note)
+    plain_parts = []
+    if core_blocks:
+        plain_parts.append('\n\n'.join(core_blocks))
+    if footer_blocks:
+        plain_parts.append('\n\n'.join(footer_blocks))
+    plain_parts.append('Nykaa Security & Access Operations')
+    plain_text = '\n\n'.join([part for part in plain_parts if str(part or '').strip()]).strip()
+    body_html = ''.join(
+        f'<p style="margin:0 0 16px; color:#1f2937; font-size:14px; line-height:1.7;">{html.escape(block).replace(chr(10), "<br>")}</p>'
+        for block in core_blocks
+    ) or '<p style="margin:0 0 16px; color:#1f2937; font-size:14px; line-height:1.7;">NPAMx notification</p>'
+    footer_html = ''.join(
+        f'<p style="margin:0 0 12px; color:#475569; font-size:12px; line-height:1.7;">{html.escape(block).replace(chr(10), "<br>")}</p>'
+        for block in footer_blocks
+    )
+    signature_logo_html = (
+        '<div style="display:inline-flex; align-items:center; justify-content:center; margin:0 0 12px; padding:12px 16px; background:#ffe4ef; border:1px solid #f8b4cf; border-radius:16px; max-width:100%;">'
+        f'<img src="{html.escape(NYKAA_EMAIL_LOGO_URL)}" alt="Nykaa" style="display:block; width:160px; max-width:100%; height:auto; object-fit:contain;">'
+        '</div>'
+    )
+    html_body = (
+        '<div style="background:#f8fafc; padding:24px 0; font-family:Inter, Arial, sans-serif;">'
+        '<div style="max-width:680px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:18px; overflow:hidden; box-shadow:0 20px 45px rgba(15,23,42,0.08);">'
+        '<div style="padding:24px 28px 16px; border-bottom:1px solid #eef2f7; background:linear-gradient(180deg, #fff7ed 0%, #ffffff 100%);">'
+        f'<div style="font-size:12px; letter-spacing:0.12em; text-transform:uppercase; color:#9a3412; font-weight:700;">{html.escape(cfg.get("sender_name") or "NPAMx")}</div>'
+        '<div style="font-size:24px; color:#0f172a; font-weight:700; margin-top:8px;">Notification</div>'
+        '</div>'
+        f'<div style="padding:28px;">{body_html}'
+        '<div style="margin-top:28px; padding-top:18px; border-top:1px solid #e2e8f0;">'
+        f'{footer_html}'
+        f'{signature_logo_html}'
+        '<div style="font-size:12px; color:#64748b; line-height:1.6;">Nykaa Security &amp; Access Operations</div>'
+        '</div></div></div></div>'
+    )
+    return {
+        'plain_text': plain_text,
+        'html_body': html_body,
+        'footer_note': footer_note,
+    }
+
+
+def _send_gmail_notification(settings, *, recipients, subject, body_text, cc_recipients=None, bcc_recipients=None):
+    recipient_list = _normalize_email_list(recipients or [])
+    cc_list = _normalize_email_list(cc_recipients or [])
+    bcc_list = _normalize_email_list(bcc_recipients or [])
+    if not recipient_list:
+        raise RuntimeError('At least one valid recipient email is required.')
+    access_token, cfg = _gmail_access_token(settings)
+    sender_email = str(cfg.get('sender_email') or '').strip()
+    if not sender_email:
+        raise RuntimeError('Gmail sender mailbox is not configured.')
+    message = EmailMessage()
+    message['To'] = ', '.join(recipient_list)
+    if cc_list:
+        message['Cc'] = ', '.join(cc_list)
+    message['From'] = formataddr((cfg.get('sender_name') or 'NPAMx', sender_email))
+    message['Subject'] = str(subject or 'NPAMx notification').strip() or 'NPAMx notification'
+    rendered = _render_notification_email_content(settings, body_text=body_text)
+    message.set_content(rendered.get('plain_text') or str(body_text or '').strip() or 'NPAMx notification')
+    message.add_alternative(rendered.get('html_body') or '<p>NPAMx notification</p>', subtype='html')
+    if bcc_list:
+        message['Bcc'] = ', '.join(bcc_list)
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+    req = urllib.request.Request(
+        url='https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+        data=json.dumps({'raw': raw_message}).encode('utf-8'),
+        headers={
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read().decode('utf-8')
+        payload = json.loads(raw or '{}') if raw else {}
+    return {
+        'id': str(payload.get('id') or '').strip(),
+        'thread_id': str(payload.get('threadId') or '').strip(),
+        'recipients': recipient_list,
+        'cc_recipients': cc_list,
+        'bcc_recipients': bcc_list,
+    }
+
+
+def _notification_rule_enabled(settings, *keys):
+    source = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    for key in keys:
+        if not _as_bool(source.get(key), False):
+            return False
+    return True
+
+
+def _database_request_email_lines(req):
+    request_obj = req if isinstance(req, dict) else {}
+    requester_name = str(request_obj.get('user_full_name') or '').strip() or 'Employee'
+    requester_email = _normalize_email_address(request_obj.get('user_email'))
+    requested_by_email = _normalize_email_address(request_obj.get('requested_by_email'))
+    scope_meta = _db_request_scope_meta(request_obj.get('engine'), str(request_obj.get('resource_kind') or '').strip().lower())
+    db_label = str(request_obj.get('requested_database_name') or '').strip() or 'N/A'
+    schema_name = str(request_obj.get('requested_schema_name') or '').strip() or 'N/A'
+    table_name = str(request_obj.get('requested_table_name') or '').strip() or 'N/A'
+    detail_name = str(request_obj.get('requested_column_name') or '').strip() or 'N/A'
+    access_type = str(request_obj.get('requested_access_type') or '').strip() or ', '.join(request_obj.get('permissions') or []) or 'N/A'
+    duration_hours = str(request_obj.get('duration_hours') or '').strip() or 'N/A'
+    lines = [
+        f"Employee name: {requester_name}",
+        f"Employee email: {requester_email or 'N/A'}",
+    ]
+    if requested_by_email and requested_by_email != requester_email:
+        lines.append(f"Raised by: {requested_by_email}")
+    lines.extend([
+        f"Request ID: {str(request_obj.get('id') or '').strip() or 'N/A'}",
+        f"AWS account: {str(request_obj.get('account_id') or '').strip() or 'N/A'}",
+        f"Environment: {str(request_obj.get('account_env') or '').strip() or 'N/A'}",
+        f"Database instance or cluster: {str(request_obj.get('requested_instance_input') or '').strip() or 'N/A'}",
+        f"Database: {db_label}",
+        *([f"{str(scope_meta.get('schema_label') or 'Schema').title()}: {schema_name}"] if scope_meta.get('schema_required') else []),
+        f"{str(scope_meta.get('object_label') or 'Table').title()}: {table_name}",
+        f"{str(scope_meta.get('detail_label') or 'Column').title()}: {detail_name}",
+        f"Access requested: {access_type}",
+        f"Access level: {str(request_obj.get('access_level') or '').strip() or 'N/A'}",
+        f"Duration: {duration_hours} hour(s)",
+        f"Workflow: {str(request_obj.get('approval_workflow_name') or '').strip() or 'N/A'}",
+        f"Submitted at: {str(request_obj.get('created_at') or '').strip() or 'N/A'}",
+    ])
+    db_owner_email = str(request_obj.get('db_owner_email') or '').strip()
+    if db_owner_email:
+        lines.append(f"DB owner approver: {db_owner_email}")
+    justification = str(request_obj.get('justification') or '').strip()
+    if justification:
+        lines.append(f"Business justification: {justification}")
+    return lines
+
+
+def _send_database_request_pending_email(req):
+    request_obj = req if isinstance(req, dict) else {}
+    settings = _load_app_settings()
+    if not _notification_rule_enabled(settings, 'notify_email_databases_access', 'notify_email_access_approval_reminders'):
+        return None
+    recipients = _pending_database_request_recipients(request_obj)
+    if not recipients:
+        return None
+    requester_name = str(request_obj.get('user_full_name') or '').strip() or 'An employee'
+    body_lines = [
+        'Hello,',
+        '',
+        f'{requester_name} has submitted a database access request in NPAMX and it is waiting for your approval.',
+        '',
+        *(_database_request_email_lines(request_obj)),
+        '',
+        'Next step: Open NPAMX and review the pending request under approvals.',
+    ]
+    return _send_gmail_notification(
+        settings,
+        recipients=recipients,
+        subject='NPAMx approval pending for database access request',
+        body_text='\n'.join(body_lines).strip(),
+    )
+
+
+def _send_database_access_ready_email(req):
+    request_obj = req if isinstance(req, dict) else {}
+    settings = _load_app_settings()
+    if not _notification_rule_enabled(settings, 'notify_email_databases_access', 'notify_email_access_ready_to_requestor'):
+        return None
+    recipient = _normalize_email_address(request_obj.get('user_email'))
+    if not recipient:
+        return None
+    requester_name = str(request_obj.get('user_full_name') or '').strip() or 'Hello'
+    body_lines = [
+        f'Hello {requester_name},',
+        '',
+        'Your NPAMX database access request has been approved and is now ready to use.',
+        '',
+        *(_database_request_email_lines(request_obj)),
+        '',
+        'Next step: Open NPAMX, go to My Requests, and use Get login details to fetch the latest credentials or connection instructions.',
+    ]
+    return _send_gmail_notification(
+        settings,
+        recipients=[recipient],
+        subject='NPAMx database access approved',
+        body_text='\n'.join(body_lines).strip(),
+    )
+
+
+def _request_email_notification_enabled(settings, req):
+    category = _request_category(req)
+    key_map = {
+        'databases': 'notify_email_databases_access',
+        'cloud': 'notify_email_cloud_access',
+        'storage': 'notify_email_storage_access',
+        'workloads': 'notify_email_workloads_access',
+    }
+    setting_key = key_map.get(category)
+    if not setting_key:
+        return True
+    src = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    return _as_bool(src.get(setting_key), True)
+
+
+def _send_request_denied_email(req):
+    request_obj = req if isinstance(req, dict) else {}
+    settings = _load_app_settings()
+    if not _request_email_notification_enabled(settings, request_obj):
+        return None
+    recipient = _normalize_email_address(request_obj.get('user_email'))
+    if not recipient:
+        return None
+    requester_name = str(request_obj.get('user_full_name') or '').strip() or 'there'
+    reason = str(
+        request_obj.get('denial_reason')
+        or request_obj.get('approval_note')
+        or 'Denied by approver'
+    ).strip() or 'Denied by approver'
+    denied_by = str(request_obj.get('denied_by') or '').strip() or 'Approver'
+    denied_at = str(request_obj.get('denied_at') or datetime.now().isoformat()).strip()
+    category = _request_category(request_obj)
+    category_label = category_label_for_api(category)
+    target = _request_display_target(request_obj)
+    body_lines = [
+        f"Hello {requester_name},",
+        '',
+        f'Your NPAMX {category_label.lower()} request has been rejected.',
+        '',
+        f"Request ID: {str(request_obj.get('id') or request_obj.get('request_id') or '').strip() or 'N/A'}",
+        f"Category: {category_label}",
+        f"Target: {target or 'N/A'}",
+        f"Rejected by: {denied_by}",
+        f"Rejected at: {denied_at}",
+        f"Reason: {reason}",
+    ]
+    if category == 'databases':
+        body_lines.extend(['', *(_database_request_email_lines(request_obj))])
+    body_lines.extend([
+        '',
+        'Next step: Open NPAMX to review details and submit a fresh request if needed.',
+    ])
+    return _send_gmail_notification(
+        settings,
+        recipients=[recipient],
+        subject=f'NPAMx {category_label.lower()} request rejected',
+        body_text='\n'.join(body_lines).strip(),
+    )
+
+
+def _send_feedback_to_admin_audience(entry, *, settings=None):
+    feedback = _normalize_feedback_entry(entry)
+    cfg = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    if not _notification_rule_enabled(cfg, 'notify_email_feedback_to_admins'):
+        return None
+    audience = _feedback_admin_recipient_records(cfg)
+    recipients = [_normalize_email_address(item.get('email')) for item in (audience.get('recipients') or [])]
+    recipients = [item for item in recipients if item]
+    if not recipients:
+        return None
+    feedback_type_label = {
+        'ui': 'UI Related',
+        'access_workflow': 'Access Workflow Related',
+        'application': 'Application Related',
+        'other': 'Other',
+    }.get(str(feedback.get('feedback_type') or '').strip(), str(feedback.get('feedback_type') or '').strip() or 'N/A')
+    category_label = {
+        'databases': 'Databases Access',
+        'cloud': 'Cloud Access',
+        'storage': 'Storage Access',
+        'workloads': 'Workloads Access',
+        'general': 'General',
+    }.get(str(feedback.get('category') or '').strip(), str(feedback.get('category') or '').strip() or 'General')
+    body_lines = [
+        'Hello,',
+        '',
+        'A new NPAMX feedback item has been submitted and needs admin review.',
+        '',
+        f"Employee name: {str(feedback.get('name') or '').strip() or 'N/A'}",
+        f"Employee email: {str(feedback.get('email') or '').strip() or 'N/A'}",
+        f"Feedback area: {category_label}",
+        f"Feedback type: {feedback_type_label}",
+        f"Submitted at: {str(feedback.get('submitted_at') or '').strip() or 'N/A'}",
+        f"Feedback ID: {str(feedback.get('id') or '').strip() or 'N/A'}",
+        '',
+        f"Details: {str(feedback.get('description') or '').strip() or 'N/A'}",
+        '',
+        'Next step: Open Admin > Feedback & Notifications and review the item.',
+    ]
+    return _send_gmail_notification(
+        cfg,
+        recipients=recipients,
+        subject='New NPAMx feedback requires review',
+        body_text='\n'.join(body_lines).strip(),
+        cc_recipients=audience.get('cc_emails') or [],
+        bcc_recipients=audience.get('bcc_emails') or [],
+    )
+
+
+def _send_feedback_update_to_user(entry, *, settings=None):
+    feedback = _normalize_feedback_entry(entry)
+    cfg = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    if not _notification_rule_enabled(cfg, 'notify_email_feedback_updates_to_users'):
+        return None
+    recipient = _normalize_email_address(feedback.get('email'))
+    if not recipient:
+        return None
+    body_lines = [
+        f"Hello {str(feedback.get('name') or '').strip() or 'there'},",
+        '',
+        'Your NPAMX feedback request has a new update from the admin team.',
+        '',
+        f"Feedback ID: {str(feedback.get('id') or '').strip() or 'N/A'}",
+        f"Current status: {str(feedback.get('status') or '').strip() or 'N/A'}",
+        f"Submitted at: {str(feedback.get('submitted_at') or '').strip() or 'N/A'}",
+    ]
+    admin_reply = str(feedback.get('admin_reply') or '').strip()
+    if admin_reply:
+        body_lines.extend([
+            '',
+            'Admin reply:',
+            admin_reply,
+        ])
+    body_lines.extend([
+        '',
+        'Next step: Open NPAMX and review the latest feedback update in the feedback section.',
+    ])
+    return _send_gmail_notification(
+        cfg,
+        recipients=[recipient],
+        subject='Your NPAMx feedback has an update',
+        body_text='\n'.join(body_lines).strip(),
+    )
+
+
+def _db_user_audit_admin_recipients():
+    recipients = []
+    seen = set()
+    for record in _notification_known_recipients():
+        email = _normalize_email_address(record.get('email'))
+        role = _normalize_pam_role(record.get('role') or '')
+        if email and role in ('Admin', 'SuperAdmin') and email not in seen:
+            recipients.append(record)
+            seen.add(email)
+    return recipients
+
+
+def _send_db_user_inventory_red_flag_email(payload, *, settings=None):
+    src = payload if isinstance(payload, dict) else {}
+    summary = src.get('summary') if isinstance(src.get('summary'), dict) else {}
+    flagged_count = int(summary.get('manual_or_unknown_users') or 0)
+    if flagged_count <= 0:
+        return None
+    cfg = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    if not _as_bool(cfg.get('db_user_audit_notify_on_red_flag'), True):
+        return None
+    recipients = [_normalize_email_address(item.get('email')) for item in _db_user_audit_admin_recipients()]
+    recipients = [item for item in recipients if item]
+    if not recipients:
+        return None
+    rows = [item for item in (src.get('rows') or []) if isinstance(item, dict) and str(item.get('origin_hint') or '').strip() == 'manual_or_unknown']
+    body_lines = [
+        'Hello Admin Team,',
+        '',
+        'NPAMX detected database users that do not match the expected Vault naming pattern during the latest DB user inventory scan.',
+        '',
+        f"Plane: {str(src.get('plane') or 'nonprod').strip() or 'nonprod'}",
+        f"Processed connections: {int(summary.get('processed_connections') or 0)}",
+        f"Flagged users: {flagged_count}",
+        '',
+        'Flagged users:',
+    ]
+    for item in rows[:20]:
+        body_lines.append(
+            f"- {str(item.get('username') or '').strip() or 'unknown'} on {str(item.get('connection_name') or '').strip() or 'connection'}"
+            f" ({str(item.get('host') or '').strip() or 'host'}:{str(item.get('port') or '').strip() or 'port'})"
+        )
+    if len(rows) > 20:
+        body_lines.append(f"- ...and {len(rows) - 20} more flagged user(s)")
+    body_lines.extend([
+        '',
+        'Next step: Open Admin > Security > DB Users in NPAMX and review the flagged entries with DevOps and DB owners.',
+    ])
+    return _send_gmail_notification(
+        cfg,
+        recipients=recipients,
+        subject='NPAMx DB user inventory found red flags',
+        body_text='\n'.join(body_lines).strip(),
+    )
+
+
+def _persist_db_user_audit_run(payload, *, trigger='manual', tested_by=''):
+    src = payload if isinstance(payload, dict) else {}
+    state = _load_db_user_audit_state()
+    summary = src.get('summary') if isinstance(src.get('summary'), dict) else {}
+    plane = str(src.get('plane') or 'nonprod').strip() or 'nonprod'
+    state['last_run'] = {
+        'trigger': str(trigger or 'manual').strip() or 'manual',
+        'tested_by': str(tested_by or '').strip(),
+        'tested_at': datetime.now(timezone.utc).isoformat(),
+        'plane': plane,
+        'selected_connections': int(summary.get('selected_connections') or 0),
+        'processed_connections': int(summary.get('processed_connections') or 0),
+        'supported_connections': int(summary.get('supported_connections') or 0),
+        'unsupported_connections': int(summary.get('unsupported_connections') or 0),
+        'error_connections': int(summary.get('error_connections') or 0),
+        'total_users': int(summary.get('total_users') or 0),
+        'manual_or_unknown_users': int(summary.get('manual_or_unknown_users') or 0),
+    }
+    state['latest_summary'] = summary
+    state['latest_rows'] = [item for item in (src.get('rows') or []) if isinstance(item, dict)]
+    _save_db_user_audit_state(state)
+    return state
+
+
+def _db_user_audit_state_payload():
+    state = _load_db_user_audit_state()
+    return {
+        'last_run': state.get('last_run') if isinstance(state.get('last_run'), dict) else {},
+        'latest_summary': state.get('latest_summary') if isinstance(state.get('latest_summary'), dict) else {},
+        'latest_rows': [item for item in (state.get('latest_rows') or []) if isinstance(item, dict)],
+    }
+
+
+def _db_user_audit_schedule_due(settings=None, *, now_utc=None):
+    cfg = _normalize_app_settings(settings if isinstance(settings, dict) else _load_app_settings())
+    if not _as_bool(cfg.get('db_user_audit_schedule_enabled'), False):
+        return False
+    now = now_utc if isinstance(now_utc, datetime) else datetime.now(timezone.utc)
+    ist_now = now.astimezone(ZoneInfo('Asia/Kolkata'))
+    weekday_map = {'Mon': 0, 'Tue': 1, 'Wed': 2, 'Thu': 3, 'Fri': 4, 'Sat': 5, 'Sun': 6}
+    target_weekday = weekday_map.get(str(cfg.get('db_user_audit_schedule_weekday') or 'Sun').strip().title(), 6)
+    if ist_now.weekday() != target_weekday:
+        return False
+    time_str = str(cfg.get('db_user_audit_schedule_time_ist') or '09:00').strip()
+    hour = 9
+    minute = 0
+    if re.match(r'^\d{2}:\d{2}$', time_str):
+        hour = int(time_str[:2])
+        minute = int(time_str[3:5])
+    scheduled_local = ist_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if ist_now < scheduled_local:
+        return False
+    last_run = _db_user_audit_state_payload().get('last_run') or {}
+    last_run_at = str(last_run.get('tested_at') or '').strip()
+    if last_run_at:
+        try:
+            last_dt = datetime.fromisoformat(last_run_at.replace('Z', '+00:00'))
+            last_local = last_dt.astimezone(ZoneInfo('Asia/Kolkata'))
+            if last_local.date() == ist_now.date() and str(last_run.get('trigger') or '').strip() == 'scheduled':
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def _run_scheduled_db_user_audit():
+    settings = _load_app_settings()
+    audit_plane = _normalize_vault_plane(
+        os.getenv('DB_USER_AUDIT_PLANE') or settings.get('db_user_audit_plane') or 'nonprod',
+        'nonprod',
+    )
+    payload = _build_vault_db_user_inventory_payload({'plane': audit_plane}, tested_by='system:db-user-audit')
+    _persist_db_user_audit_run(payload, trigger='scheduled', tested_by='system:db-user-audit')
+    try:
+        _send_db_user_inventory_red_flag_email(payload, settings=settings)
+    except Exception:
+        app.logger.exception('Failed to send scheduled DB user inventory red-flag email')
+    return payload
+
+
+@app.route('/api/admin/feedback/notification-playground/preview', methods=['POST'])
+def preview_admin_notification_playground():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        data = request.get_json(silent=True) or {}
+        preview = _build_notification_playground_preview(
+            data,
+            actor_email=ident.get('email') or ident.get('nameid') or '',
+        )
+        rendered = _render_notification_email_content(_load_app_settings(), body_text=preview.get('body_text'))
+        preview['rendered_body_text'] = rendered.get('plain_text') or preview.get('body_text')
+        preview['footer_note'] = rendered.get('footer_note') or ''
+        return jsonify({
+            'status': 'success',
+            'preview': preview,
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/feedback/notification-playground/test-send', methods=['POST'])
+def send_admin_notification_playground_test():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        data = request.get_json(silent=True) or {}
+        preview = _build_notification_playground_preview(
+            data,
+            actor_email=ident.get('email') or ident.get('nameid') or '',
+        )
+        rendered = _render_notification_email_content(_load_app_settings(), body_text=preview.get('body_text'))
+        preview['rendered_body_text'] = rendered.get('plain_text') or preview.get('body_text')
+        preview['footer_note'] = rendered.get('footer_note') or ''
+        target_email = _normalize_email_address(data.get('target_email'))
+        if not target_email:
+            return jsonify({'error': 'A valid test recipient email is required'}), 400
+        sent = _send_gmail_notification(
+            _load_app_settings(),
+            recipients=[target_email],
+            subject=preview.get('subject'),
+            body_text=preview.get('body_text'),
+        )
+        return jsonify({
+            'status': 'success',
+            'preview': preview,
+            'sent_to': sent.get('recipients') or [target_email],
+            'message_id': sent.get('id') or '',
+            'tested_at': datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/announcements/preview-send', methods=['POST'])
+def preview_admin_announcement_send():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        data = request.get_json(silent=True) or {}
+        preview = _build_announcement_email_preview(data)
+        rendered = _render_notification_email_content(_load_app_settings(), body_text=preview.get('body_text'))
+        preview['rendered_body_text'] = rendered.get('plain_text') or preview.get('body_text')
+        preview['footer_note'] = rendered.get('footer_note') or ''
+        recipients = _announcement_recipient_records(data)
+        return jsonify({
+            'status': 'success',
+            'preview': preview,
+            'recipient_count': len(recipients),
+            'recipients': recipients[:25],
+            'cc_recipients': preview.get('cc_emails') or [],
+            'bcc_recipients': preview.get('bcc_emails') or [],
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/announcements/send', methods=['POST'])
+def send_admin_announcement_email():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        data = request.get_json(silent=True) or {}
+        preview = _build_announcement_email_preview(data)
+        rendered = _render_notification_email_content(_load_app_settings(), body_text=preview.get('body_text'))
+        preview['rendered_body_text'] = rendered.get('plain_text') or preview.get('body_text')
+        preview['footer_note'] = rendered.get('footer_note') or ''
+        recipients = _announcement_recipient_records(data)
+        if not recipients:
+            return jsonify({'error': 'No recipients matched the selected roles and groups.'}), 400
+        sent = _send_gmail_notification(
+            _load_app_settings(),
+            recipients=[item.get('email') for item in recipients],
+            subject=preview.get('subject'),
+            body_text=preview.get('body_text'),
+            cc_recipients=preview.get('cc_emails') or [],
+            bcc_recipients=preview.get('bcc_emails') or [],
+        )
+        return jsonify({
+            'status': 'success',
+            'preview': preview,
+            'recipient_count': len(recipients),
+            'sent_to': sent.get('recipients') or [],
+            'cc_sent_to': sent.get('cc_recipients') or [],
+            'bcc_sent_to': sent.get('bcc_recipients') or [],
+            'message_id': sent.get('id') or '',
+            'sent_at': datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/gmail/test', methods=['POST'])
+def test_admin_gmail_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        current = _load_app_settings()
+        incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        settings = dict(current)
+        if isinstance(incoming, dict):
+            settings.update(incoming)
+        for key in ('gmail_client_secret_name', 'gmail_refresh_token_secret_name'):
+            if str(settings.get(key) or '').strip() == MASKED_SETTING_SENTINEL:
+                settings[key] = str(current.get(key) or '').strip()
+        payload = _build_gmail_integration_test_payload(
+            settings,
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/integrations/jumpcloud/test', methods=['POST'])
+def test_admin_jumpcloud_integration():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        current = _load_app_settings()
+        incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+        settings = dict(current)
+        if isinstance(incoming, dict):
+            settings.update(incoming)
+        for key in ('jumpcloud_api_key_secret_name', 'jumpcloud_directory_id'):
+            if str(settings.get(key) or '').strip() == MASKED_SETTING_SENTINEL:
+                settings[key] = str(current.get(key) or '').strip()
+        payload = _build_jumpcloud_integration_test_payload(
+            settings,
+            tested_by=ident.get('email') or ident.get('nameid') or '',
+        )
+        payload['tested_at'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload)
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+def _db_governance_forward_params():
+    forwarded = {}
+    for key in request.args.keys():
+        values = request.args.getlist(key)
+        if not values:
+            continue
+        forwarded[key] = values if len(values) > 1 else values[0]
+    return forwarded
+
+
+def _db_governance_error_response(exc):
+    if isinstance(exc, ValueError):
+        return jsonify({'error': str(exc or 'DB Governance API is not configured.').strip() or 'DB Governance API is not configured.'}), 503
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            raw = exc.read().decode('utf-8', errors='replace')
+            data = json.loads(raw or '{}')
+        except Exception:
+            data = {}
+        message = str((data or {}).get('error') or '').strip() or f'DB Governance API request failed ({int(exc.code or 502)}).'
+        return jsonify({'error': message}), int(exc.code or 502)
+    if isinstance(exc, urllib.error.URLError):
+        return jsonify({'error': 'DB Governance API is unavailable.'}), 502
+    return _safe_error_response(exc)
+
+
+@app.route('/api/admin/db-governance/summary', methods=['GET'])
+def get_admin_db_governance_summary():
+    try:
+        payload = _db_governance_request_json('/summary', settings=_load_app_settings(), params=_db_governance_forward_params())
+        return jsonify({
+            'status': _db_governance_response_status(payload),
+            'summary': _db_governance_normalize_summary(payload),
+            'source_status': _db_governance_text(payload.get('status') if isinstance(payload, dict) else ''),
+        })
+    except Exception as exc:
+        return _db_governance_error_response(exc)
+
+
+@app.route('/api/admin/db-governance/accounts', methods=['GET'])
+def get_admin_db_governance_accounts():
+    try:
+        payload = _db_governance_request_json('/accounts', settings=_load_app_settings(), params=_db_governance_forward_params())
+        rows = [_db_governance_normalize_account(item) for item in _db_governance_items(payload, 'accounts', 'items', 'results', 'data')]
+        return jsonify({
+            'status': _db_governance_response_status(payload),
+            'accounts': rows,
+            'count': len(rows),
+        })
+    except Exception as exc:
+        return _db_governance_error_response(exc)
+
+
+@app.route('/api/admin/db-governance/databases', methods=['GET'])
+def get_admin_db_governance_databases():
+    try:
+        payload = _db_governance_request_json('/databases', settings=_load_app_settings(), params=_db_governance_forward_params())
+        rows = [_db_governance_normalize_database(item) for item in _db_governance_items(payload, 'databases', 'items', 'results', 'data')]
+        return jsonify({
+            'status': _db_governance_response_status(payload),
+            'databases': rows,
+            'count': len(rows),
+        })
+    except Exception as exc:
+        return _db_governance_error_response(exc)
+
+
+@app.route('/api/admin/db-governance/findings', methods=['GET'])
+def get_admin_db_governance_findings():
+    try:
+        payload = _db_governance_request_json('/findings', settings=_load_app_settings(), params=_db_governance_forward_params())
+        rows = [_db_governance_normalize_finding(item) for item in _db_governance_items(payload, 'findings', 'items', 'results', 'data')]
+        return jsonify({
+            'status': _db_governance_response_status(payload),
+            'findings': rows,
+            'count': len(rows),
+        })
+    except Exception as exc:
+        return _db_governance_error_response(exc)
+
+
+@app.route('/api/admin/db-governance/scan-status', methods=['GET'])
+def get_admin_db_governance_scan_status():
+    try:
+        payload = _db_governance_request_json('/scan-status', settings=_load_app_settings(), params=_db_governance_forward_params())
+        return jsonify({
+            'status': _db_governance_response_status(payload),
+            'scan_status': _db_governance_normalize_scan_status(payload),
+        })
+    except Exception as exc:
+        return _db_governance_error_response(exc)
+
+
+@app.route('/api/admin/approval-workflows', methods=['GET'])
+def get_admin_approval_workflows():
+    try:
+        workflows = load_approval_workflows()
+        return jsonify({'status': 'success', 'workflows': workflows})
+    except Exception as e:
+        return _safe_error_response(e, extra_payload={'workflows': []})
+
+
+@app.route('/api/admin/approval-workflows', methods=['POST'])
+def upsert_admin_approval_workflow():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        payload = request.get_json(silent=True) or {}
+        workflow = save_approval_workflow(payload, actor_email=ident.get('email') or '')
+        return jsonify({'status': 'success', 'workflow': workflow})
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/approval-workflow-default-approvers', methods=['GET', 'POST'])
+def manage_admin_approval_workflow_default_approvers():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        if request.method == 'GET':
+            return jsonify({
+                'status': 'success',
+                'approver_contacts': load_approval_workflow_default_approvers(),
+            })
+        payload = request.get_json(silent=True) or {}
+        return jsonify({
+            'status': 'success',
+            'approver_contacts': save_approval_workflow_default_approvers(payload),
+            'updated_by': ident.get('email') or ident.get('nameid') or '',
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/approval-workflows/<workflow_id>', methods=['DELETE'])
+def remove_admin_approval_workflow(workflow_id):
+    try:
+        _ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        deleted = delete_approval_workflow(workflow_id)
+        if not deleted:
+            return jsonify({'error': 'Workflow not found'}), 404
+        return jsonify({'status': 'success', 'workflow_id': workflow_id})
+    except Exception as e:
+        return _safe_error_response(e)
 
 
 @app.route('/api/admin/break-glass/status', methods=['GET'])
@@ -6005,6 +17205,7 @@ def get_break_glass_status():
         admins = _load_pam_admins()
         super_admins = [a for a in admins if _is_super_admin_role(a.get('role'))]
         seed_email = _break_glass_seed_email()
+        pending_user = get_pending_bootstrap_user() if get_pending_bootstrap_user else None
         secret_arn = str(
             os.getenv('BREAK_GLASS_SECRET_ARN')
             or os.getenv('PAM_BREAK_GLASS_SECRET_ARN')
@@ -6015,10 +17216,12 @@ def get_break_glass_status():
             'super_admin_count': len(super_admins),
             'super_admins': [a.get('email') for a in super_admins],
             'break_glass_seed_email': seed_email,
-            'break_glass_secret_configured': bool(secret_arn)
+            'break_glass_secret_configured': bool(secret_arn),
+            'break_glass_bootstrap_required': bool(is_break_glass_bootstrap_required()) if is_break_glass_bootstrap_required else False,
+            'pending_break_glass_email': (pending_user or {}).get('email', '')
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/push-to-identity-center', methods=['POST'])
 def push_to_identity_center():
@@ -6034,7 +17237,7 @@ def push_to_identity_center():
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/delete-permissions-config', methods=['GET'])
 def get_delete_permissions_config():
@@ -6047,7 +17250,7 @@ def get_delete_permissions_config():
             'contactEmails': config.get('contact_emails', {})
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/delete-permissions-policy', methods=['POST'])
 def update_delete_permissions_policy():
@@ -6070,7 +17273,7 @@ def update_delete_permissions_policy():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/create-permissions-policy', methods=['POST'])
 def update_create_permissions_policy():
@@ -6093,7 +17296,7 @@ def update_create_permissions_policy():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/admin-permissions-policy', methods=['POST'])
 def update_admin_permissions_policy():
@@ -6117,7 +17320,7 @@ def update_admin_permissions_policy():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/policy-settings', methods=['GET'])
 def get_policy_settings():
@@ -6134,7 +17337,7 @@ def get_policy_settings():
             'allowAdminSandbox': config.get('allow_admin_sandbox', True)
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/contact-emails', methods=['POST'])
 def update_contact_emails():
@@ -6159,7 +17362,7 @@ def update_contact_emails():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/ai/mode', methods=['GET'])
 def get_ai_mode():
@@ -6171,13 +17374,13 @@ def get_ai_mode():
             'description': 'AWS Bedrock AI' if mode == 'bedrock' else 'Keyword-based matching'
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/help-assistant', methods=['POST'])
 def help_assistant():
     """Global help assistant for users"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         conversation_id = data.get('conversation_id')
         user_message = data.get('user_message')
         
@@ -6192,7 +17395,7 @@ def help_assistant():
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/scp/troubleshoot', methods=['POST'])
 def scp_troubleshoot():
@@ -6213,17 +17416,19 @@ def scp_troubleshoot():
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/unified-assistant', methods=['POST'])
 def unified_assistant():
     """Unified AI Assistant - Handles both help and policy building"""
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
         conversation_id = data.get('conversation_id')
         user_message = data.get('user_message')
-        user_email = data.get('user_email', 'user@example.com')
+        user_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
         selected_option = data.get('selected_option')  # For interactive selections
+        if not user_email:
+            return jsonify({'error': 'Authentication required'}), 401
         
         # Validate input - either user_message or selected_option must be provided
         if not user_message and not selected_option:
@@ -6414,7 +17619,7 @@ def unified_assistant():
         print(f"❌ Unified Assistant error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/resources/<provider>/<region>/<service>', methods=['GET'])
 def get_resources_by_provider(provider, region, service):
@@ -6434,7 +17639,7 @@ def get_resources_by_provider(provider, region, service):
         })
     except Exception as e:
         print(f"⚠️ Error getting resources: {e}")
-        return jsonify({'error': str(e), 'resources': []}), 500
+        return _safe_error_response(e, extra_payload={'resources': []})
 
 def get_resources_for_service(account_id, region, service):
     """Get resources for a service using AWS Resource Manager API"""
@@ -6447,7 +17652,7 @@ def get_resources_for_service(account_id, region, service):
         if service == 's3':
             # List S3 buckets
             try:
-                s3 = boto3.client('s3', region_name=region)
+                s3 = _resource_client('s3', region_name=region, account_id=account_id)
                 response = s3.list_buckets()
                 for bucket in response.get('Buckets', []):
                     resources.append({
@@ -6461,7 +17666,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'ec2':
             # List EC2 instances
             try:
-                ec2 = boto3.client('ec2', region_name=region)
+                ec2 = _resource_client('ec2', region_name=region, account_id=account_id)
                 response = ec2.describe_instances()
                 for reservation in response.get('Reservations', []):
                     for instance in reservation.get('Instances', []):
@@ -6482,7 +17687,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'lambda':
             # List Lambda functions
             try:
-                lambda_client = boto3.client('lambda', region_name=region)
+                lambda_client = _resource_client('lambda', region_name=region, account_id=account_id)
                 response = lambda_client.list_functions()
                 for func in response.get('Functions', []):
                     resources.append({
@@ -6496,7 +17701,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'rds':
             # List RDS instances
             try:
-                rds = boto3.client('rds', region_name=region)
+                rds = _resource_client('rds', region_name=region, account_id=account_id)
                 response = rds.describe_db_instances()
                 for db in response.get('DBInstances', []):
                     resources.append({
@@ -6510,7 +17715,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'dynamodb':
             # List DynamoDB tables
             try:
-                dynamodb = boto3.client('dynamodb', region_name=region)
+                dynamodb = _resource_client('dynamodb', region_name=region, account_id=account_id)
                 response = dynamodb.list_tables()
                 for table_name in response.get('TableNames', []):
                     table_info = dynamodb.describe_table(TableName=table_name)
@@ -6525,7 +17730,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'kms':
             # List KMS keys
             try:
-                kms = boto3.client('kms', region_name=region)
+                kms = _resource_client('kms', region_name=region, account_id=account_id)
                 response = kms.list_keys()
                 for key in response.get('Keys', []):
                     key_info = kms.describe_key(KeyId=key['KeyId'])
@@ -6540,7 +17745,7 @@ def get_resources_for_service(account_id, region, service):
         elif service == 'secretsmanager':
             # List Secrets Manager secrets
             try:
-                secrets = boto3.client('secretsmanager', region_name=region)
+                secrets = _resource_client('secretsmanager', region_name=region, account_id=account_id)
                 response = secrets.list_secrets()
                 for secret in response.get('SecretList', []):
                     resources.append({
@@ -6597,7 +17802,7 @@ def unified_assistant_generate():
         
     except Exception as e:
         print(f"❌ Generate error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/generate-guardrails', methods=['POST'])
 def generate_guardrails():
@@ -6625,7 +17830,7 @@ def generate_guardrails():
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/access-rules', methods=['GET'])
 def get_access_rules():
@@ -6633,7 +17838,7 @@ def get_access_rules():
     try:
         return jsonify(AccessRules.get_rules())
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/access-rules/<rule_id>', methods=['GET'])
 def get_access_rule(rule_id):
@@ -6644,7 +17849,7 @@ def get_access_rule(rule_id):
             return jsonify(rule)
         return jsonify({'error': 'Rule not found'}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/access-rules/<rule_id>', methods=['DELETE'])
 def delete_access_rule(rule_id):
@@ -6653,75 +17858,75 @@ def delete_access_rule(rule_id):
         result = AccessRules.delete_rule(rule_id)
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/groups', methods=['GET', 'POST'])
 def manage_user_groups():
     """Get all user groups or create new group"""
     try:
-        groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
-        
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
         if request.method == 'GET':
-            with open(groups_path, 'r') as f:
-                return jsonify(json.load(f))
-        
+            search = str(request.args.get('q') or request.args.get('search') or '').strip().lower()
+            groups = [_group_with_member_details(item) for item in (_load_local_user_groups().get('groups') or [])]
+            if search:
+                groups = [
+                    item for item in groups
+                    if search in str(item.get('name') or '').lower()
+                    or search in str(item.get('description') or '').lower()
+                    or any(search in str(member.get('email') or '').lower() or search in str(member.get('display_name') or '').lower() for member in (item.get('members_detail') or []))
+                ]
+            return jsonify({'groups': groups})
+
         elif request.method == 'POST':
-            data = request.get_json()
-            group_name = data.get('name')
-            
+            if not _is_admin_role(actor_role):
+                return jsonify({'error': 'Admin role required for this action'}), 403
+            data = request.get_json(silent=True) or {}
+            group_name = str(data.get('name') or '').strip()
             if not group_name:
                 return jsonify({'error': 'Group name is required'}), 400
-            
-            # Load existing groups
-            with open(groups_path, 'r') as f:
-                groups_data = json.load(f)
-            
-            # Create group ID from name
-            group_id = group_name.lower().replace(' ', '_')
-            
-            # Check if group already exists
-            if any(g['id'] == group_id for g in groups_data['groups']):
+
+            groups_data = _load_local_user_groups()
+            normalized_groups = [_normalize_local_group_record(item) for item in (groups_data.get('groups') or [])]
+            group_id = _group_id_from_name(data.get('id') or group_name)
+            if any(item.get('id') == group_id for item in normalized_groups):
                 return jsonify({'error': 'Group already exists'}), 400
-            
-            # Add new group
-            new_group = {
+
+            requested_role = _normalize_pam_role(data.get('role') or 'Employee')
+            allowed, error = _can_manage_group_definition(
+                actor_role,
+                group_id=group_id,
+                requested_role=requested_role,
+                mutation='create',
+            )
+            if not allowed:
+                return jsonify({'error': error}), 403
+
+            new_group = _normalize_local_group_record({
                 'id': group_id,
                 'name': group_name,
                 'description': data.get('description', ''),
-                'members': []
-            }
-            
-            groups_data['groups'].append(new_group)
-            
-            # Save
-            with open(groups_path, 'w') as f:
-                json.dump(groups_data, f, indent=2)
-            
-            print(f"✅ Group created: {group_name} ({group_id})")
-            
+                'role': requested_role,
+                'members': data.get('members') or [],
+                'iam_role_ids': data.get('iam_role_ids') or [],
+            })
+            normalized_groups.append(new_group)
+            groups_data['groups'] = normalized_groups
+            _save_local_user_groups(groups_data)
             return jsonify({
                 'status': 'success',
                 'message': f'Group {group_name} created successfully',
-                'group': new_group
+                'group': _group_with_member_details(new_group)
             })
-    
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/org-users', methods=['GET', 'POST'])
 def manage_org_users():
     """Get all organization users or create new user"""
     try:
-        users_path = os.path.join(os.path.dirname(__file__), 'org_users.json')
-        
-        # Create file if doesn't exist
-        if not os.path.exists(users_path):
-            with open(users_path, 'w') as f:
-                json.dump({'users': []}, f)
-        
         if request.method == 'GET':
-            with open(users_path, 'r') as f:
-                return jsonify(json.load(f))
+            return jsonify(_load_local_org_users())
         
         elif request.method == 'POST':
             data = request.get_json()
@@ -6732,8 +17937,7 @@ def manage_org_users():
                     return jsonify({'error': f'{field} is required'}), 400
             
             # Load existing users
-            with open(users_path, 'r') as f:
-                users_data = json.load(f)
+            users_data = _load_local_org_users()
             
             # Check if user already exists
             if any(u['email'] == data['email'] for u in users_data['users']):
@@ -6750,21 +17954,17 @@ def manage_org_users():
             users_data['users'].append(new_user)
             
             # Save
-            with open(users_path, 'w') as f:
-                json.dump(users_data, f, indent=2)
+            _save_local_org_users(users_data)
             
             # Add user to group members
-            groups_path = os.path.join(os.path.dirname(__file__), 'user_groups.json')
-            with open(groups_path, 'r') as f:
-                groups_data = json.load(f)
+            groups_data = _load_local_user_groups()
             
             for group in groups_data['groups']:
                 if group['id'] == data['group_id']:
                     if data['email'] not in group['members']:
                         group['members'].append(data['email'])
             
-            with open(groups_path, 'w') as f:
-                json.dump(groups_data, f, indent=2)
+            _save_local_user_groups(groups_data)
             
             user_name = data.get('name', '')
             print(f"✅ User created: {user_name} ({data.get('email')}) in group {data.get('group_id')}")
@@ -6776,7 +17976,678 @@ def manage_org_users():
             })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/groups/<group_id>', methods=['PUT', 'DELETE'])
+def update_or_delete_group(group_id):
+    try:
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        if not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        gid = _group_id_from_name(group_id)
+        groups_data = _load_local_user_groups()
+        groups = [_normalize_local_group_record(item) for item in (groups_data.get('groups') or [])]
+        idx = next((i for i, item in enumerate(groups) if item.get('id') == gid), None)
+        if idx is None:
+            return jsonify({'error': 'Group not found'}), 404
+        existing = groups[idx]
+        if request.method == 'DELETE':
+            allowed, error = _can_manage_group_definition(
+                actor_role,
+                group_id=gid,
+                existing_role=existing.get('role'),
+                mutation='delete',
+            )
+            if not allowed:
+                return jsonify({'error': error}), 403
+            groups.pop(idx)
+            groups_data['groups'] = groups
+            _save_local_user_groups(groups_data)
+            return jsonify({'status': 'success'})
+        data = request.get_json(silent=True) or {}
+        requested_role = _normalize_pam_role(data.get('role') or existing.get('role') or 'Employee')
+        allowed, error = _can_manage_group_definition(
+            actor_role,
+            group_id=gid,
+            existing_role=existing.get('role'),
+            requested_role=requested_role,
+            mutation='update',
+        )
+        if not allowed:
+            return jsonify({'error': error}), 403
+        groups[idx] = _normalize_local_group_record({
+            **groups[idx],
+            **data,
+            'id': gid,
+            'role': requested_role,
+        })
+        groups_data['groups'] = groups
+        _save_local_user_groups(groups_data)
+        return jsonify({'status': 'success', 'group': _group_with_member_details(groups[idx])})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/groups/<group_id>/members', methods=['POST', 'DELETE'])
+def manage_group_members(group_id):
+    try:
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        if not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        gid = _group_id_from_name(group_id)
+        data = request.get_json(silent=True) or {}
+        raw_emails = data.get('emails')
+        if isinstance(raw_emails, str):
+            raw_emails = [raw_emails]
+        if not isinstance(raw_emails, list):
+            raw_emails = []
+        emails = []
+        for value in raw_emails:
+            email = _normalize_email_address(value)
+            if email and email not in emails:
+                emails.append(email)
+        if not emails:
+            return jsonify({'error': 'At least one user email is required'}), 400
+        groups_data = _load_local_user_groups()
+        groups = [_normalize_local_group_record(item) for item in (groups_data.get('groups') or [])]
+        idx = next((i for i, item in enumerate(groups) if item.get('id') == gid), None)
+        if idx is None:
+            return jsonify({'error': 'Group not found'}), 404
+        group = dict(groups[idx])
+        allowed, error = _can_manage_group_definition(
+            actor_role,
+            group_id=gid,
+            existing_role=group.get('role'),
+            mutation='members',
+        )
+        if not allowed:
+            return jsonify({'error': error}), 403
+        current_members = list(group.get('members') or [])
+        if request.method == 'DELETE':
+            current_members = [value for value in current_members if value not in emails]
+        else:
+            for email in emails:
+                if email not in current_members:
+                    current_members.append(email)
+        group['members'] = current_members
+        groups[idx] = _normalize_local_group_record(group)
+        groups_data['groups'] = groups
+        _save_local_user_groups(groups_data)
+        return jsonify({'status': 'success', 'group': _group_with_member_details(groups[idx])})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/profile', methods=['PUT'])
+def update_profile():
+    ident = _current_request_identity()
+    email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'error': 'Authentication required'}), 401
+    existing_profile = _find_user_business_profile(email)
+    data = request.get_json(silent=True) or {}
+    supplied_email = _normalize_email_address(data.get('email'))
+    if supplied_email and supplied_email != email:
+        return jsonify({'error': 'Email address is managed by your login identity and cannot be changed here.'}), 400
+    profile = {
+        'email': email,
+        'display_name': data.get('display_name') or '',
+        'manager_email': data.get('manager_email'),
+        'manager_display_name': data.get('manager_display_name') or '',
+        'manager_manager_email': data.get('manager_manager_email'),
+        'manager_manager_display_name': data.get('manager_manager_display_name') or '',
+        'team': data.get('team'),
+        'location': data.get('location'),
+        'frequent_environments': data.get('frequent_environments') or [],
+        'job_title': (existing_profile or {}).get('job_title') or '',
+        'directory_profile_source': (existing_profile or {}).get('directory_profile_source') or '',
+        'directory_profile_refreshed_at': (existing_profile or {}).get('directory_profile_refreshed_at') or '',
+    }
+    normalized_profile = _normalize_user_business_profile(profile)
+    missing = _business_profile_required_fields(normalized_profile)
+    if missing:
+        return jsonify({'error': 'Please complete all required profile fields.', 'missing_fields': missing}), 400
+    saved = _save_user_business_profile_for_actor(
+        target_email=email,
+        updates=normalized_profile,
+        actor_email=email,
+        actor_is_admin=False,
+    )
+    return jsonify({
+        'ok': True,
+        'business_profile': saved,
+        'business_profile_required': False,
+        'business_profile_complete': True,
+        'missing_fields': [],
+    })
+
+
+@app.route('/api/admin/users/<path:user_email>/profile', methods=['GET', 'PUT'])
+def admin_user_profile(user_email):
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record or not _is_admin_role((admin_record or {}).get('role') or ''):
+            return jsonify({'error': 'Admin role required'}), 403
+        target_email = _normalize_email_address(user_email)
+        if not target_email:
+            return jsonify({'error': 'Valid user email is required'}), 400
+        if request.method == 'GET':
+            profile = dict(_find_user_business_profile(target_email) or {})
+            profile['email'] = target_email
+            profile['rm_change_limit'] = 2
+            profile['rm_changes_remaining'] = max(0, 2 - _safe_non_negative_int(profile.get('rm_change_count'), 0))
+            profile['rm_change_locked'] = False
+            return jsonify({'ok': True, 'business_profile': profile})
+
+        data = request.get_json(silent=True) or {}
+        existing_profile = _find_user_business_profile(target_email)
+        updates = _normalize_user_business_profile({
+            'email': target_email,
+            'display_name': data.get('display_name') or '',
+            'manager_email': data.get('manager_email'),
+            'manager_display_name': data.get('manager_display_name') or '',
+            'manager_manager_email': data.get('manager_manager_email'),
+            'manager_manager_display_name': data.get('manager_manager_display_name') or '',
+            'team': data.get('team'),
+            'location': data.get('location'),
+            'frequent_environments': data.get('frequent_environments') or [],
+            'job_title': (existing_profile or {}).get('job_title') or '',
+            'directory_profile_source': (existing_profile or {}).get('directory_profile_source') or '',
+            'directory_profile_refreshed_at': (existing_profile or {}).get('directory_profile_refreshed_at') or '',
+        })
+        missing = _business_profile_required_fields(updates)
+        if missing:
+            return jsonify({'error': 'Please complete all required profile fields.', 'missing_fields': missing}), 400
+        saved = _save_user_business_profile_for_actor(
+            target_email=target_email,
+            updates=updates,
+            actor_email=ident.get('email') or '',
+            actor_is_admin=True,
+        )
+        saved['rm_change_locked'] = False
+        return jsonify({'ok': True, 'business_profile': saved})
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/profile/directory-search', methods=['GET'])
+def profile_directory_search():
+    ident = _current_request_identity()
+    email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'error': 'Authentication required', 'users': []}), 401
+    query = str(request.args.get('q') or request.args.get('search') or '').strip()
+    if not query:
+        return jsonify({'users': []})
+    return jsonify({'users': _search_identity_center_directory_users(query)})
+
+
+@app.route('/api/feedback', methods=['GET', 'POST'])
+def manage_user_feedback():
+    try:
+        ident = _current_request_identity()
+        email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({'error': 'Authentication required'}), 401
+
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            name = str(data.get('name') or '').strip()
+            category = _normalize_feedback_category(data.get('category'))
+            feedback_type = _normalize_feedback_type(data.get('feedback_type'))
+            description = ' '.join(str(data.get('description') or '').strip().split())
+            if not name:
+                return jsonify({'error': 'Name is required'}), 400
+            if not category:
+                return jsonify({'error': 'Please select the feedback area'}), 400
+            if not feedback_type:
+                return jsonify({'error': 'Please select the feedback type'}), 400
+            if not description:
+                return jsonify({'error': 'Feedback description is required'}), 400
+            words = [token for token in description.split(' ') if token]
+            if len(words) > 300:
+                return jsonify({'error': 'Feedback description must be 300 words or less'}), 400
+            entry = _normalize_feedback_entry({
+                'email': email,
+                'name': name,
+                'category': category,
+                'feedback_type': feedback_type,
+                'description': description,
+            })
+            payload = _load_user_feedback_entries()
+            items = [_normalize_feedback_entry(item) for item in (payload.get('feedback') or [])]
+            items.insert(0, entry)
+            _save_user_feedback_entries({'feedback': items})
+            try:
+                _send_feedback_to_admin_audience(entry)
+            except Exception:
+                app.logger.exception('Failed to send admin feedback notification for feedback_id=%s', entry.get('id'))
+            return jsonify({'ok': True, 'feedback': entry})
+
+        admin_record = _pam_admin_record_for_identity(
+            email=email,
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        items = [_normalize_feedback_entry(item) for item in (_load_user_feedback_entries().get('feedback') or [])]
+        category = _normalize_feedback_category(request.args.get('category'))
+        feedback_type = _normalize_feedback_type(request.args.get('feedback_type'))
+        status = _normalize_feedback_status(request.args.get('status')) if request.args.get('status') else ''
+        query = str(request.args.get('q') or '').strip().lower()
+        scope = str(request.args.get('scope') or '').strip().lower()
+        if not _can_access_admin_console_role(admin_role) or scope == 'mine':
+            items = [item for item in items if item.get('email') == email]
+        if category:
+            items = [item for item in items if item.get('category') == category]
+        if feedback_type:
+            items = [item for item in items if item.get('feedback_type') == feedback_type]
+        if status:
+            items = [item for item in items if item.get('status') == status]
+        if query:
+            items = [
+                item for item in items
+                if query in ' '.join([
+                    str(item.get('name') or ''),
+                    str(item.get('email') or ''),
+                    str(item.get('category') or ''),
+                    str(item.get('feedback_type') or ''),
+                    str(item.get('status') or ''),
+                    str(item.get('description') or ''),
+                    str(item.get('admin_reply') or ''),
+                ]).lower()
+            ]
+        items.sort(key=lambda item: str(item.get('submitted_at') or ''), reverse=True)
+        return jsonify({'feedback': items})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/feedback/<feedback_id>', methods=['PUT'])
+def update_feedback_entry(feedback_id):
+    try:
+        ident = _current_request_identity()
+        email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({'error': 'Authentication required'}), 401
+        payload = _load_user_feedback_entries()
+        items = [_normalize_feedback_entry(item) for item in (payload.get('feedback') or [])]
+        target_id = str(feedback_id or '').strip()
+        idx = next((i for i, item in enumerate(items) if str(item.get('id') or '').strip() == target_id), -1)
+        if idx < 0:
+            return jsonify({'error': 'Feedback not found'}), 404
+        data = request.get_json(silent=True) or {}
+        current = dict(items[idx])
+        admin_record = _pam_admin_record_for_identity(
+            email=email,
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        is_admin = _can_access_admin_console_role(admin_role)
+        is_owner = current.get('email') == email
+        if not is_admin and not is_owner:
+            return jsonify({'error': 'Not authorized to update this feedback'}), 403
+        now = datetime.now(timezone.utc).isoformat()
+        previous_status = str(current.get('status') or '').strip()
+        previous_reply = str(current.get('admin_reply') or '').strip()
+        if is_admin:
+            if 'status' in data:
+                next_status = _normalize_feedback_status(data.get('status'))
+                current['status'] = next_status
+                current['status_updated_at'] = now
+                current['updated_at'] = now
+                if next_status == 'closed':
+                    current['closed_at'] = now
+                elif current.get('closed_at'):
+                    current['closed_at'] = ''
+            if 'admin_reply' in data:
+                reply = _normalize_feedback_reply(data.get('admin_reply'))
+                current['admin_reply'] = reply
+                current['admin_reply_by'] = email
+                current['admin_reply_at'] = now if reply else ''
+                current['updated_at'] = now
+                if reply:
+                    current['reply_seen_at'] = ''
+        elif data.get('mark_reply_seen'):
+            current['reply_seen_at'] = now
+        items[idx] = _normalize_feedback_entry(current)
+        _save_user_feedback_entries({'feedback': items})
+        if is_admin:
+            updated_feedback = items[idx]
+            if str(updated_feedback.get('status') or '').strip() != previous_status or str(updated_feedback.get('admin_reply') or '').strip() != previous_reply:
+                try:
+                    _send_feedback_update_to_user(updated_feedback)
+                except Exception:
+                    app.logger.exception('Failed to send user feedback update email for feedback_id=%s', updated_feedback.get('id'))
+        return jsonify({'ok': True, 'feedback': items[idx]})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/announcements', methods=['GET', 'POST'])
+def manage_admin_announcements():
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        if request.method == 'GET':
+            items = [_normalize_announcement_entry(item) for item in (_load_announcements().get('announcements') or [])]
+            items.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
+            return jsonify({'announcements': items})
+        data = request.get_json(silent=True) or {}
+        message = ' '.join(str(data.get('message') or '').strip().split())
+        if not message:
+            return jsonify({'error': 'Announcement message is required'}), 400
+        now = datetime.now(timezone.utc).isoformat()
+        entry = _normalize_announcement_entry({
+            'id': data.get('id'),
+            'message': message,
+            'active': data.get('active', True),
+            'closed': data.get('closed', False),
+            'created_at': now,
+            'updated_at': now,
+            'created_by': ident.get('email') or ident.get('nameid') or '',
+            'updated_by': ident.get('email') or ident.get('nameid') or '',
+            'target_roles': data.get('target_roles') or [],
+            'target_group_ids': data.get('target_group_ids') or [],
+            'email_enabled': data.get('email_enabled') is True,
+            'direct_emails': data.get('direct_emails') or [],
+            'cc_emails': data.get('cc_emails') or [],
+            'bcc_emails': data.get('bcc_emails') or [],
+        })
+        payload = _load_announcements()
+        items = [_normalize_announcement_entry(item) for item in (payload.get('announcements') or [])]
+        items.insert(0, entry)
+        _save_announcements({'announcements': items})
+        return jsonify({'ok': True, 'announcement': entry})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/announcements/<announcement_id>', methods=['PUT', 'DELETE'])
+def update_admin_announcement(announcement_id):
+    try:
+        ident, admin_record = _current_admin_actor()
+        if not admin_record:
+            return jsonify({'error': 'Admin access required'}), 403
+        payload = _load_announcements()
+        items = [_normalize_announcement_entry(item) for item in (payload.get('announcements') or [])]
+        target_id = str(announcement_id or '').strip()
+        idx = next((i for i, item in enumerate(items) if str(item.get('id') or '').strip() == target_id), -1)
+        if idx < 0:
+            return jsonify({'error': 'Announcement not found'}), 404
+        if request.method == 'DELETE':
+            items = [item for item in items if str(item.get('id') or '').strip() != target_id]
+            _save_announcements({'announcements': items})
+            return jsonify({'ok': True, 'announcement_id': target_id})
+        data = request.get_json(silent=True) or {}
+        current = dict(items[idx])
+        if 'message' in data:
+            message = ' '.join(str(data.get('message') or '').strip().split())
+            if not message:
+                return jsonify({'error': 'Announcement message is required'}), 400
+            current['message'] = message
+        if 'active' in data:
+            current['active'] = data.get('active') is True
+        if 'closed' in data:
+            current['closed'] = data.get('closed') is True
+        if 'target_roles' in data:
+            current['target_roles'] = data.get('target_roles') or []
+        if 'target_group_ids' in data:
+            current['target_group_ids'] = data.get('target_group_ids') or []
+        if 'email_enabled' in data:
+            current['email_enabled'] = data.get('email_enabled') is True
+        if 'direct_emails' in data:
+            current['direct_emails'] = data.get('direct_emails') or []
+        if 'cc_emails' in data:
+            current['cc_emails'] = data.get('cc_emails') or []
+        if 'bcc_emails' in data:
+            current['bcc_emails'] = data.get('bcc_emails') or []
+        current['updated_at'] = datetime.now(timezone.utc).isoformat()
+        current['updated_by'] = ident.get('email') or ident.get('nameid') or ''
+        items[idx] = _normalize_announcement_entry(current)
+        _save_announcements({'announcements': items})
+        return jsonify({'ok': True, 'announcement': items[idx]})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/notifications', methods=['GET', 'POST'])
+def manage_user_notifications():
+    try:
+        ident = _current_request_identity()
+        email = (_email_from_saml_session() or ident.get('email') or '').strip().lower()
+        if not email:
+            return jsonify({'error': 'Authentication required'}), 401
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            announcement_ids = [str(item or '').strip() for item in (data.get('announcement_ids') or []) if str(item or '').strip()]
+            feedback_ids = [str(item or '').strip() for item in (data.get('feedback_ids') or []) if str(item or '').strip()]
+            admin_feedback_ids = [str(item or '').strip() for item in (data.get('admin_feedback_ids') or []) if str(item or '').strip()]
+            now = datetime.now(timezone.utc).isoformat()
+            admin_record = _pam_admin_record_for_identity(
+                email=email,
+                nameid=ident.get('nameid') or '',
+                hints=ident.get('hints') or {}
+            )
+            admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+            is_admin_viewer = _can_access_admin_console_role(admin_role)
+            if announcement_ids:
+                announcement_payload = _load_announcements()
+                announcements = [_normalize_announcement_entry(item) for item in (announcement_payload.get('announcements') or [])]
+                for item in announcements:
+                    if str(item.get('id') or '').strip() in announcement_ids:
+                        seen_by = item.get('seen_by') if isinstance(item.get('seen_by'), dict) else {}
+                        seen_by[email] = now
+                        item['seen_by'] = seen_by
+                _save_announcements({'announcements': announcements})
+            if feedback_ids or admin_feedback_ids:
+                feedback_payload = _load_user_feedback_entries()
+                feedback_items = [_normalize_feedback_entry(item) for item in (feedback_payload.get('feedback') or [])]
+                for item in feedback_items:
+                    if str(item.get('id') or '').strip() in feedback_ids and item.get('email') == email:
+                        item['reply_seen_at'] = now
+                    if is_admin_viewer and str(item.get('id') or '').strip() in admin_feedback_ids:
+                        seen_by = item.get('admin_seen_by') if isinstance(item.get('admin_seen_by'), dict) else {}
+                        seen_by[email] = now
+                        item['admin_seen_by'] = seen_by
+                _save_user_feedback_entries({'feedback': feedback_items})
+            return jsonify({'ok': True})
+
+        announcements = [_normalize_announcement_entry(item) for item in (_load_announcements().get('announcements') or [])]
+        feedback_items = [_normalize_feedback_entry(item) for item in (_load_user_feedback_entries().get('feedback') or [])]
+        admin_record = _pam_admin_record_for_identity(
+            email=email,
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        user_group_ids = _user_group_ids_for_email(email)
+        is_admin_viewer = _can_access_admin_console_role(admin_role)
+        active_announcements = [
+            item for item in announcements
+            if item.get('active')
+            and not item.get('closed')
+            and _announcement_targets_user(item, email, role=admin_role, group_ids=user_group_ids)
+        ]
+        active_announcements.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
+        user_feedback = [item for item in feedback_items if item.get('email') == email and (item.get('admin_reply') or item.get('status') != 'new')]
+        user_feedback.sort(key=lambda item: max(str(item.get('admin_reply_at') or ''), str(item.get('status_updated_at') or ''), str(item.get('updated_at') or '')), reverse=True)
+        admin_feedback_queue = []
+        unread_admin_feedback = []
+        if is_admin_viewer:
+            admin_feedback_queue = [item for item in feedback_items if item.get('status') == 'new']
+            admin_feedback_queue.sort(key=lambda item: str(item.get('submitted_at') or ''), reverse=True)
+            unread_admin_feedback = [item for item in admin_feedback_queue if _feedback_is_unread_for_admin(item, email)]
+        unread_announcements = [item for item in active_announcements if _announcement_is_unread(item, email)]
+        unread_feedback = [item for item in user_feedback if _feedback_has_unread_update(item)]
+        ribbon = active_announcements[0] if active_announcements else None
+        return jsonify({
+            'announcements': active_announcements,
+            'feedback_updates': user_feedback,
+            'admin_feedback_queue': admin_feedback_queue,
+            'unread_announcement_ids': [item.get('id') for item in unread_announcements],
+            'unread_feedback_ids': [item.get('id') for item in unread_feedback],
+            'unread_admin_feedback_ids': [item.get('id') for item in unread_admin_feedback],
+            'unread_count': len(unread_announcements) + len(unread_feedback) + len(unread_admin_feedback),
+            'active_ribbon': ribbon,
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/iam-roles', methods=['GET', 'POST'])
+def manage_iam_role_catalog():
+    try:
+        if request.method == 'GET':
+            search = str(request.args.get('q') or request.args.get('search') or '').strip().lower()
+            roles = [_normalize_iam_role_definition(item) for item in (_load_iam_role_catalog().get('roles') or [])]
+            if search:
+                roles = [
+                    item for item in roles
+                    if search in str(item.get('name') or '').lower()
+                    or search in str(item.get('description') or '').lower()
+                    or any(search in str(value or '').lower() for value in (item.get('actions') or []))
+                ]
+            roles.sort(key=lambda item: (0 if item.get('system_default') else 1, str(item.get('name') or '').lower()))
+            return jsonify({'roles': roles})
+        data = request.get_json(silent=True) or {}
+        role = _normalize_iam_role_definition(data)
+        if not role.get('name'):
+            return jsonify({'error': 'Role name is required'}), 400
+        payload = _load_iam_role_catalog()
+        roles = [_normalize_iam_role_definition(item) for item in (payload.get('roles') or [])]
+        if any(item.get('id') == role.get('id') for item in roles):
+            return jsonify({'error': 'IAM role already exists'}), 400
+        roles.append(role)
+        _save_iam_role_catalog({'roles': roles})
+        return jsonify({'status': 'success', 'role': role})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/iam-roles/<role_id>', methods=['PUT', 'DELETE'])
+def update_iam_role_catalog_entry(role_id):
+    try:
+        rid = _group_id_from_name(role_id)
+        payload = _load_iam_role_catalog()
+        roles = [_normalize_iam_role_definition(item) for item in (payload.get('roles') or [])]
+        idx = next((i for i, item in enumerate(roles) if item.get('id') == rid), None)
+        if idx is None:
+            return jsonify({'error': 'IAM role not found'}), 404
+        existing = roles[idx]
+        if request.method == 'DELETE':
+            if existing.get('system_default'):
+                return jsonify({'error': 'System default roles cannot be deleted.'}), 400
+            roles.pop(idx)
+            _save_iam_role_catalog({'roles': roles})
+            return jsonify({'status': 'success'})
+        data = request.get_json(silent=True) or {}
+        if existing.get('system_default'):
+            roles[idx] = _normalize_iam_role_definition({
+                **existing,
+                **data,
+                'id': rid,
+                'name': existing.get('name'),
+                'system_default': True,
+            })
+        else:
+            roles[idx] = _normalize_iam_role_definition({
+                **existing,
+                **data,
+                'id': rid,
+            })
+        _save_iam_role_catalog({'roles': roles})
+        return jsonify({'status': 'success', 'role': roles[idx]})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/app-roles', methods=['GET', 'POST'])
+def manage_pam_app_role_catalog():
+    try:
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+
+        if request.method == 'GET':
+            search = str(request.args.get('q') or request.args.get('search') or '').strip().lower()
+            roles = [_normalize_pam_app_role_definition(item) for item in (_load_pam_app_role_catalog().get('roles') or [])]
+            if search:
+                roles = [
+                    item for item in roles
+                    if search in str(item.get('name') or '').lower()
+                    or search in str(item.get('description') or '').lower()
+                    or any(search in str(value or '').lower() for value in (item.get('capabilities') or []))
+                    or any(search in str(value or '').lower() for value in (item.get('user_emails') or []))
+                    or any(search in str(value or '').lower() for value in (item.get('group_ids') or []))
+                ]
+            roles.sort(key=lambda item: (0 if item.get('system_default') else 1, str(item.get('name') or '').lower()))
+            return jsonify({'roles': roles, 'capability_groups': PAM_APP_CAPABILITY_GROUPS})
+
+        if not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+        data = request.get_json(silent=True) or {}
+        role = _normalize_pam_app_role_definition(data)
+        if not role.get('name'):
+            return jsonify({'error': 'Role name is required'}), 400
+        payload = _load_pam_app_role_catalog()
+        roles = [_normalize_pam_app_role_definition(item) for item in (payload.get('roles') or [])]
+        if any(item.get('id') == role.get('id') for item in roles):
+            return jsonify({'error': 'PAM app role already exists'}), 400
+        roles.append(role)
+        _save_pam_app_role_catalog({'roles': roles})
+        return jsonify({'status': 'success', 'role': role})
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/admin/app-roles/<role_id>', methods=['PUT', 'DELETE'])
+def update_pam_app_role_catalog_entry(role_id):
+    try:
+        ident, admin_record = _current_admin_actor()
+        actor_role = _normalize_pam_role((admin_record or {}).get('role') or '')
+        if not _is_admin_role(actor_role):
+            return jsonify({'error': 'Admin role required for this action'}), 403
+
+        rid = _group_id_from_name(role_id)
+        payload = _load_pam_app_role_catalog()
+        roles = [_normalize_pam_app_role_definition(item) for item in (payload.get('roles') or [])]
+        idx = next((i for i, item in enumerate(roles) if item.get('id') == rid), None)
+        if idx is None:
+            return jsonify({'error': 'PAM app role not found'}), 404
+        existing = roles[idx]
+        if request.method == 'DELETE':
+            if existing.get('system_default'):
+                return jsonify({'error': 'System default app roles cannot be deleted.'}), 400
+            roles.pop(idx)
+            _save_pam_app_role_catalog({'roles': roles})
+            return jsonify({'status': 'success'})
+
+        data = request.get_json(silent=True) or {}
+        if existing.get('system_default'):
+            roles[idx] = _normalize_pam_app_role_definition({
+                **existing,
+                **data,
+                'id': rid,
+                'name': existing.get('name'),
+                'system_default': True,
+            })
+        else:
+            roles[idx] = _normalize_pam_app_role_definition({
+                **existing,
+                **data,
+                'id': rid,
+            })
+        _save_pam_app_role_catalog({'roles': roles})
+        return jsonify({'status': 'success', 'role': roles[idx]})
+    except Exception as e:
+        return _safe_error_response(e)
 
 @app.route('/api/admin/save-guardrails', methods=['POST'])
 def save_guardrails():
@@ -6788,24 +18659,46 @@ def save_guardrails():
 
         payload = _default_guardrails_config()
         payload.update(data)
-        for key in ('serviceRestrictions', 'deleteRestrictions', 'createRestrictions', 'customGuardrails'):
-            if not isinstance(payload.get(key), list):
-                payload[key] = []
+        raw_service_rules = payload.get('serviceRestrictions')
+        payload['serviceRestrictions'] = [
+            _normalize_service_restriction_rule(rule)
+            for rule in (raw_service_rules if isinstance(raw_service_rules, list) else [])
+        ]
+        raw_delete_rules = payload.get('deleteRestrictions')
+        payload['deleteRestrictions'] = [
+            _normalize_delete_restriction_rule(rule)
+            for rule in (raw_delete_rules if isinstance(raw_delete_rules, list) else [])
+        ]
+        raw_create_rules = payload.get('createRestrictions')
+        payload['createRestrictions'] = [
+            _normalize_create_restriction_rule(rule)
+            for rule in (raw_create_rules if isinstance(raw_create_rules, list) else [])
+        ]
+        raw_custom_rules = payload.get('customGuardrails')
+        payload['customGuardrails'] = [
+            _normalize_custom_guardrail_rule(rule)
+            for rule in (raw_custom_rules if isinstance(raw_custom_rules, list) else [])
+        ]
         raw_db_rules = payload.get('databaseWriteControls')
         if not isinstance(raw_db_rules, list):
             raw_db_rules = []
-        payload['databaseWriteControls'] = [_normalize_db_write_rule(r) for r in raw_db_rules]
+        payload['databaseWriteControls'] = _dedupe_db_write_rules(raw_db_rules)
+        raw_db_query_rules = payload.get('databaseQueryControls')
+        if not isinstance(raw_db_query_rules, list):
+            raw_db_query_rules = []
+        payload['databaseQueryControls'] = _dedupe_db_query_rules(raw_db_query_rules)
 
-        # Store in file (in production, use database)
-        with open(GUARDRAILS_CONFIG_PATH, 'w') as f:
-            json.dump(payload, f, indent=2)
+        _ensure_parent_dir(GUARDRAILS_CONFIG_PATH)
+        with open(GUARDRAILS_CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
 
         print(
             "✅ Guardrails saved: "
             f"{len(payload.get('serviceRestrictions', []))} service, "
             f"{len(payload.get('deleteRestrictions', []))} delete, "
             f"{len(payload.get('createRestrictions', []))} create, "
-            f"{len(payload.get('databaseWriteControls', []))} db-write rules"
+            f"{len(payload.get('databaseWriteControls', []))} db-write rules, "
+            f"{len(payload.get('databaseQueryControls', []))} db-query rules"
         )
         
         return jsonify({
@@ -6815,7 +18708,8 @@ def save_guardrails():
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        app.logger.exception('Failed to save guardrails')
+        return _safe_error_response(e)
 
 @app.route('/api/admin/guardrails', methods=['GET'])
 def get_guardrails():
@@ -6823,7 +18717,7 @@ def get_guardrails():
     try:
         return jsonify(_load_guardrails_config())
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps', methods=['GET'])
 def list_scps():
@@ -6832,7 +18726,7 @@ def list_scps():
         result = SCPManager.list_policies()
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps/<policy_id>', methods=['GET'])
 def get_scp(policy_id):
@@ -6841,7 +18735,7 @@ def get_scp(policy_id):
         result = SCPManager.get_policy_content(policy_id)
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps', methods=['POST'])
 def create_scp():
@@ -6855,7 +18749,7 @@ def create_scp():
         )
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps/<policy_id>', methods=['PUT'])
 def update_scp(policy_id):
@@ -6870,7 +18764,7 @@ def update_scp(policy_id):
         )
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps/<policy_id>', methods=['DELETE'])
 def delete_scp(policy_id):
@@ -6879,7 +18773,7 @@ def delete_scp(policy_id):
         result = SCPManager.delete_policy(policy_id)
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps/<policy_id>/attach', methods=['POST'])
 def attach_scp(policy_id):
@@ -6889,7 +18783,7 @@ def attach_scp(policy_id):
         result = SCPManager.attach_policy(policy_id, data['target_id'])
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/scps/<policy_id>/detach', methods=['POST'])
 def detach_scp(policy_id):
@@ -6899,7 +18793,7 @@ def detach_scp(policy_id):
         result = SCPManager.detach_policy(policy_id, data['target_id'])
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/admin/accounts/<account_id>/scps', methods=['GET'])
 def get_account_scps(account_id):
@@ -6908,49 +18802,71 @@ def get_account_scps(account_id):
         result = SCPManager.get_account_policies(account_id)
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/ai/config', methods=['GET', 'POST'])
 def manage_ai_config():
     """Get or update Bedrock AI configuration"""
     try:
+        ident = _current_request_identity()
+        actor = _pam_admin_record_for_identity(
+            email=ident.get('email') or '',
+            nameid=ident.get('nameid') or '',
+            hints=ident.get('hints') or {}
+        )
+        if not actor:
+            return jsonify({'error': 'Admin access required'}), 403
         config_path = os.path.join(os.path.dirname(__file__), 'bedrock_config.json')
+        allowed_models = {
+            'anthropic.claude-3-sonnet-20240229-v1:0',
+            'anthropic.claude-3-haiku-20240307-v1:0',
+            'anthropic.claude-3-5-sonnet-20240620-v1:0',
+        }
         
         if request.method == 'GET':
             with open(config_path, 'r') as f:
                 config = json.load(f)
-            # Hide credentials in response
-            safe_config = config.copy()
-            if safe_config.get('aws_access_key_id'):
-                safe_config['aws_access_key_id'] = '***' + safe_config['aws_access_key_id'][-4:]
-            if safe_config.get('aws_secret_access_key'):
-                safe_config['aws_secret_access_key'] = '***'
+            # Bedrock config is non-secret; credentials must come from env/instance role only.
+            safe_config = {
+                k: v for k, v in config.items()
+                if k not in ('aws_access_key_id', 'aws_secret_access_key', 'aws_session_token')
+            }
             return jsonify(safe_config)
         
         elif request.method == 'POST':
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
+            if any(k in data for k in ('aws_access_key_id', 'aws_secret_access_key', 'aws_session_token')):
+                return jsonify({'error': 'Static AWS credentials are not supported here. Use instance role or environment configuration.'}), 400
             
             # Update config file
             with open(config_path, 'r') as f:
                 config = json.load(f)
+            for key in ('aws_access_key_id', 'aws_secret_access_key', 'aws_session_token'):
+                config.pop(key, None)
             
             # Update fields
             if 'enabled' in data:
-                config['enabled'] = data['enabled']
+                config['enabled'] = bool(data['enabled'])
             if 'aws_region' in data:
-                config['aws_region'] = data['aws_region']
+                region = str(data['aws_region'] or '').strip()
+                if not region or not re.fullmatch(r'[a-z]{2}(?:-gov)?-[a-z]+-\d+', region):
+                    return jsonify({'error': 'Invalid AWS region'}), 400
+                config['aws_region'] = region
             if 'model_id' in data:
-                config['model_id'] = data['model_id']
-            if 'aws_access_key_id' in data and not data['aws_access_key_id'].startswith('***'):
-                config['aws_access_key_id'] = data['aws_access_key_id']
-            if 'aws_secret_access_key' in data and data['aws_secret_access_key'] != '***':
-                config['aws_secret_access_key'] = data['aws_secret_access_key']
-            if 'aws_session_token' in data:
-                config['aws_session_token'] = data['aws_session_token']
+                model_id = str(data['model_id'] or '').strip()
+                if model_id not in allowed_models:
+                    return jsonify({'error': 'Unsupported Bedrock model'}), 400
+                config['model_id'] = model_id
             if 'max_tokens' in data:
-                config['max_tokens'] = data['max_tokens']
+                max_tokens = int(data['max_tokens'])
+                if max_tokens < 100 or max_tokens > 4000:
+                    return jsonify({'error': 'max_tokens must be between 100 and 4000'}), 400
+                config['max_tokens'] = max_tokens
             if 'temperature' in data:
-                config['temperature'] = data['temperature']
+                temperature = float(data['temperature'])
+                if temperature < 0 or temperature > 1:
+                    return jsonify({'error': 'temperature must be between 0 and 1'}), 400
+                config['temperature'] = temperature
             
             # Save config
             with open(config_path, 'w') as f:
@@ -6968,10 +18884,17 @@ def manage_ai_config():
             })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 # Database endpoints
-from database_manager import create_database_user, execute_query, generate_password
+from database_manager import (
+    create_database_user,
+    execute_query,
+    generate_password,
+    inspect_mysql_connection,
+    inspect_postgres_connection,
+    list_mysql_database_users,
+)
 from vault_manager import VaultManager
 
 # Database AI conversation storage
@@ -7000,12 +18923,37 @@ def _public_db_activation_error(err) -> tuple[str, str]:
     # Vault configuration / connectivity errors
     if 'vault_addr' in low or 'vault addr' in low:
         return ("Database access service is not configured. Please contact an administrator.", "VAULT_ADDR_MISSING")
-    if 'approle' in low and ('role_id' in low or 'secret_id' in low or 'vault_role_id' in low or 'vault_secret_id' in low):
+    if (
+        ('approle' in low and ('role_id' in low or 'secret_id' in low or 'vault_role_id' in low or 'vault_secret_id' in low))
+        or 'invalid role or secret id' in low
+        or ('role_id' in low and 'secret_id' in low and 'invalid' in low)
+    ):
         return ("Database access service is not configured. Please contact an administrator.", "VAULT_APPROLE_MISSING")
+    if (
+        ('vault aws auth not configured' in low)
+        or ('auth/aws/login' in low and 'vault http 400' in low)
+        or ('instance iam credentials' in low and 'vault aws auth' in low)
+    ):
+        return ("Database access service is not configured. Please contact an administrator.", "VAULT_AWS_AUTH_MISSING")
     if 'refusing to use a vault token' in low and 'root' in low:
         return ("Database access service is misconfigured. Please contact an administrator.", "VAULT_TOKEN_POLICY")
     if 'vault http 403' in low or 'forbidden' in low or 'permission denied' in low:
         return ("Database access service is unavailable. Please contact an administrator.", "VAULT_FORBIDDEN")
+    if 'not an allowed role' in low:
+        return (
+            "Vault database configuration does not allow NPAMX dynamic roles. Update the Vault database connection allowed_roles setting and retry.",
+            "VAULT_ROLE_NOT_ALLOWED",
+        )
+    if 'failed to find entry for connection with name' in low:
+        return (
+            "Vault database connection mapping is missing for this engine/environment. Please contact an administrator.",
+            "VAULT_CONNECTION_NOT_FOUND",
+        )
+    if 'vault did not return dynamic db credentials' in low or 'vault did not return a database password' in low:
+        return (
+            "Vault credential generation did not complete successfully. Please retry, or contact an administrator.",
+            "VAULT_CREDS_NOT_RETURNED",
+        )
     if 'vault connection failed' in low or 'timed out' in low or 'connection refused' in low:
         return ("Database access service is temporarily unreachable. Please retry in a few minutes.", "VAULT_UNREACHABLE")
 
@@ -7018,6 +18966,18 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         return (
             "Access is being prepared. Please wait a few seconds and retry.",
             "ACTIVATION_IN_PROGRESS",
+        )
+    if (
+        'validationexception' in low and 'putinlinepolicytopermissionset' in low
+    ) or 'invalid permissionspolicy document' in low:
+        return (
+            "IAM Identity Center rejected the Redshift permission-set policy. Please contact an administrator.",
+            "IDC_PERMISSION_SET_POLICY_INVALID",
+        )
+    if 'redshift iam permission-set attachment is not configured' in low:
+        return (
+            "Redshift IAM permission-set setup is incomplete. Please contact an administrator.",
+            "IDC_PERMISSION_SET_NOT_CONFIGURED",
         )
     if ('accessdeniedexception' in low or 'not authorized to perform' in low) and ('sso:' in low or 'identitystore:' in low):
         return (
@@ -7041,7 +19001,7 @@ def _public_db_activation_error(err) -> tuple[str, str]:
         )
     if 'permission set assignment failed' in low or 'account assignment' in low:
         return (
-            "Permission set assignment is still pending or failed. Please retry in a few minutes or contact an administrator.",
+            "Access is still being prepared. IAM permission assignment can take a few minutes. Please wait a bit and check login details again.",
             "IDC_ASSIGNMENT_FAILED",
         )
     if 'db resource id not available' in low:
@@ -7057,6 +19017,24 @@ def _public_db_activation_error(err) -> tuple[str, str]:
     return ("Database access activation failed. Please retry or contact an administrator. (Details are in server logs.)", "DB_ACTIVATION_FAILED")
 
 
+def _is_benign_db_revoke_error(err) -> bool:
+    low = str(err or '').strip().lower()
+    if not low:
+        return False
+    benign_markers = (
+        'lease not found',
+        'invalid lease',
+        'unknown lease',
+        'no lease found',
+        'does not exist',
+        'doesn\'t exist',
+        'unknown user',
+        'no such user',
+        'already revoked',
+    )
+    return any(marker in low for marker in benign_markers)
+
+
 def _is_retryable_activation_code(code: str) -> bool:
     """Whether UI should keep showing 'activation pending, retry shortly'."""
     c = str(code or '').strip().upper()
@@ -7065,17 +19043,18 @@ def _is_retryable_activation_code(code: str) -> bool:
 
 def _activation_message_for_code(code: str) -> str:
     if _is_retryable_activation_code(code):
-        return "✅ Approved. Activation is pending. Please retry in a few minutes."
+        return "✅ Approved. We are still preparing access in the background. This usually takes a few minutes."
     return "❌ Something went wrong while preparing access. Please inform administrator."
 
-def _sanitize_database_request_for_client(req: dict) -> dict:
+def _sanitize_database_request_for_client(req: dict, actor_email='', is_admin=False) -> dict:
     """Remove secrets and replace real DB endpoint with proxy endpoint for any user-facing response."""
     safe = dict(req or {})
     req_account_env = _request_account_env(req)
     req_plane = _request_execution_plane(req)
     proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
         account_env=req_account_env,
-        execution_plane=req_plane
+        execution_plane=req_plane,
+        account_id=str((req or {}).get('account_id') or '').strip(),
     )
 
     # Remove secrets
@@ -7089,6 +19068,8 @@ def _sanitize_database_request_for_client(req: dict) -> dict:
         'lease_duration',
         'iam_permission_set_arn',
         'db_connect_arn',
+        'approval_engine',
+        'approval_required',
     ):
         safe.pop(k, None)
 
@@ -7113,10 +19094,40 @@ def _sanitize_database_request_for_client(req: dict) -> dict:
     # Useful masked fields for display
     safe['masked_db_username'] = _mask_secret((req or {}).get('db_username', ''), visible=2)
     safe['masked_vault_token'] = _mask_secret((req or {}).get('password') or (req or {}).get('vault_token', ''), visible=1)
+    safe['requested_instance_input'] = str((req or {}).get('requested_instance_input') or (req or {}).get('db_instance_id') or '').strip()
+    safe['requested_database_name'] = str((req or {}).get('requested_database_name') or '').strip()
+    safe['requested_schema_name'] = str((req or {}).get('requested_schema_name') or '').strip()
+    safe['requested_table_name'] = str((req or {}).get('requested_table_name') or '').strip()
+    safe['requested_column_name'] = str((req or {}).get('requested_column_name') or '').strip()
+    safe['requested_access_type'] = str((req or {}).get('requested_access_type') or '').strip()
+    safe['request_approver_email'] = str((req or {}).get('request_approver_email') or '').strip()
+    safe['db_owner_email'] = str((req or {}).get('db_owner_email') or '').strip()
+    safe['security_lead_email'] = str((req or {}).get('security_lead_email') or '').strip()
+    safe['pending_request_expiry_hours'] = int((req or {}).get('pending_request_expiry_hours') or 0) if str((req or {}).get('pending_request_expiry_hours') or '').strip() else ''
+    safe['pending_expires_at'] = str((req or {}).get('pending_expires_at') or '').strip()
+
+    approval_flags = _database_request_actor_permissions(req, actor_email=actor_email, is_admin=is_admin)
+    safe['approval_workflow_name'] = str((req or {}).get('approval_workflow_name') or '').strip()
+    safe['approval_note'] = str((req or {}).get('approval_note') or '').strip()
+    safe['pending_stage'] = approval_flags.get('current_stage_name') or ''
+    safe['pending_approvers'] = approval_flags.get('current_stage_approvers') or []
+    safe['approval_history'] = approval_flags.get('approval_history') or []
+    safe['is_requester'] = bool(approval_flags.get('is_requester'))
+    safe['can_approve'] = bool(approval_flags.get('can_approve'))
+    safe['can_deny'] = bool(approval_flags.get('can_deny'))
+    safe['visible_to_actor'] = bool(approval_flags.get('can_view'))
+    raw_activation_error = str((req or {}).get('activation_error') or '').strip()
+    if raw_activation_error:
+        _safe_msg, safe_code = _public_db_activation_error(raw_activation_error)
+        safe['activation_error_code'] = safe_code
+        safe['activation_retryable'] = _is_retryable_activation_code(safe_code)
+    else:
+        safe['activation_error_code'] = ''
+        safe['activation_retryable'] = False
 
     return safe
 
-def _resolve_db_connect_proxy_endpoint(account_env='', execution_plane=''):
+def _resolve_db_connect_proxy_endpoint(account_env='', execution_plane='', account_id=''):
     """
     Public-facing endpoint users should use (proxy, not the real DB endpoint).
 
@@ -7130,8 +19141,27 @@ def _resolve_db_connect_proxy_endpoint(account_env='', execution_plane=''):
     if not plane:
         plane = _resolve_execution_plane(account_env)
 
-    host = _plane_env('DB_CONNECT_PROXY_HOST', plane) or _plane_env('DB_PROXY_HOST', plane)
-    port_raw = _plane_env('DB_CONNECT_PROXY_PORT', plane) or _plane_env('DB_PROXY_PORT', plane)
+    settings = _load_app_settings()
+    normalized_account_id = re.sub(r'[^0-9]', '', str(account_id or '').strip())
+
+    if normalized_account_id:
+        for item in _normalize_db_proxy_mappings(settings.get('db_connect_proxy_mappings')):
+            if str(item.get('account_id') or '') != normalized_account_id:
+                continue
+            try:
+                mapped_port = int(item.get('proxy_port') or 3306)
+            except Exception:
+                mapped_port = 3306
+            return str(item.get('proxy_host') or '').strip() or 'proxy-not-configured', mapped_port, plane
+
+    host = ''
+    port_raw = ''
+    if plane == 'nonprod':
+        host = str(settings.get('db_connect_proxy_host_nonprod') or '').strip()
+        port_raw = str(settings.get('db_connect_proxy_port_nonprod') or '').strip()
+
+    host = host or _plane_env('DB_CONNECT_PROXY_HOST', plane) or _plane_env('DB_PROXY_HOST', plane)
+    port_raw = port_raw or _plane_env('DB_CONNECT_PROXY_PORT', plane) or _plane_env('DB_PROXY_PORT', plane)
     try:
         port = int(str(port_raw).strip()) if str(port_raw).strip() else 3306
     except Exception:
@@ -7151,6 +19181,66 @@ def _resolve_db_connect_proxy_endpoint(account_env='', execution_plane=''):
         port = 3306
     return host, port, plane
 
+
+def _allow_direct_db_connect(account_env='', execution_plane=''):
+    plane = str(execution_plane or '').strip().lower()
+    if not plane:
+        plane = _resolve_execution_plane(account_env)
+    settings = _load_app_settings()
+    raw = ''
+    if plane == 'nonprod':
+        value = settings.get('db_connect_allow_direct_nonprod')
+        if value not in (None, ''):
+            raw = 'true' if _as_bool(value, False) else 'false'
+    raw = (
+        raw
+        or _plane_env('DB_CONNECT_ALLOW_DIRECT', plane)
+        or _plane_env('ALLOW_DIRECT_DB_CONNECT', plane)
+        or ''
+    ).strip().lower()
+    return raw in ('1', 'true', 'yes', 'on')
+
+
+def _resolve_db_user_connect_endpoint(req):
+    """
+    Resolve the endpoint users should use for DB connectivity.
+
+    Preferred:
+    - configured proxy endpoint
+
+    Temporary nonprod/testing fallback:
+    - direct RDS endpoint when explicitly enabled
+    """
+    engine = str((req or {}).get('engine') or '').strip().lower()
+    resource_kind = str((req or {}).get('resource_kind') or '').strip().lower()
+    req_account_env = _request_account_env(req)
+    req_plane = _request_execution_plane(req)
+    if resource_kind == 'redshift_cluster' or engine == 'redshift':
+        cluster_id = str((req or {}).get('db_instance_id') or '').strip()
+        region = str((req or {}).get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip()
+        account_id = str((req or {}).get('account_id') or '').strip()
+        if cluster_id:
+            info = _describe_redshift_cluster_endpoint(cluster_id=cluster_id, region=region, account_id=account_id)
+            return info['address'], int(info['port']), req_plane, 'direct'
+
+    host, port, plane = _resolve_db_connect_proxy_endpoint(
+        account_env=req_account_env,
+        execution_plane=req_plane,
+        account_id=str((req or {}).get('account_id') or '').strip(),
+    )
+    if host and host != 'proxy-not-configured':
+        return host, port, plane, 'proxy'
+
+    if _allow_direct_db_connect(account_env=req_account_env, execution_plane=req_plane):
+        instance_id = str((req or {}).get('db_instance_id') or '').strip()
+        region = str((req or {}).get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip()
+        account_id = str((req or {}).get('account_id') or '').strip()
+        if instance_id:
+            info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region, account_id=account_id)
+            return info['address'], int(info['port']), plane, 'direct'
+
+    return host, port, plane, 'proxy'
+
 def _normalize_permissions_list(value):
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
@@ -7158,15 +19248,72 @@ def _normalize_permissions_list(value):
         return [p.strip() for p in value.split(',') if p.strip()]
     return []
 
-def _normalize_db_engine_for_permissions(engine):
+def _normalize_db_engine_family(engine):
     e = str(engine or '').strip().lower()
     if not e:
         return ''
-    if 'aurora' in e or 'maria' in e:
-        return 'mysql'
+    if 'athena' in e:
+        return 'athena'
+    if 'documentdb' in e or e == 'docdb':
+        return 'documentdb'
+    if 'mongodb' in e or 'mongo' in e:
+        return 'mongodb'
+    if 'redshift' in e:
+        return 'redshift'
     if 'postgres' in e:
         return 'postgres'
+    if e in ('mssql', 'sqlserver', 'sql_server'):
+        return 'mssql'
+    if 'maria' in e:
+        return 'maria'
+    if 'mysql' in e:
+        return 'mysql'
+    if 'aurora' in e:
+        # Preserve aurora as a distinct family for role-scoping; caller can map to mysql for grants.
+        return 'aurora'
     return e
+
+def _normalize_db_engine_for_permissions(engine):
+    family = _normalize_db_engine_family(engine)
+    if family in ('aurora', 'maria'):
+        return 'mysql'
+    return family
+
+
+def _db_request_scope_meta(engine, resource_kind: str = '') -> dict:
+    eng = _normalize_db_engine_family(engine)
+    resolved_kind = str(resource_kind or '').strip().lower()
+    meta = {
+        'engine': eng,
+        'database_required': True,
+        'schema_required': False,
+        'object_required': True,
+        'detail_required': True,
+        'schema_label': 'schema',
+        'object_label': 'table',
+        'detail_label': 'column',
+        'resource_kind': resolved_kind or 'rds_instance',
+    }
+    if eng in ('postgres', 'redshift'):
+        meta.update({
+            'schema_required': True,
+            'object_label': 'table',
+            'detail_label': 'column',
+            'resource_kind': 'redshift_cluster' if eng == 'redshift' else (resolved_kind or 'rds_instance'),
+        })
+    elif eng in ('mongodb', 'documentdb'):
+        meta.update({
+            'object_label': 'collection',
+            'detail_label': 'document',
+            'resource_kind': resolved_kind or ('cluster' if eng == 'mongodb' else 'rds_instance'),
+        })
+    elif eng == 'athena':
+        meta.update({
+            'object_label': 'table',
+            'detail_label': 'column',
+            'resource_kind': resolved_kind or 'workgroup',
+        })
+    return meta
 
 def _validate_permissions_for_engine(engine, perms):
     """
@@ -7183,6 +19330,10 @@ def _validate_permissions_for_engine(engine, perms):
             VaultManager._mysql_privileges_from_ops(ops)
         elif eng == 'postgres':
             VaultManager._postgres_privileges_from_ops(ops)
+        elif eng == 'athena':
+            invalid = sorted(op for op in ops if str(op or '').strip().upper() != 'SELECT')
+            if invalid:
+                return 'Athena requests currently support SELECT only.'
     except Exception as e:
         return str(e)
     return None
@@ -7192,6 +19343,143 @@ _DB_WRITE_OPS = {
     'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME',
     'CREATE INDEX', 'DROP INDEX'
 }
+_DB_READ_OPS_ORDERED = ['SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE', 'FIND', 'AGGREGATE']
+_DB_READ_OPS = set(_DB_READ_OPS_ORDERED)
+_DB_REQUESTABLE_WRITE_OPS_ORDERED = [
+    'INSERT', 'UPDATE', 'DELETE', 'MERGE',
+    'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME',
+    'CREATE INDEX', 'DROP INDEX', 'ANALYZE'
+]
+_DB_REQUESTABLE_WRITE_OPS = set(_DB_REQUESTABLE_WRITE_OPS_ORDERED)
+_DB_DEFAULT_LIMITED_WRITE_OPS_ORDERED = ['INSERT', 'UPDATE', 'MERGE']
+_DB_DEFAULT_LIMITED_WRITE_OPS = set(_DB_DEFAULT_LIMITED_WRITE_OPS_ORDERED)
+_DB_DEFAULT_ADMIN_OPS_ORDERED = [
+    'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE',
+    'INSERT', 'UPDATE', 'MERGE',
+    'CREATE', 'ALTER',
+    'CREATE INDEX', 'DROP INDEX'
+]
+_DB_DEFAULT_ADMIN_OPS = set(_DB_DEFAULT_ADMIN_OPS_ORDERED)
+_DB_NEVER_REQUESTABLE_OPS_ORDERED = [
+    'GRANT', 'REVOKE', 'CREATE USER', 'DROP USER', 'ALTER USER', 'SET ROLE',
+    'EXECUTE', 'CALL', 'LOCK', 'UNLOCK'
+]
+_DB_NEVER_REQUESTABLE_OPS = set(_DB_NEVER_REQUESTABLE_OPS_ORDERED)
+
+_DB_QUERY_GUARDRAIL_PATTERNS = {
+    'select_star': {
+        'label': 'SELECT *',
+        'regex': re.compile(r'(?is)\bselect\s+\*\s+from\b'),
+    },
+    'select_from': {
+        'label': 'SELECT ... FROM table',
+        'regex': re.compile(r'(?is)\bselect\b.+\bfrom\b'),
+    },
+    'select_into_outfile': {
+        'label': 'SELECT ... INTO OUTFILE',
+        'regex': re.compile(r'(?is)\bselect\b.+\binto\s+outfile\b'),
+    },
+    'select_into_dumpfile': {
+        'label': 'SELECT ... INTO DUMPFILE',
+        'regex': re.compile(r'(?is)\bselect\b.+\binto\s+dumpfile\b'),
+    },
+    'copy_table_to': {
+        'label': 'COPY table TO',
+        'regex': re.compile(r'(?is)\bcopy\s+[^\s(][^;]*\s+\bto\b'),
+    },
+    'copy_select_to': {
+        'label': 'COPY (SELECT ...)',
+        'regex': re.compile(r'(?is)\bcopy\s*\(\s*select\b'),
+    },
+    'show_databases': {
+        'label': 'SHOW DATABASES',
+        'regex': re.compile(r'(?is)\bshow\s+databases\b'),
+    },
+    'show_tables': {
+        'label': 'SHOW TABLES',
+        'regex': re.compile(r'(?is)\bshow\s+tables\b'),
+    },
+    'show_columns': {
+        'label': 'SHOW COLUMNS',
+        'regex': re.compile(r'(?is)\bshow\s+columns\b'),
+    },
+    'show_create_table': {
+        'label': 'SHOW CREATE TABLE',
+        'regex': re.compile(r'(?is)\bshow\s+create\s+table\b'),
+    },
+    'information_schema_tables': {
+        'label': 'information_schema.tables',
+        'regex': re.compile(r'(?is)\binformation_schema\.tables\b'),
+    },
+    'information_schema_columns': {
+        'label': 'information_schema.columns',
+        'regex': re.compile(r'(?is)\binformation_schema\.columns\b'),
+    },
+    'grant': {
+        'label': 'GRANT',
+        'regex': re.compile(r'(?is)\bgrant\b'),
+    },
+    'revoke': {
+        'label': 'REVOKE',
+        'regex': re.compile(r'(?is)\brevoke\b'),
+    },
+    'alter_user': {
+        'label': 'ALTER USER',
+        'regex': re.compile(r'(?is)\balter\s+user\b'),
+    },
+    'create_user': {
+        'label': 'CREATE USER',
+        'regex': re.compile(r'(?is)\bcreate\s+user\b'),
+    },
+    'drop_user': {
+        'label': 'DROP USER',
+        'regex': re.compile(r'(?is)\bdrop\s+user\b'),
+    },
+    'set_role': {
+        'label': 'SET ROLE',
+        'regex': re.compile(r'(?is)\bset\s+role\b'),
+    },
+    'drop_table': {
+        'label': 'DROP TABLE',
+        'regex': re.compile(r'(?is)\bdrop\s+table\b'),
+    },
+    'drop_database': {
+        'label': 'DROP DATABASE',
+        'regex': re.compile(r'(?is)\bdrop\s+database\b'),
+    },
+    'truncate_table': {
+        'label': 'TRUNCATE TABLE',
+        'regex': re.compile(r'(?is)\btruncate\s+table\b'),
+    },
+    'alter_table': {
+        'label': 'ALTER TABLE',
+        'regex': re.compile(r'(?is)\balter\s+table\b'),
+    },
+    'create_procedure': {
+        'label': 'CREATE PROCEDURE',
+        'regex': re.compile(r'(?is)\bcreate\s+procedure\b'),
+    },
+    'create_function': {
+        'label': 'CREATE FUNCTION',
+        'regex': re.compile(r'(?is)\bcreate\s+function\b'),
+    },
+    'execute': {
+        'label': 'EXECUTE',
+        'regex': re.compile(r'(?is)\bexecute\b'),
+    },
+    'load_data_infile': {
+        'label': 'LOAD DATA INFILE',
+        'regex': re.compile(r'(?is)\bload\s+data\s+(local\s+)?infile\b'),
+    },
+    'mysql_user_table': {
+        'label': 'mysql.user',
+        'regex': re.compile(r'(?is)\bmysql\.user\b'),
+    },
+    'pg_shadow': {
+        'label': 'pg_shadow',
+        'regex': re.compile(r'(?is)\bpg_shadow\b'),
+    },
+}
 
 def _default_guardrails_config():
     return {
@@ -7199,74 +19487,318 @@ def _default_guardrails_config():
         'deleteRestrictions': [],
         'createRestrictions': [],
         'customGuardrails': [],
-        'databaseWriteControls': []
+        'databaseWriteControls': [],
+        'databaseQueryControls': [],
+    }
+
+
+def _normalize_service_restriction_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    return {
+        'service': str(r.get('service') or '').strip(),
+        'action': str(r.get('action') or 'block').strip() or 'block',
+        'reason': str(r.get('reason') or '').strip(),
+    }
+
+
+def _normalize_delete_restriction_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    return {
+        'service': str(r.get('service') or '').strip(),
+        'environment': str(r.get('environment') or 'all').strip() or 'all',
+        'reason': str(r.get('reason') or '').strip(),
+    }
+
+
+def _normalize_create_restriction_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    return {
+        'service': str(r.get('service') or '').strip(),
+        'environment': str(r.get('environment') or 'all').strip() or 'all',
+        'reason': str(r.get('reason') or '').strip(),
+    }
+
+
+def _normalize_custom_guardrail_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    return {
+        'name': str(r.get('name') or '').strip(),
+        'type': str(r.get('type') or 'tag').strip() or 'tag',
+        'condition': str(r.get('condition') or '').strip(),
     }
 
 def _load_guardrails_config():
-    data = _default_guardrails_config()
-    try:
-        if os.path.exists(GUARDRAILS_CONFIG_PATH):
-            with open(GUARDRAILS_CONFIG_PATH, 'r') as f:
-                raw = json.load(f) or {}
-            if isinstance(raw, dict):
-                data.update(raw)
-    except Exception:
-        pass
-    for key in ('serviceRestrictions', 'deleteRestrictions', 'createRestrictions', 'customGuardrails', 'databaseWriteControls'):
+    data = _load_json_state_file(
+        GUARDRAILS_CONFIG_PATH,
+        _default_guardrails_config(),
+        legacy_paths=[LEGACY_GUARDRAILS_CONFIG_PATH],
+    )
+    for key in ('serviceRestrictions', 'deleteRestrictions', 'createRestrictions', 'customGuardrails', 'databaseWriteControls', 'databaseQueryControls'):
         if not isinstance(data.get(key), list):
             data[key] = []
+    data['databaseWriteControls'] = _dedupe_db_write_rules(data.get('databaseWriteControls') or [])
+    data['databaseQueryControls'] = _dedupe_db_query_rules(data.get('databaseQueryControls') or [])
     return data
+
+
+def _normalize_guardrail_expiry(value):
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    try:
+        return datetime.fromisoformat(raw.replace('Z', '+00:00')).isoformat()
+    except Exception:
+        return ''
+
+
+def _guardrail_exception_active(expires_at):
+    normalized = _normalize_guardrail_expiry(expires_at)
+    if not normalized:
+        return True
+    try:
+        dt = datetime.fromisoformat(normalized.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt > datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def _normalize_guardrail_allowed_user(value):
+    if isinstance(value, dict):
+        email = str(value.get('email') or value.get('value') or '').strip().lower()
+        expires_at = _normalize_guardrail_expiry(value.get('expires_at') or value.get('expiresAt'))
+    else:
+        email = str(value or '').strip().lower()
+        expires_at = ''
+    if expires_at and not _guardrail_exception_active(expires_at):
+        return None
+    return {'email': email, 'expires_at': expires_at} if email else None
+
+
+def _normalize_guardrail_allowed_group(value):
+    if isinstance(value, dict):
+        gid = str(value.get('group_id') or value.get('id') or '').strip()
+        name = str(value.get('display_name') or value.get('name') or '').strip()
+        source = str(value.get('source') or 'identity_center').strip().lower() or 'identity_center'
+        expires_at = _normalize_guardrail_expiry(value.get('expires_at') or value.get('expiresAt'))
+    else:
+        gid = str(value or '').strip()
+        name = ''
+        source = 'identity_center'
+        expires_at = ''
+    if expires_at and not _guardrail_exception_active(expires_at):
+        return None
+    if not gid and not name:
+        return None
+    return {
+        'id': gid,
+        'name': name,
+        'source': source,
+        'expires_at': expires_at,
+    }
 
 def _normalize_db_write_rule(rule):
     r = rule if isinstance(rule, dict) else {}
     enabled = bool(r.get('enabled', True))
     block_write = bool(r.get('block_write_actions', r.get('blockWriteActions', False)))
     account_id = str(r.get('account_id') or r.get('accountId') or '').strip()
+    ou_id = str(r.get('ou_id') or r.get('ouId') or '').strip()
     db_instance_id = str(r.get('db_instance_id') or r.get('dbInstanceId') or '').strip()
     reason = str(r.get('reason') or '').strip()
+    raw_allowed_actions = r.get('allowed_actions') or r.get('allowedActions') or []
+    allowed_actions = []
+    for action in raw_allowed_actions if isinstance(raw_allowed_actions, list) else []:
+        token = str(action or '').strip().upper()
+        if token and token in _DB_REQUESTABLE_WRITE_OPS and token not in allowed_actions:
+            allowed_actions.append(token)
 
     allowed_users = []
     for u in (r.get('allowed_users') or r.get('allowedUsers') or []):
-        if isinstance(u, dict):
-            email = str(u.get('email') or u.get('value') or '').strip().lower()
-        else:
-            email = str(u or '').strip().lower()
-        if email and email not in allowed_users:
-            allowed_users.append(email)
+        normalized = _normalize_guardrail_allowed_user(u)
+        if normalized and normalized not in allowed_users:
+            allowed_users.append(normalized)
 
     allowed_groups = []
     for g in (r.get('allowed_groups') or r.get('allowedGroups') or []):
-        if isinstance(g, dict):
-            gid = str(g.get('group_id') or g.get('id') or '').strip()
-            name = str(g.get('display_name') or g.get('name') or '').strip()
-            source = str(g.get('source') or 'identity_center').strip().lower() or 'identity_center'
-        else:
-            gid = str(g or '').strip()
-            name = ''
-            source = 'identity_center'
-        if not gid and not name:
-            continue
-        normalized = {
-            'id': gid,
-            'name': name,
-            'source': source
-        }
-        if normalized not in allowed_groups:
+        normalized = _normalize_guardrail_allowed_group(g)
+        if normalized and normalized not in allowed_groups:
             allowed_groups.append(normalized)
 
     return {
         'enabled': enabled,
         'block_write_actions': block_write,
         'account_id': account_id,
+        'ou_id': ou_id,
         'db_instance_id': db_instance_id,
         'reason': reason,
+        'allowed_actions': allowed_actions,
         'allowed_users': allowed_users,
         'allowed_groups': allowed_groups
     }
 
+
+def _normalize_db_query_rule(rule):
+    r = rule if isinstance(rule, dict) else {}
+    enabled = bool(r.get('enabled', True))
+    account_id = str(r.get('account_id') or r.get('accountId') or '').strip()
+    ou_id = str(r.get('ou_id') or r.get('ouId') or '').strip()
+    db_instance_id = str(r.get('db_instance_id') or r.get('dbInstanceId') or '').strip()
+    reason = str(r.get('reason') or '').strip()
+    raw_patterns = r.get('blocked_patterns') or r.get('blockedPatterns') or []
+    blocked_patterns = []
+    for pattern in raw_patterns if isinstance(raw_patterns, list) else []:
+        key = str(pattern or '').strip()
+        if key and key in _DB_QUERY_GUARDRAIL_PATTERNS and key not in blocked_patterns:
+            blocked_patterns.append(key)
+
+    allowed_users = []
+    for value in (r.get('allowed_users') or r.get('allowedUsers') or []):
+        normalized = _normalize_guardrail_allowed_user(value)
+        if normalized and normalized not in allowed_users:
+            allowed_users.append(normalized)
+
+    allowed_groups = []
+    for value in (r.get('allowed_groups') or r.get('allowedGroups') or []):
+        normalized = _normalize_guardrail_allowed_group(value)
+        if normalized and normalized not in allowed_groups:
+            allowed_groups.append(normalized)
+
+    return {
+        'enabled': enabled,
+        'account_id': account_id,
+        'ou_id': ou_id,
+        'db_instance_id': db_instance_id,
+        'reason': reason,
+        'blocked_patterns': blocked_patterns,
+        'allowed_users': allowed_users,
+        'allowed_groups': allowed_groups,
+    }
+
+
+def _merge_guardrail_allowed_users(current, incoming):
+    merged = []
+    seen = set()
+    for item in list(current or []) + list(incoming or []):
+        normalized = _normalize_guardrail_allowed_user(item)
+        if not normalized:
+            continue
+        key = str(normalized.get('email') or '').strip().lower()
+        if not key:
+            continue
+        if key in seen:
+            existing = next((row for row in merged if str(row.get('email') or '').strip().lower() == key), None)
+            if existing and normalized.get('expires_at'):
+                existing['expires_at'] = normalized.get('expires_at')
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    return merged
+
+
+def _merge_guardrail_allowed_groups(current, incoming):
+    merged = []
+    seen = set()
+    for item in list(current or []) + list(incoming or []):
+        normalized = _normalize_guardrail_allowed_group(item)
+        if not normalized:
+            continue
+        gid = str(normalized.get('id') or '').strip().lower()
+        gname = str(normalized.get('name') or '').strip().lower()
+        key = gid or gname
+        if not key:
+            continue
+        if key in seen:
+            existing = next((
+                row for row in merged
+                if (str(row.get('id') or '').strip().lower() or str(row.get('name') or '').strip().lower()) == key
+            ), None)
+            if existing:
+                if normalized.get('name') and not existing.get('name'):
+                    existing['name'] = normalized.get('name')
+                if normalized.get('id') and not existing.get('id'):
+                    existing['id'] = normalized.get('id')
+                if normalized.get('expires_at'):
+                    existing['expires_at'] = normalized.get('expires_at')
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    return merged
+
+
+def _dedupe_db_write_rules(rules):
+    merged = {}
+    ordered_keys = []
+    for rule in (rules or []):
+        normalized = _normalize_db_write_rule(rule)
+        key = (
+            str(normalized.get('account_id') or '').strip(),
+            str(normalized.get('ou_id') or '').strip(),
+            str(normalized.get('db_instance_id') or '').strip(),
+        )
+        if key not in merged:
+            merged[key] = normalized
+            ordered_keys.append(key)
+            continue
+        current = merged[key]
+        current['enabled'] = bool(normalized.get('enabled', current.get('enabled')))
+        current['block_write_actions'] = bool(normalized.get('block_write_actions', current.get('block_write_actions')))
+        if normalized.get('reason'):
+            current['reason'] = normalized.get('reason')
+        allowed_actions = []
+        for action in list(current.get('allowed_actions') or []) + list(normalized.get('allowed_actions') or []):
+            token = str(action or '').strip().upper()
+            if token and token in _DB_REQUESTABLE_WRITE_OPS and token not in allowed_actions:
+                allowed_actions.append(token)
+        current['allowed_actions'] = allowed_actions
+        current['allowed_users'] = _merge_guardrail_allowed_users(current.get('allowed_users'), normalized.get('allowed_users'))
+        current['allowed_groups'] = _merge_guardrail_allowed_groups(current.get('allowed_groups'), normalized.get('allowed_groups'))
+    return [merged[key] for key in ordered_keys]
+
+
+def _dedupe_db_query_rules(rules):
+    merged = {}
+    ordered_keys = []
+    for rule in (rules or []):
+        normalized = _normalize_db_query_rule(rule)
+        key = (
+            str(normalized.get('account_id') or '').strip(),
+            str(normalized.get('ou_id') or '').strip(),
+            str(normalized.get('db_instance_id') or '').strip(),
+        )
+        if key not in merged:
+            merged[key] = normalized
+            ordered_keys.append(key)
+            continue
+        current = merged[key]
+        current['enabled'] = bool(normalized.get('enabled', current.get('enabled')))
+        if normalized.get('reason'):
+            current['reason'] = normalized.get('reason')
+        blocked = []
+        for pattern in list(current.get('blocked_patterns') or []) + list(normalized.get('blocked_patterns') or []):
+            token = str(pattern or '').strip()
+            if token and token not in blocked:
+                blocked.append(token)
+        current['blocked_patterns'] = blocked
+        current['allowed_users'] = _merge_guardrail_allowed_users(current.get('allowed_users'), normalized.get('allowed_users'))
+        current['allowed_groups'] = _merge_guardrail_allowed_groups(current.get('allowed_groups'), normalized.get('allowed_groups'))
+    return [merged[key] for key in ordered_keys]
+
 def _is_db_write_request(perms):
     ops = [str(p or '').strip().upper() for p in _normalize_permissions_list(perms)]
     return any(op in _DB_WRITE_OPS for op in ops)
+
+
+def _account_matches_guardrail_scope(account_id, ou_id):
+    account = (CONFIG.get('accounts') or {}).get(str(account_id or '').strip()) if isinstance(CONFIG.get('accounts'), dict) else None
+    if not ou_id:
+        return True
+    if not isinstance(account, dict):
+        return False
+    target = str(ou_id or '').strip()
+    account_ou = str(account.get('ou_id') or '').strip()
+    ou_path = [str(item or '').strip() for item in (account.get('ou_path') or []) if str(item or '').strip()]
+    return target == account_ou or target in ou_path
 
 def _local_group_keys_for_user(email):
     email_l = str(email or '').strip().lower()
@@ -7355,7 +19887,42 @@ def _identity_center_group_keys_for_user(email):
         pass
     return keys
 
-def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
+
+def _guardrail_identity_emails(primary_email=''):
+    identities = set()
+
+    def _add(value):
+        raw = str(value or '').strip().lower()
+        if not raw:
+            return
+        identities.add(raw)
+
+    _add(primary_email)
+    ident = _current_request_identity()
+    _add(ident.get('email'))
+    _add(_email_from_saml_session())
+    for hint in (_saml_identity_hints() or []):
+        raw = str(hint or '').strip()
+        if '@' in raw:
+            _add(raw)
+    return identities
+
+
+def _guardrail_email_matches(allowed_email, identity_emails):
+    candidate = str(allowed_email or '').strip().lower()
+    if not candidate:
+        return False
+    if candidate in identity_emails:
+        return True
+    candidate_local = _identity_local_part(candidate)
+    if not candidate_local:
+        return False
+    for item in identity_emails:
+        if _identity_local_part(item) == candidate_local:
+            return True
+    return False
+
+def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms, selected_role_id=''):
     """
     Evaluate DB write guardrails for a specific account + DB instance.
     Returns {'blocked': bool, 'reason': str, 'matched_rules': int}
@@ -7363,10 +19930,26 @@ def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
     if not _is_db_write_request(perms):
         return {'blocked': False, 'reason': '', 'matched_rules': 0}
 
+    selected_role = _effective_db_role_for_user(account_id, db_instance_id, user_email, selected_role_id)
+    if selected_role:
+        allowed_ops = {
+            str(item or '').strip().upper()
+            for item in (selected_role.get('actions') or [])
+            if str(item or '').strip()
+        }
+        requested_ops = {
+            str(item or '').strip().upper()
+            for item in _normalize_permissions_list(perms)
+            if str(item or '').strip()
+        }
+        if requested_ops and requested_ops.issubset(allowed_ops.union(_DB_READ_OPS)):
+            return {'blocked': False, 'reason': '', 'matched_rules': 0}
+
     cfg = _load_guardrails_config()
     rules = [_normalize_db_write_rule(r) for r in (cfg.get('databaseWriteControls') or [])]
     account_id = str(account_id or '').strip()
     db_instance_id = str(db_instance_id or '').strip()
+    identity_emails = _guardrail_identity_emails(user_email)
     user_email_l = str(user_email or '').strip().lower()
 
     matched_rules = []
@@ -7374,10 +19957,13 @@ def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
         if not rule.get('enabled') or not rule.get('block_write_actions'):
             continue
         r_acc = str(rule.get('account_id') or '').strip()
+        r_ou = str(rule.get('ou_id') or '').strip()
         r_db = str(rule.get('db_instance_id') or '').strip()
         if r_acc and account_id and r_acc != account_id:
             continue
         if r_acc and not account_id:
+            continue
+        if r_ou and not _account_matches_guardrail_scope(account_id, r_ou):
             continue
         if r_db and db_instance_id and r_db != db_instance_id:
             continue
@@ -7392,9 +19978,13 @@ def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
     allowed_group_keys = set()
     for rule in matched_rules:
         for em in (rule.get('allowed_users') or []):
-            if em:
-                allowed_users.add(str(em).strip().lower())
+            if isinstance(em, dict) and _guardrail_exception_active(em.get('expires_at')):
+                email = str(em.get('email') or '').strip().lower()
+                if email:
+                    allowed_users.add(email)
         for g in (rule.get('allowed_groups') or []):
+            if not _guardrail_exception_active((g or {}).get('expires_at')):
+                continue
             gid = str((g or {}).get('id') or '').strip().lower()
             gname = str((g or {}).get('name') or '').strip().lower()
             if gid:
@@ -7402,14 +19992,15 @@ def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
             if gname:
                 allowed_group_keys.add(gname)
 
-    if user_email_l and user_email_l in allowed_users:
+    if any(_guardrail_email_matches(email, identity_emails) for email in allowed_users):
         return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
 
     if allowed_group_keys:
-        local_keys = _local_group_keys_for_user(user_email_l)
+        lookup_email = user_email_l or next(iter(identity_emails), '')
+        local_keys = _local_group_keys_for_user(lookup_email)
         if local_keys.intersection(allowed_group_keys):
             return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
-        idc_keys = _identity_center_group_keys_for_user(user_email_l)
+        idc_keys = _identity_center_group_keys_for_user(lookup_email)
         if idc_keys.intersection(allowed_group_keys):
             return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules)}
 
@@ -7418,12 +20009,317 @@ def _evaluate_db_write_guardrail(account_id, db_instance_id, user_email, perms):
         reason = str(rule.get('reason') or '').strip()
         if reason:
             break
-    if not reason:
+    if not reason or len(reason) < 12 or 'allow' not in reason.lower() and 'not allowed' not in reason.lower() and 'approval' not in reason.lower():
         reason = (
-            'Write actions are blocked by database guardrails for this account and database instance. '
-            'Please contact an administrator if you need an exception.'
+            'You are not allowed to request write actions for this database target. '
+            'Please connect with DevOps and SecOps team for approvals to perform any kind of write actions. '
+            'Once you have approval, connect with NPAMx admin to allow you to place the request.'
         )
     return {'blocked': True, 'reason': reason, 'matched_rules': len(matched_rules)}
+
+
+def _db_exception_allows_write_rule(rule, identity_emails, lookup_email):
+    allowed_users = set()
+    allowed_group_keys = set()
+    for em in (rule.get('allowed_users') or []):
+        if isinstance(em, dict) and _guardrail_exception_active(em.get('expires_at')):
+            email = str(em.get('email') or '').strip().lower()
+            if email:
+                allowed_users.add(email)
+    for g in (rule.get('allowed_groups') or []):
+        if not _guardrail_exception_active((g or {}).get('expires_at')):
+            continue
+        gid = str((g or {}).get('id') or '').strip().lower()
+        gname = str((g or {}).get('name') or '').strip().lower()
+        if gid:
+            allowed_group_keys.add(gid)
+        if gname:
+            allowed_group_keys.add(gname)
+    if any(_guardrail_email_matches(email, identity_emails) for email in allowed_users):
+        return True
+    if allowed_group_keys:
+        local_keys = _local_group_keys_for_user(lookup_email)
+        if local_keys.intersection(allowed_group_keys):
+            return True
+        idc_keys = _identity_center_group_keys_for_user(lookup_email)
+        if idc_keys.intersection(allowed_group_keys):
+            return True
+    return False
+
+
+def _allowed_db_write_actions_from_rule(rule):
+    actions = []
+    for action in (rule.get('allowed_actions') or []):
+        token = str(action or '').strip().upper()
+        if token and token in _DB_REQUESTABLE_WRITE_OPS and token not in actions:
+            actions.append(token)
+    if actions:
+        return actions
+    # Backward compatibility: older exception rules had user/group exceptions but no
+    # per-action scoping. Preserve the earlier behavior for those saved rules.
+    if (rule.get('allowed_users') or rule.get('allowed_groups')) and bool(rule.get('block_write_actions')):
+        return list(_DB_REQUESTABLE_WRITE_OPS_ORDERED)
+    return []
+
+
+def _allowed_db_write_actions_for_identity(account_id, db_instance_id, user_email):
+    cfg = _load_guardrails_config()
+    rules = [_normalize_db_write_rule(r) for r in (cfg.get('databaseWriteControls') or [])]
+    account_id = str(account_id or '').strip()
+    db_instance_id = str(db_instance_id or '').strip()
+    identity_emails = _guardrail_identity_emails(user_email)
+    lookup_email = str(user_email or '').strip().lower() or next(iter(identity_emails), '')
+
+    matching_rules = []
+    for rule in rules:
+        if not rule.get('enabled') or not rule.get('block_write_actions'):
+            continue
+        r_acc = str(rule.get('account_id') or '').strip()
+        r_ou = str(rule.get('ou_id') or '').strip()
+        r_db = str(rule.get('db_instance_id') or '').strip()
+        if r_acc and account_id and r_acc != account_id:
+            continue
+        if r_acc and not account_id:
+            continue
+        if r_ou and not _account_matches_guardrail_scope(account_id, r_ou):
+            continue
+        if r_db and db_instance_id and r_db != db_instance_id:
+            continue
+        if r_db and not db_instance_id:
+            continue
+        matching_rules.append(rule)
+
+    if not matching_rules:
+        return []
+
+    allowed_actions = []
+    for rule in matching_rules:
+        if not _db_exception_allows_write_rule(rule, identity_emails, lookup_email):
+            continue
+        for token in _allowed_db_write_actions_from_rule(rule):
+            if token not in allowed_actions:
+                allowed_actions.append(token)
+    return allowed_actions
+
+
+def _effective_db_role_for_user(account_id, db_instance_id, user_email, role_id, engine=''):
+    rid = str(role_id or '').strip()
+    if not rid:
+        return None
+    roles = _effective_iam_role_templates_for_targets(account_id, db_instance_id, [user_email], engine=engine)
+    for role in roles:
+        if str(role.get('id') or '').strip() == rid:
+            return role
+    return None
+
+
+def _validate_requestable_db_permissions(account_id, db_instance_id, user_email, perms, selected_role_id='', engine=''):
+    requested_ops = [str(p or '').strip().upper() for p in _normalize_permissions_list(perms) if str(p or '').strip()]
+    if not requested_ops:
+        return None
+    for op in requested_ops:
+        if op in _DB_NEVER_REQUESTABLE_OPS:
+            return f'{op} cannot be requested through NPAMx.'
+    visible_ops = set(_DB_READ_OPS)
+    selected_role = _effective_db_role_for_user(account_id, db_instance_id, user_email, selected_role_id, engine=engine)
+    if selected_role:
+        visible_ops.update({
+            str(item or '').strip().upper()
+            for item in (selected_role.get('actions') or [])
+            if str(item or '').strip()
+        })
+    visible_ops.update(_allowed_db_write_actions_for_identity(account_id, db_instance_id, user_email))
+    invalid = [op for op in requested_ops if op not in visible_ops]
+    if invalid:
+        return 'The selected actions are not allowed for your account or approved exception scope: ' + ', '.join(invalid) + '.'
+    return None
+
+
+def _normalized_db_request_target_emails(caller_email, requested_user_emails):
+    caller = str(caller_email or '').strip().lower()
+    targets = [str(item or '').strip().lower() for item in (requested_user_emails or []) if str(item or '').strip()]
+    if not targets:
+        targets = [caller] if caller else []
+    unique_targets = []
+    for email in targets:
+        if email and email not in unique_targets:
+            unique_targets.append(email)
+    if any(email != caller for email in unique_targets):
+        if not _pam_admin_record_for_identity(
+            email=caller, nameid=_current_request_identity().get('nameid') or '', hints=_current_request_identity().get('hints') or {}
+        ):
+            return [], jsonify({'error': 'You can only request database access for yourself unless you are a PAM admin'}), 403
+    return unique_targets, None, None
+
+
+def _effective_iam_role_templates_for_targets(account_id, db_instance_id, target_emails, engine=''):
+    roles = [_normalize_iam_role_definition(item) for item in (_load_iam_role_catalog().get('roles') or [])]
+    if not target_emails:
+        return []
+    account_env = _resolve_account_environment(account_id)
+    target_engine = _normalize_db_engine_family(engine)
+
+    per_target_roles = []
+    for target_email in target_emails:
+        target = str(target_email or '').strip().lower()
+        group_keys = set()
+        for key in _user_group_ids_for_email(target):
+            normalized = _group_id_from_name(key)
+            if normalized:
+                group_keys.add(normalized)
+        target_roles = {}
+        for role in roles:
+            role_envs = [str(item or '').strip().lower() for item in (role.get('visible_environments') or []) if str(item or '').strip()]
+            if role_envs and account_env and account_env not in role_envs:
+                continue
+            role_engines = [
+                _normalize_db_engine_family(item)
+                for item in (role.get('engine_families') or [])
+                if _normalize_db_engine_family(item)
+            ]
+            if role_engines and target_engine and target_engine not in role_engines:
+                continue
+            assigned_users = {str(item or '').strip().lower() for item in (role.get('user_emails') or []) if str(item or '').strip()}
+            assigned_groups = {_group_id_from_name(item) for item in (role.get('group_ids') or []) if _group_id_from_name(item)}
+            default_visible = bool(role.get('default_visible'))
+            if not default_visible and target not in assigned_users and not group_keys.intersection(assigned_groups):
+                continue
+            role_actions = []
+            for action in (role.get('actions') or []):
+                token = str(action or '').strip().upper()
+                if token and token not in _DB_NEVER_REQUESTABLE_OPS:
+                    role_actions.append(token)
+            if not role_actions:
+                continue
+            filtered_actions = []
+            for action in role_actions:
+                if action not in filtered_actions:
+                    filtered_actions.append(action)
+            if not filtered_actions:
+                continue
+            target_roles[str(role.get('id') or '')] = {
+                'id': str(role.get('id') or '').strip(),
+                'name': str(role.get('name') or '').strip(),
+                'description': str(role.get('description') or '').strip(),
+                'actions': filtered_actions,
+                'request_role': str(role.get('request_role') or _derive_iam_request_role(filtered_actions)).strip().lower() or 'read_only',
+                'system_default': bool(role.get('system_default')),
+            }
+        per_target_roles.append(target_roles)
+
+    common_ids = set(per_target_roles[0].keys()) if per_target_roles else set()
+    for role_map in per_target_roles[1:]:
+        common_ids.intersection_update(role_map.keys())
+
+    results = []
+    for role in roles:
+        role_id = str(role.get('id') or '').strip()
+        if not role_id or role_id not in common_ids:
+            continue
+        shared_actions = None
+        for role_map in per_target_roles:
+            current_actions = role_map.get(role_id, {}).get('actions') or []
+            if shared_actions is None:
+                shared_actions = list(current_actions)
+            else:
+                shared_actions = [action for action in shared_actions if action in current_actions]
+        shared_actions = shared_actions or []
+        if not shared_actions:
+            continue
+        results.append({
+            'id': role_id,
+            'name': str(role.get('name') or role_id).strip(),
+            'description': str(role.get('description') or '').strip(),
+            'actions': shared_actions,
+            'request_role': str(role.get('request_role') or _derive_iam_request_role(shared_actions)).strip().lower() or 'read_only',
+            'engine_families': list(role.get('engine_families') or []),
+            'system_default': bool(role.get('system_default')),
+        })
+    return results
+
+
+def _evaluate_db_query_guardrail(account_id, db_instance_id, user_email, query):
+    normalized_query = str(query or '').strip()
+    if not normalized_query:
+        return {'blocked': False, 'reason': '', 'matched_rules': 0, 'matched_patterns': []}
+
+    cfg = _load_guardrails_config()
+    rules = [_normalize_db_query_rule(r) for r in (cfg.get('databaseQueryControls') or [])]
+    account_id = str(account_id or '').strip()
+    db_instance_id = str(db_instance_id or '').strip()
+    identity_emails = _guardrail_identity_emails(user_email)
+    user_email_l = str(user_email or '').strip().lower()
+    matched_rules = []
+    matched_patterns = []
+
+    for rule in rules:
+        if not rule.get('enabled'):
+            continue
+        r_acc = str(rule.get('account_id') or '').strip()
+        r_ou = str(rule.get('ou_id') or '').strip()
+        r_db = str(rule.get('db_instance_id') or '').strip()
+        if r_acc and r_acc != account_id:
+            continue
+        if r_ou and not _account_matches_guardrail_scope(account_id, r_ou):
+            continue
+        if r_db and r_db != db_instance_id:
+            continue
+        matched = [key for key in (rule.get('blocked_patterns') or []) if _DB_QUERY_GUARDRAIL_PATTERNS[key]['regex'].search(normalized_query)]
+        if matched:
+            matched_rules.append(rule)
+            matched_patterns.extend(matched)
+
+    if not matched_rules:
+        return {'blocked': False, 'reason': '', 'matched_rules': 0, 'matched_patterns': []}
+
+    allowed_users = set()
+    allowed_group_keys = set()
+    for rule in matched_rules:
+        for em in (rule.get('allowed_users') or []):
+            if isinstance(em, dict) and _guardrail_exception_active(em.get('expires_at')):
+                email = str(em.get('email') or '').strip().lower()
+                if email:
+                    allowed_users.add(email)
+        for g in (rule.get('allowed_groups') or []):
+            if not _guardrail_exception_active((g or {}).get('expires_at')):
+                continue
+            gid = str((g or {}).get('id') or '').strip().lower()
+            gname = str((g or {}).get('name') or '').strip().lower()
+            if gid:
+                allowed_group_keys.add(gid)
+            if gname:
+                allowed_group_keys.add(gname)
+
+    if any(_guardrail_email_matches(email, identity_emails) for email in allowed_users):
+        return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules), 'matched_patterns': matched_patterns}
+
+    if allowed_group_keys:
+        lookup_email = user_email_l or next(iter(identity_emails), '')
+        local_keys = _local_group_keys_for_user(lookup_email)
+        idc_keys = _identity_center_group_keys_for_user(lookup_email)
+        if local_keys.intersection(allowed_group_keys) or idc_keys.intersection(allowed_group_keys):
+            return {'blocked': False, 'reason': '', 'matched_rules': len(matched_rules), 'matched_patterns': matched_patterns}
+
+    reason = ''
+    for rule in matched_rules:
+        reason = str(rule.get('reason') or '').strip()
+        if reason:
+            break
+    if not reason:
+        labels = [
+            _DB_QUERY_GUARDRAIL_PATTERNS[key]['label']
+            for key in matched_patterns
+            if key in _DB_QUERY_GUARDRAIL_PATTERNS
+        ]
+        reason = 'Query blocked by database guardrails.'
+        if labels:
+            reason += ' Matched: ' + ', '.join(labels[:4]) + '.'
+    return {
+        'blocked': True,
+        'reason': reason,
+        'matched_rules': len(matched_rules),
+        'matched_patterns': matched_patterns,
+    }
 
 _READ_ONLY_DB_OPS = {'SELECT', 'SHOW', 'EXPLAIN', 'DESCRIBE', 'ANALYZE'}
 _SENSITIVE_CLASSIFICATIONS = {'pii', 'sensitive', 'confidential', 'restricted', 'phi', 'pci'}
@@ -7452,11 +20348,9 @@ def _classify_rds_data_tags(tags):
     Classifies Data_Classification values like PII/Sensitive/Confidential.
     """
     classification_keys = {
-        'data-classification',
-        'data_classification',
         'dataclassification',
-        'npamx:data-classification',
-        'npamx:classification',
+        'npamxdataclassification',
+        'npamxclassification',
         'classification',
         'sensitivity',
     }
@@ -7477,7 +20371,7 @@ def _classify_rds_data_tags(tags):
         'classification_tag_present': False,
     }
     for tag in customer_tags:
-        key = str(tag.get('Key') or '').strip().lower()
+        key = re.sub(r'[^a-z0-9]+', '', str(tag.get('Key') or '').strip().lower())
         val_raw = str(tag.get('Value') or '').strip()
         if not key:
             continue
@@ -7493,9 +20387,84 @@ def _classify_rds_data_tags(tags):
         break
     return info
 
+
+def _load_rds_tags_with_cluster_fallback(rds_client, db_instance):
+    tags = []
+    arn = str((db_instance.get('DBInstanceArn') if isinstance(db_instance, dict) else '') or '').strip()
+    if arn:
+        try:
+            tags = rds_client.list_tags_for_resource(ResourceName=arn).get('TagList', [])
+        except Exception:
+            tags = []
+
+    tag_meta = _classify_rds_data_tags(tags)
+    raw_engine = str((db_instance.get('Engine') if isinstance(db_instance, dict) else '') or '').strip().lower()
+    cluster_id = str((db_instance.get('DBClusterIdentifier') if isinstance(db_instance, dict) else '') or '').strip()
+
+    if tag_meta.get('classification_tag_present'):
+        return tags
+
+    def _merge_tag_list(base_tags, extra_tags):
+        merged = list(base_tags or [])
+        existing = {
+            f"{str(item.get('Key') or '').strip().lower()}::{str(item.get('Value') or '').strip()}"
+            for item in merged if isinstance(item, dict)
+        }
+        for item in extra_tags or []:
+            if not isinstance(item, dict):
+                continue
+            sig = f"{str(item.get('Key') or '').strip().lower()}::{str(item.get('Value') or '').strip()}"
+            if sig in existing:
+                continue
+            existing.add(sig)
+            merged.append(item)
+        return merged
+
+    replica_source_id = str((db_instance.get('ReadReplicaSourceDBInstanceIdentifier') if isinstance(db_instance, dict) else '') or '').strip()
+    if replica_source_id:
+        try:
+            source_items = (rds_client.describe_db_instances(DBInstanceIdentifier=replica_source_id) or {}).get('DBInstances') or []
+            source_db = source_items[0] if source_items else {}
+            source_arn = str(source_db.get('DBInstanceArn') or '').strip()
+            if source_arn:
+                source_tags = rds_client.list_tags_for_resource(ResourceName=source_arn).get('TagList', [])
+                merged = _merge_tag_list(tags, source_tags)
+                if _classify_rds_data_tags(merged).get('classification_tag_present'):
+                    return merged
+        except Exception:
+            pass
+
+    if not cluster_id or 'aurora' not in raw_engine:
+        return tags
+
+    try:
+        clusters = (rds_client.describe_db_clusters(DBClusterIdentifier=cluster_id) or {}).get('DBClusters') or []
+        cluster = clusters[0] if clusters else {}
+        cluster_arn = str(cluster.get('DBClusterArn') or '').strip()
+        if not cluster_arn:
+            return tags
+        cluster_tags = rds_client.list_tags_for_resource(ResourceName=cluster_arn).get('TagList', [])
+        if not cluster_tags:
+            return tags
+        return _merge_tag_list(tags, cluster_tags)
+    except Exception:
+        return tags
+
 def _is_read_only_ops(perms_upper):
     # Anything outside read ops is treated as non-read.
     return bool(perms_upper) and all(p in _READ_ONLY_DB_OPS for p in perms_upper)
+
+
+def _db_request_permission_set_access_marker(request_role='', permissions=None):
+    role = str(request_role or '').strip().lower()
+    if role == 'read_only':
+        return 'R'
+    if role in ('read_limited_write', 'read_full_write', 'admin'):
+        return 'W'
+    perms_upper = [str(p or '').strip().upper() for p in _normalize_permissions_list(permissions)]
+    if perms_upper:
+        return 'R' if _is_read_only_ops(perms_upper) else 'W'
+    return 'R'
 
 def _compute_db_approval_requirements(account_env, is_pii, perms_upper):
     """
@@ -7543,12 +20512,66 @@ def _compute_auth_mode(iam_enabled, password_enabled):
         return 'iam_only'
     return 'password_only'
 
-def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
+
+def _normalize_iam_auth_tag(tags):
+    for tag in tags or []:
+        key = re.sub(r'[^a-z0-9]+', '', str(tag.get('Key') or '').strip().lower())
+        value = str(tag.get('Value') or '').strip().lower()
+        if key not in (
+            'npamxiamauth',
+            'iamauth',
+            'npamxiamdbauth',
+            'iamdatabaseauthentication',
+            'iamdatabaseauthenticationenabled',
+        ):
+            continue
+        if value in ('enabled', 'true', 'yes', 'iam', 'on'):
+            return True
+        if value in ('disabled', 'false', 'no', 'off'):
+            return False
+    return None
+
+
+def _database_iam_not_enabled_reason(target_label):
+    safe_target = str(target_label or 'database target').strip() or 'database target'
+    return f"IAM authentication is not enabled for the selected {safe_target}. Please contact the DevOps team to enable IAM authentication before placing a request."
+
+
+def _database_request_block_reason(*, target_label, tags_present, iam_auth_enabled):
+    reasons = []
+    safe_target = str(target_label or 'database target').strip() or 'database target'
+    if not bool(tags_present):
+        reasons.append(f"Oops, I don't see required Data_Classification tag on the selected {safe_target}. {_support_contact_text()}")
+    if not bool(iam_auth_enabled):
+        reasons.append(_database_iam_not_enabled_reason(safe_target))
+    return ' '.join(reason.strip() for reason in reasons if str(reason or '').strip())
+
+
+def _default_profile_approver_email(user_email):
+    profile = _find_user_business_profile(user_email)
+    return (
+        _normalize_email_address(profile.get('manager_email'))
+        or _normalize_email_address(profile.get('manager_manager_email'))
+    )
+
+
+def _business_profile_gate_for_request(user_email):
+    profile = _find_user_business_profile(user_email)
+    missing = _business_profile_required_fields(profile)
+    if not missing:
+        return None
+    return {
+        'error': 'Please complete your profile before raising a database access request.',
+        'missing_fields': missing,
+    }
+
+def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1', account_id=None):
     """Resolve RDS auth capabilities from AWS metadata. Returns safe defaults on failure."""
     profile = {
         'instance_id': instance_id or '',
         'host': host or '',
         'region': region or 'ap-south-1',
+        'account_id': str(account_id or '').strip(),
         'engine': '',
         'db_resource_id': '',
         'iam_auth_enabled': False,
@@ -7562,7 +20585,7 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         'error': None
     }
     try:
-        rds = boto3.client('rds', region_name=profile['region'], config=AWS_CONFIG)
+        rds = _resource_client('rds', region_name=profile['region'], account_id=profile['account_id'] or None)
         instance = None
         if instance_id and str(instance_id).lower() != 'manual':
             try:
@@ -7588,20 +20611,18 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         # For RDS engines in scope, password auth remains available unless explicitly disabled by policy/tag.
         password_enabled = True
         auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
-        arn = instance.get('DBInstanceArn')
-        tags = []
-        if arn:
-            try:
-                tags = rds.list_tags_for_resource(ResourceName=arn).get('TagList', [])
-                auth_mode = _apply_auth_mode_override_from_tags(auth_mode, tags)
-            except Exception:
-                tags = []
+        tags = _load_rds_tags_with_cluster_fallback(rds, instance)
+        try:
+            auth_mode = _apply_auth_mode_override_from_tags(auth_mode, tags)
+        except Exception:
+            pass
 
         tag_meta = _classify_rds_data_tags(tags)
 
         profile.update({
             'instance_id': str(instance.get('DBInstanceIdentifier') or instance_id or ''),
             'host': str((instance.get('Endpoint') or {}).get('Address') or host or ''),
+            'account_id': str(profile.get('account_id') or account_id or ''),
             'engine': str(instance.get('Engine') or ''),
             'db_resource_id': str(instance.get('DbiResourceId') or ''),
             'iam_auth_enabled': auth_mode in ('iam_only', 'iam_and_password'),
@@ -7621,7 +20642,85 @@ def _resolve_rds_auth_profile(instance_id=None, host=None, region='ap-south-1'):
         return profile
 
 
-def _describe_rds_instance_endpoint(*, instance_id: str, region: str) -> dict:
+def _resolve_redshift_auth_profile(cluster_id=None, host=None, region='ap-south-1', account_id=None):
+    """Resolve Redshift auth capabilities from AWS metadata."""
+    profile = {
+        'instance_id': cluster_id or '',
+        'cluster_identifier': cluster_id or '',
+        'host': host or '',
+        'region': region or 'ap-south-1',
+        'account_id': str(account_id or '').strip(),
+        'engine': 'redshift',
+        'resource_kind': 'redshift_cluster',
+        'cluster_arn': '',
+        'iam_auth_enabled': True,
+        'password_auth_enabled': False,
+        'auth_mode': 'iam_only',
+        'is_pii': False,
+        'data_classification': '',
+        'tags_present': True,
+        'classification_tag_present': True,
+        'source': 'default',
+        'error': None,
+    }
+    try:
+        redshift = _resource_client('redshift', region_name=profile['region'], account_id=profile['account_id'] or None)
+        cluster = None
+        if cluster_id and str(cluster_id).lower() != 'manual':
+            try:
+                response = redshift.describe_clusters(ClusterIdentifier=cluster_id)
+                items = response.get('Clusters', [])
+                if items:
+                    cluster = items[0]
+            except Exception:
+                cluster = None
+        if not cluster:
+            response = redshift.describe_clusters()
+            for item in response.get('Clusters', []):
+                item_id = str(item.get('ClusterIdentifier') or '')
+                item_host = str((item.get('Endpoint') or {}).get('Address') or '')
+                if (cluster_id and item_id == str(cluster_id)) or (host and item_host == str(host)):
+                    cluster = item
+                    break
+        if not cluster:
+            profile['source'] = 'not_found'
+            return profile
+
+        endpoint = cluster.get('Endpoint') or {}
+        profile.update({
+            'instance_id': str(cluster.get('ClusterIdentifier') or cluster_id or ''),
+            'cluster_identifier': str(cluster.get('ClusterIdentifier') or cluster_id or ''),
+            'host': str(endpoint.get('Address') or host or ''),
+            'region': profile['region'],
+            'cluster_arn': str(cluster.get('ClusterNamespaceArn') or cluster.get('ClusterArn') or ''),
+            'source': 'redshift_metadata',
+        })
+        return profile
+    except Exception as e:
+        profile['error'] = str(e)
+        profile['source'] = 'error'
+        return profile
+
+
+def _resolve_database_auth_profile(*, instance_id=None, host=None, region='ap-south-1', account_id=None, engine='', resource_kind=''):
+    eng = str(engine or '').strip().lower()
+    kind = str(resource_kind or '').strip().lower()
+    if kind == 'redshift_cluster' or eng == 'redshift':
+        return _resolve_redshift_auth_profile(
+            cluster_id=instance_id,
+            host=host,
+            region=region,
+            account_id=account_id,
+        )
+    return _resolve_rds_auth_profile(
+        instance_id=instance_id,
+        host=host,
+        region=region,
+        account_id=account_id,
+    )
+
+
+def _describe_rds_instance_endpoint(*, instance_id: str, region: str, account_id: str = '') -> dict:
     """
     Server-side helper to resolve an RDS instance endpoint.
 
@@ -7631,7 +20730,7 @@ def _describe_rds_instance_endpoint(*, instance_id: str, region: str) -> dict:
     reg = str(region or "").strip() or "ap-south-1"
     if not inst:
         raise RuntimeError("db_instance_id is required")
-    rds = boto3.client("rds", region_name=reg, config=AWS_CONFIG)
+    rds = _resource_client("rds", region_name=reg, account_id=account_id)
     resp = rds.describe_db_instances(DBInstanceIdentifier=inst)
     dbi = (resp.get("DBInstances") or [None])[0]
     if not dbi:
@@ -7644,7 +20743,74 @@ def _describe_rds_instance_endpoint(*, instance_id: str, region: str) -> dict:
     return {"address": addr, "port": port, "engine": str(dbi.get("Engine") or ""), "region": reg}
 
 
-def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_username: str) -> dict:
+def _describe_redshift_cluster_endpoint(*, cluster_id: str, region: str, account_id: str = '') -> dict:
+    """Resolve a Redshift provisioned cluster endpoint."""
+    cid = str(cluster_id or "").strip()
+    reg = str(region or "").strip() or "ap-south-1"
+    if not cid:
+        raise RuntimeError("cluster_id is required")
+    redshift = _resource_client("redshift", region_name=reg, account_id=account_id)
+    resp = redshift.describe_clusters(ClusterIdentifier=cid)
+    cluster = (resp.get("Clusters") or [None])[0]
+    if not cluster:
+        raise RuntimeError("Redshift cluster not found")
+    endpoint = cluster.get("Endpoint") or {}
+    addr = str(endpoint.get("Address") or "").strip()
+    port = int(endpoint.get("Port") or 0) if endpoint.get("Port") else 0
+    if not addr or port <= 0:
+        raise RuntimeError("Redshift endpoint is unavailable")
+    return {
+        "address": addr,
+        "port": port,
+        "engine": "redshift",
+        "region": reg,
+        "cluster_identifier": str(cluster.get("ClusterIdentifier") or cid),
+    }
+
+
+def _describe_rds_proxy_endpoint(*, proxy_host: str, region: str, account_id: str = '') -> dict:
+    """
+    Resolve an RDS Proxy endpoint into its proxy resource id.
+
+    This is required for IAM DB auth through RDS Proxy, where rds-db:connect
+    policies must target the proxy resource id (prx-...) rather than the DB
+    instance resource id.
+    """
+    host = str(proxy_host or "").strip().lower()
+    reg = str(region or "").strip() or "ap-south-1"
+    if not host or host == "proxy-not-configured":
+        raise RuntimeError("proxy_host is required")
+
+    rds = _resource_client("rds", region_name=reg, account_id=account_id)
+    marker = None
+    while True:
+        kwargs = {}
+        if marker:
+            kwargs["Marker"] = marker
+        resp = rds.describe_db_proxies(**kwargs)
+        for proxy in resp.get("DBProxies", []) or []:
+            endpoint = str(proxy.get("Endpoint") or "").strip().lower()
+            if endpoint != host:
+                continue
+            arn = str(proxy.get("DBProxyArn") or "").strip()
+            resource_id = ""
+            if ":db-proxy:" in arn:
+                resource_id = arn.split(":db-proxy:", 1)[1].strip()
+            return {
+                "endpoint": endpoint,
+                "port": 3306,
+                "region": reg,
+                "resource_id": resource_id,
+                "arn": arn,
+                "default_auth_scheme": str(proxy.get("DefaultAuthScheme") or "").strip(),
+            }
+        marker = resp.get("Marker")
+        if not marker:
+            break
+    raise RuntimeError(f"RDS Proxy not found for endpoint {proxy_host}")
+
+
+def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_username: str, account_id: str = '') -> dict:
     """
     Generate an IAM DB auth token (short-lived, ~15 minutes).
 
@@ -7653,8 +20819,8 @@ def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_usernam
     user = str(db_username or "").strip()
     if not user:
         raise RuntimeError("db_username is required for IAM token generation")
-    info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region)
-    rds = boto3.client("rds", region_name=info["region"], config=AWS_CONFIG)
+    info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region, account_id=account_id)
+    rds = _resource_client("rds", region_name=info["region"], account_id=account_id)
     token = rds.generate_db_auth_token(
         DBHostname=info["address"],
         Port=int(info["port"]),
@@ -7666,72 +20832,274 @@ def _generate_rds_iam_db_auth_token(*, instance_id: str, region: str, db_usernam
     return {"token": token, "token_expires_at": expires_at}
 
 
-def _local_iam_token_instructions(instance_id: str, region: str, db_username: str) -> dict:
+def _local_iam_token_instructions(
+    instance_id: str,
+    region: str,
+    db_username: str,
+    db_name: str = '',
+    engine: str = '',
+    account_id: str = '',
+    connect_host: str = '',
+    connect_port: int | str = 0,
+) -> dict:
     """Build instructions and CLI command for generating IAM DB auth token on the user's machine."""
     try:
-        info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region)
-        hostname = info.get("address") or ""
-        port = info.get("port") or 3306
-        reg = info.get("region") or region
+        reg = str(region or "").strip() or "ap-south-1"
+        hostname = str(connect_host or "").strip()
+        port = int(connect_port or 0) if str(connect_port or "").strip() else 0
+        if not hostname or port <= 0:
+            info = _describe_rds_instance_endpoint(instance_id=instance_id, region=region, account_id=account_id)
+            hostname = info.get("address") or ""
+            port = int(info.get("port") or 3306)
+            reg = info.get("region") or reg
         user = str(db_username or "").strip()
         if not hostname or not user:
             return {"available": False, "reason": "Endpoint or username not available"}
+        engine_l = str(engine or "").strip().lower()
+        is_postgres = "postgres" in engine_l
+        database = str(db_name or "").strip() or ("postgres" if is_postgres else "")
         cli_cmd = (
             f"aws rds generate-db-auth-token "
             f"--hostname {hostname} --port {port} --username {user} --region {reg}"
         )
-        token_export_cmd = (
-            f"TOKEN=\"$({cli_cmd})\""
-        )
-        mysql_cmd = (
-            f"MYSQL_PWD=\"$TOKEN\" mysql "
-            f"--host {hostname} --port {port} --user {user} "
-            f"--ssl --protocol=TCP"
-        )
+        if is_postgres:
+            token_export_cmd = "\n".join([
+                f"TOKEN=\"$({cli_cmd})\"",
+                "printf 'IAM Token Password: %s\\n' \"$TOKEN\"",
+            ])
+            connect_cmd = (
+                f"PGPASSWORD=\"$TOKEN\" psql "
+                f"\"host={hostname} port={port} dbname={database} user={user} sslmode=require\""
+            )
+        else:
+            token_export_cmd = "\n".join([
+                "export LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1",
+                f"TOKEN=\"$({cli_cmd})\"",
+                "printf 'IAM Token Password: %s\\n' \"$TOKEN\"",
+            ])
+            connect_cmd = (
+                f"MYSQL_PWD=\"$TOKEN\" mysql "
+                f"--host {hostname} --port {port} --user {user} "
+                f"--enable-cleartext-plugin --ssl-mode=REQUIRED --protocol=TCP"
+            )
         return {
             "available": True,
             "heading": "Get credentials: run these commands on your machine",
-            "steps": [
-                "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
-                "2. Log in (example): aws sso login --profile <your-profile>",
-                "3. Generate token (valid ~15 minutes), then run the MySQL command.",
-                "4. For DBeaver/Workbench, use the generated token as password and reconnect when token expires.",
-            ],
+            "service": "postgres" if is_postgres else "mysql",
+            "steps": (
+                [
+                    "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+                    "2. Log in (example): aws sso login --profile <your-profile>",
+                    "3. Generate token for the endpoint (valid ~15 minutes) and copy the printed IAM Token Password.",
+                    "4. Run the psql command or paste the token into DBeaver/your PostgreSQL client password field.",
+                ] if is_postgres else [
+                    "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+                    "2. Log in (example): aws sso login --profile <your-profile>",
+                    "3. Generate token for the endpoint (valid ~15 minutes) and copy the printed IAM Token Password.",
+                    "4. Run the MySQL command or paste the token into DBeaver/MySQL Workbench password field.",
+                ]
+            ),
             "cli_command": cli_cmd,
             "token_command": token_export_cmd,
-            "mysql_connect_command": mysql_cmd,
-            "dbeaver_steps": [
-                "Driver: MySQL / MariaDB",
-                f"Host: {hostname}",
-                f"Port: {port}",
-                f"Username: {user}",
-                "Password: paste output from token command",
-                "SSL: enable TLS/SSL (recommended/required)",
-                "When token expires (~15 min), generate a new token and reconnect",
-            ],
-            "workbench_steps": [
-                "Connection Method: Standard TCP/IP",
-                f"Hostname: {hostname}",
-                f"Port: {port}",
-                f"Username: {user}",
-                "Password: paste output from token command",
-                "SSL: enable SSL (REQUIRED when IAM auth is enforced)",
-                "Regenerate token after ~15 min and update password",
-            ],
+            "token_command_label": "Save token in shell variable and print password:",
+            "connect_command": connect_cmd,
+            "connect_command_label": "Connect with psql:" if is_postgres else "Connect with MySQL CLI:",
+            "mysql_connect_command": connect_cmd if not is_postgres else "",
+            "dbeaver_steps": (
+                [
+                    "Driver: PostgreSQL",
+                    f"Host: {hostname}",
+                    f"Port: {port}",
+                    f"Database: {database}",
+                    f"Username: {user}",
+                    "Password: paste the printed IAM Token Password",
+                    "SSL: require SSL/TLS",
+                    "Generate a new token and reconnect when it expires (~15 min)",
+                ] if is_postgres else [
+                    "Driver: MySQL / MariaDB",
+                    f"Host: {hostname}",
+                    f"Port: {port}",
+                    f"Username: {user}",
+                    "Password: paste the printed IAM Token Password",
+                    "SSL: enable TLS/SSL (required)",
+                    "Generate a new token and reconnect when it expires (~15 min)",
+                ]
+            ),
+            "workbench_steps": (
+                [] if is_postgres else [
+                    "Connection Method: Standard TCP/IP",
+                    f"Hostname: {hostname}",
+                    f"Port: {port}",
+                    f"Username: {user}",
+                    "Password: paste the printed IAM Token Password",
+                    "SSL: enable SSL (REQUIRED when IAM auth is enforced)",
+                    "Generate a new token and reconnect when it expires (~15 min)",
+                ]
+            ),
             "hostname": hostname,
             "port": port,
             "username": user,
             "region": reg,
+            "database": database,
         }
     except Exception:
         return {"available": False, "reason": "Could not resolve RDS endpoint for instructions"}
 
 
+def _basic_local_iam_token_instructions(*, hostname: str, port, db_username: str, region: str, db_name: str = '', engine: str = '') -> dict:
+    """Best-effort IAM token instructions when proxy host/port are already known."""
+    host = str(hostname or "").strip()
+    user = str(db_username or "").strip()
+    reg = str(region or "").strip() or "ap-south-1"
+    engine_l = str(engine or "").strip().lower()
+    is_postgres = "postgres" in engine_l
+    database = str(db_name or "").strip() or ("postgres" if is_postgres else "")
+    try:
+        resolved_port = int(port or 3306)
+    except Exception:
+        resolved_port = 3306
+    if not host or not user:
+        return {"available": False, "reason": "Endpoint or username not available"}
+    cli_cmd = (
+        f"aws rds generate-db-auth-token "
+        f"--hostname {host} --port {resolved_port} --username {user} --region {reg}"
+    )
+    if is_postgres:
+        token_export_cmd = "\n".join([
+            f"TOKEN=\"$({cli_cmd})\"",
+            "printf 'IAM Token Password: %s\\n' \"$TOKEN\"",
+        ])
+        connect_cmd = (
+            f"PGPASSWORD=\"$TOKEN\" psql "
+            f"\"host={host} port={resolved_port} dbname={database} user={user} sslmode=require\""
+        )
+    else:
+        token_export_cmd = "\n".join([
+            "export LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1",
+            f"TOKEN=\"$({cli_cmd})\"",
+            "printf 'IAM Token Password: %s\\n' \"$TOKEN\"",
+        ])
+        connect_cmd = (
+            f"MYSQL_PWD=\"$TOKEN\" mysql "
+            f"--host {host} --port {resolved_port} --user {user} "
+            f"--enable-cleartext-plugin --ssl-mode=REQUIRED --protocol=TCP"
+        )
+    return {
+        "available": True,
+        "heading": "Get credentials: run these commands on your machine",
+        "service": "postgres" if is_postgres else "mysql",
+        "steps": (
+            [
+                "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+                "2. Log in (example): aws sso login --profile <your-profile>",
+                "3. Generate token (valid ~15 minutes) and copy the printed IAM Token Password.",
+                "4. Run the psql command or paste token into your PostgreSQL client password field.",
+            ] if is_postgres else [
+                "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+                "2. Log in (example): aws sso login --profile <your-profile>",
+                "3. Generate token (valid ~15 minutes) and copy the printed IAM Token Password.",
+                "4. Run the MySQL command or paste token into DBeaver/MySQL Workbench password field.",
+            ]
+        ),
+        "cli_command": cli_cmd,
+        "token_command": token_export_cmd,
+        "token_command_label": "Save token in shell variable and print password:",
+        "connect_command": connect_cmd,
+        "connect_command_label": "Connect with psql:" if is_postgres else "Connect with MySQL CLI:",
+        "mysql_connect_command": connect_cmd if not is_postgres else "",
+        "hostname": host,
+        "port": resolved_port,
+        "username": user,
+        "region": reg,
+        "database": database,
+    }
+
+
+def _local_redshift_iam_instructions(
+    *,
+    cluster_identifier: str,
+    region: str,
+    db_username: str,
+    db_name: str,
+    hostname: str,
+    port,
+) -> dict:
+    """Build local AWS CLI + psql instructions for Redshift IAM login."""
+    cluster_id = str(cluster_identifier or "").strip()
+    host = str(hostname or "").strip()
+    user = str(db_username or "").strip()
+    database = str(db_name or "").strip() or "dev"
+    reg = str(region or "").strip() or "ap-south-1"
+    try:
+        resolved_port = int(port or 5439)
+    except Exception:
+        resolved_port = 5439
+    if not cluster_id or not host or not user:
+        return {"available": False, "reason": "Cluster endpoint or username not available"}
+    creds_cmd = (
+        f"aws redshift get-cluster-credentials "
+        f"--cluster-identifier {cluster_id} "
+        f"--db-user {user} "
+        f"--db-name {database} "
+        f"--duration-seconds 900 "
+        f"--region {reg}"
+    )
+    token_export_cmd = "\n".join([
+        f"CREDS_JSON=\"$({creds_cmd})\"",
+        "export REDSHIFT_DB_USER=\"$(printf '%s' \"$CREDS_JSON\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"DbUser\"])')\"",
+        "export REDSHIFT_DB_PASSWORD=\"$(printf '%s' \"$CREDS_JSON\" | python3 -c 'import json,sys; print(json.load(sys.stdin)[\"DbPassword\"])')\"",
+        "printf 'DbUser: %s\\n' \"$REDSHIFT_DB_USER\"",
+        "printf 'DbPassword: %s\\n' \"$REDSHIFT_DB_PASSWORD\"",
+    ])
+    psql_cmd = (
+        f"PGPASSWORD=\"$REDSHIFT_DB_PASSWORD\" psql "
+        f"\"host={host} port={resolved_port} dbname={database} user=$REDSHIFT_DB_USER sslmode=require\""
+    )
+    return {
+        "available": True,
+        "service": "redshift",
+        "heading": "Get credentials: fetch temporary Redshift login locally",
+        "steps": [
+            "1. Configure AWS CLI with your own Identity Center user session (not admin/shared credentials).",
+            "2. Log in first, for example: aws sso login --profile <your-profile>.",
+            "3. Run the command below to fetch, export, and print temporary Redshift DbUser and DbPassword (valid ~15 minutes).",
+            "4. Use REDSHIFT_DB_USER and REDSHIFT_DB_PASSWORD with psql or your SQL client.",
+            "5. Re-run the same command whenever the temporary password expires.",
+        ],
+        "cli_command": "",
+        "token_command": token_export_cmd,
+        "token_command_label": "Fetch temporary Redshift credentials:",
+        "connect_command": psql_cmd,
+        "connect_command_label": "Connect with psql:",
+        "dbeaver_steps": [
+            "Driver: Amazon Redshift",
+            f"Host: {host}",
+            f"Port: {resolved_port}",
+            f"Database: {database}",
+            "Username: use DbUser from the AWS CLI output",
+            "Password: use DbPassword from the AWS CLI output",
+            "SSL: require SSL/TLS",
+            "Reconnect with fresh credentials when they expire (~15 min).",
+        ],
+        "hostname": host,
+        "port": resolved_port,
+        "username": user,
+        "region": reg,
+        "database": database,
+        "cluster_identifier": cluster_id,
+    }
+
+
 def _auth_mode_user_hint(profile):
     mode = str((profile or {}).get('auth_mode') or 'password_only')
+    target_label = 'Redshift cluster' if str((profile or {}).get('engine') or '').strip().lower() == 'redshift' else 'RDS instance'
     if mode == 'iam_only':
         return (
-            "This RDS instance supports IAM database authentication. After approval, NPAMX will show IAM token sign-in steps in My Requests."
+            (
+                "This Redshift cluster uses IAM-based temporary database credentials. After approval, NPAMX will show the AWS CLI steps to fetch one-time login credentials in My Requests."
+                if target_label == 'Redshift cluster'
+                else "This RDS instance supports IAM database authentication. After approval, NPAMX will show IAM token sign-in steps in My Requests."
+            )
         )
     if mode == 'iam_and_password':
         return (
@@ -7739,7 +21107,11 @@ def _auth_mode_user_hint(profile):
             "Tell me your preferred method and I will prepare the right request."
         )
     return (
-        "This RDS instance uses password-based access in NPAMX. After approval, time-limited credentials will appear in My Requests under Database Access."
+        (
+            "This Redshift cluster is not configured for IAM login through NPAMX yet."
+            if target_label == 'Redshift cluster'
+            else "This RDS instance uses password-based access in NPAMX. After approval, time-limited credentials will appear in My Requests under Database Access."
+        )
     )
 
 def _resolve_account_environment(account_id):
@@ -7850,6 +21222,45 @@ def _request_account_env(req):
     return _resolve_account_environment(req.get('account_id'))
 
 
+def _database_request_max_duration_hours(account_env='', request_role='', permissions=None):
+    env = _normalize_env_tag(account_env) or 'nonprod'
+    access_level = _approval_access_level_for_request(role=request_role, permissions=permissions)
+    if env in ('nonprod', 'sandbox'):
+        return 720 if access_level == 'read_only' else 120
+    return 72
+
+
+def _database_request_max_duration_days(account_env='', request_role='', permissions=None):
+    return max(1, int(math.ceil(_database_request_max_duration_hours(account_env, request_role, permissions) / 24.0)))
+
+
+def _normalize_database_owner_email(value):
+    email = str(value or '').strip().lower()
+    if not email:
+        return ''
+    if not EMAIL_RE.match(email):
+        raise ValueError('DB owner email is invalid.')
+    domain = _request_approver_email_domain()
+    if domain and not email.endswith('@' + domain):
+        raise ValueError(f'DB owner email must end with @{domain}.')
+    return email
+
+
+def _apply_database_workflow_contact_overrides(workflow, *, request_approver_email='', db_owner_email=''):
+    item = dict(workflow or {})
+    contacts = dict(item.get('approver_contacts') if isinstance(item.get('approver_contacts'), dict) else {})
+    primary_email = str(request_approver_email or '').strip().lower()
+    owner_email = str(db_owner_email or '').strip().lower()
+    if primary_email:
+        contacts['primary'] = primary_email
+        item['primary_email'] = primary_email
+    if owner_email:
+        contacts['db_owner'] = owner_email
+        item['db_owner_email'] = owner_email
+    item['approver_contacts'] = contacts
+    return item
+
+
 def _request_execution_plane(req):
     if not isinstance(req, dict):
         return 'nonprod'
@@ -7928,20 +21339,25 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
     # Idempotency: if already ACTIVE and not expired, do nothing.
     if str(req.get('status') or '').strip().lower() == 'active' and not _is_db_request_expired(req):
         _set_activation_step(req, 'access_ready', 'done', 'Access is ready.')
-        return {'status': 'ACTIVE'}
+        return {'status': 'active'}
 
     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+    resource_kind = str(req.get('resource_kind') or '').strip().lower()
+    engine_l = str(req.get('engine') or '').strip().lower()
     # If instance supports IAM but request was stored as password, use IAM so permission set is created
     if effective_auth == 'password' and req.get('iam_auth_enabled'):
         effective_auth = 'iam'
         req['effective_auth'] = 'iam'
     elif effective_auth == 'password' and (req.get('db_instance_id') and req.get('db_region')):
         try:
-            rds_profile = _resolve_rds_auth_profile(
+            db_profile = _resolve_database_auth_profile(
                 instance_id=req.get('db_instance_id'),
                 region=str(req.get('db_region') or ''),
+                account_id=str(req.get('account_id') or ''),
+                engine=engine_l,
+                resource_kind=resource_kind,
             )
-            if rds_profile.get('iam_auth_enabled'):
+            if db_profile.get('iam_auth_enabled'):
                 effective_auth = 'iam'
                 req['effective_auth'] = 'iam'
                 req['iam_auth_enabled'] = True
@@ -7952,14 +21368,18 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         duration_hours = int(duration_hours)
     except Exception:
         duration_hours = 2
+    max_duration_hours = _database_request_max_duration_hours(
+        _request_account_env(req),
+        req.get('role'),
+        req.get('permissions'),
+    )
     if duration_hours < 1:
         duration_hours = 1
-    if duration_hours > 72:
-        duration_hours = 72
+    if duration_hours > max_duration_hours:
+        duration_hours = max_duration_hours
 
     now = datetime.now()
     req['approved_at'] = req.get('approved_at') or now.isoformat()
-    req['activated_at'] = now.isoformat()
 
     # Collect database names (within the selected instance) for grants.
     dbs = req.get('databases', []) if isinstance(req.get('databases'), list) else []
@@ -7977,6 +21397,10 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
     if dbs and isinstance(dbs[0], dict):
         engine = str(dbs[0].get('engine') or '').strip()
     engine = engine or str(req.get('engine') or 'mysql').strip()
+    vault_connection_name, vault_connection_source = _resolve_request_vault_connection_name(req, engine, req_plane)
+    if vault_connection_name:
+        req['vault_connection_name'] = vault_connection_name
+        req['vault_connection_source'] = vault_connection_source
 
     allowed_ops = _normalize_permissions_list(req.get('permissions'))
 
@@ -7984,11 +21408,22 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         if effective_auth == 'iam':
             # IAM DB auth: create DB user in Vault once, then retry only the SSO permission-set path.
             # This prevents duplicate DB users when activation is retried after IAM permission errors.
-            _set_activation_step(req, 'vault_user_created', 'in_progress', 'Creating database user in Vault...')
             existing_db_user = str(req.get('db_username') or '').strip()
             existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
             vault_session_expired = _is_db_request_expired(req, now=now)
-            has_materialized_vault_user = bool(existing_db_user) and not vault_session_expired
+            has_materialized_vault_user = bool(existing_db_user) and bool(existing_lease) and not vault_session_expired
+            requester = _resolve_requester_for_vault(req)
+            preview_db_username = VaultManager.preview_database_username(
+                requester=requester,
+                request_id=rid,
+                engine=engine,
+            )
+            target_db_username = existing_db_user or preview_db_username
+
+            is_redshift_iam_flow = resource_kind == 'redshift_cluster' or engine_l == 'redshift'
+            # Create Vault DB user first for IAM requests so rds-db:connect/redshift policy
+            # is always built with the exact materialized username (including random suffixes).
+            vault_first_iam_flow = str(os.getenv('VAULT_FIRST_IAM_FLOW', '1')).strip().lower() not in ('0', 'false', 'no')
 
             if has_materialized_vault_user:
                 print(f"DB IAM: reusing existing Vault DB user for {rid}: {existing_db_user}", flush=True)
@@ -8004,28 +21439,37 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
                 req['iam_permission_set_name'] = ''
                 _set_activation_step(req, 'vault_user_created', 'done', f"User created: {existing_db_user}")
                 _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
-            else:
+            elif vault_first_iam_flow:
+                req['vault_token'] = ''
+                req['password'] = ''
+                req['status'] = 'approved'
+                req['iam_permission_set_arn'] = ''
+                req['iam_permission_set_name'] = ''
+                _set_activation_step(req, 'vault_user_created', 'in_progress', 'Creating database user in Vault...')
+                _set_activation_step(req, 'db_permissions_attached', 'pending', 'Database grants will be applied during Vault user creation.')
                 vault_lock = _db_activation_lock_for(rid)
                 if not vault_lock.acquire(blocking=False):
                     raise RuntimeError('Activation in progress')
                 try:
-                    # Re-check after lock acquisition to avoid duplicate Vault user creation under parallel polls.
                     existing_db_user = str(req.get('db_username') or '').strip()
                     existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
-                    has_materialized_vault_user = bool(existing_db_user) and not _is_db_request_expired(req, now=now)
-                    if has_materialized_vault_user:
+                    has_materialized_vault_user = bool(existing_db_user) and bool(existing_lease) and not _is_db_request_expired(req, now=datetime.now())
+                    if has_materialized_vault_user and existing_lease:
                         req['db_username'] = existing_db_user
-                        if existing_lease:
-                            req['vault_lease_id'] = existing_lease
-                            req['lease_id'] = existing_lease
+                        req['vault_lease_id'] = existing_lease
+                        req['lease_id'] = existing_lease
                     else:
-                        requester = _resolve_requester_for_vault(req)
                         vault_creds = VaultManager.create_database_session(
                             request_id=rid,
                             engine=engine,
+                            db_instance_id=str(req.get('db_instance_id') or '').strip(),
+                            connection_name=vault_connection_name,
                             db_names=db_names,
+                            schema_name=str(req.get('requested_schema_name') or '').strip(),
+                            table_names=list(req.get('requested_tables') or []) or [str(req.get('requested_table_name') or '').strip()],
                             allowed_ops=allowed_ops,
                             duration_hours=duration_hours,
+                            request_role=str(req.get('role') or '').strip().lower(),
                             requester=requester,
                             auth_type='iam',
                             plane=req_plane,
@@ -8038,26 +21482,32 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
                         req['lease_id'] = lease_id
                         req['vault_token'] = ''
                         req['password'] = ''
-                        req['db_username'] = vault_creds.get('db_username', '') or str(req.get('requested_db_username') or '').strip()
+                        req['db_username'] = vault_creds.get('db_username', '') or preview_db_username
                         req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
-                        req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
+                        req['expires_at'] = vault_creds.get('expires_at') or (datetime.now() + timedelta(hours=duration_hours)).isoformat()
                         req['expiry_time'] = req['expires_at']
-                        # Keep approved until permission set is successfully created/assigned to requester.
-                        req['status'] = 'approved'
-                        req['iam_permission_set_arn'] = ''
-                        req['iam_permission_set_name'] = ''
                 finally:
                     vault_lock.release()
-
-                created_name = str(req.get('db_username') or '').strip()
-                _set_activation_step(req, 'vault_user_created', 'done', f"User created: {created_name}" if created_name else 'User created.')
+                target_db_username = str(req.get('db_username') or '').strip() or preview_db_username
+                _set_activation_step(req, 'vault_user_created', 'done', f"User created: {target_db_username}" if target_db_username else 'User created.')
                 _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
+            else:
+                req['vault_token'] = ''
+                req['password'] = ''
+                req['status'] = 'approved'
+                req['iam_permission_set_arn'] = ''
+                req['iam_permission_set_name'] = ''
+                _set_activation_step(req, 'vault_user_created', 'pending', 'Database user will be created after permission set assignment.')
+                _set_activation_step(req, 'db_permissions_attached', 'pending', 'Database grants will be applied after permission set assignment.')
             db_resource_id = str(req.get('db_resource_id') or '').strip()
             if not db_resource_id and req.get('db_instance_id') and req.get('db_region'):
                 try:
-                    resolved = _resolve_rds_auth_profile(
+                    resolved = _resolve_database_auth_profile(
                         instance_id=req.get('db_instance_id'),
                         region=str(req.get('db_region') or ''),
+                        account_id=str(req.get('account_id') or ''),
+                        engine=engine,
+                        resource_kind=resource_kind,
                     )
                     db_resource_id = str(resolved.get('db_resource_id') or '').strip()
                     if db_resource_id:
@@ -8067,19 +21517,27 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             auth_profile = {
                 'region': str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
                 'db_resource_id': db_resource_id,
+                'proxy_host': _resolve_db_user_connect_endpoint(req)[0],
+                'resource_kind': resource_kind,
+                'cluster_identifier': str(req.get('db_instance_id') or '').strip() if is_redshift_iam_flow else '',
             }
-            if not auth_profile.get('db_resource_id'):
+            if not is_redshift_iam_flow and not auth_profile.get('db_resource_id'):
                 raise RuntimeError("DB resource ID not available for IAM DB connect policy generation.")
+            permission_set_access_marker = _db_request_permission_set_access_marker(
+                request_role=req.get('role'),
+                permissions=allowed_ops,
+            )
 
             _set_activation_step(req, 'permission_set_attached', 'in_progress', 'Creating permission set and attaching to user...')
             ps_result = _create_and_assign_dbconnect_access(
                 user_email=req.get('user_email') or '',
                 account_id=req.get('account_id') or '',
-                db_username=req['db_username'],
+                db_username=target_db_username,
                 db_name=db_names[0] if db_names else 'default',
                 duration_hours=duration_hours,
                 auth_profile=auth_profile,
                 request_id=rid,
+                access_marker=permission_set_access_marker,
             )
             if not ps_result or ('error' in ps_result):
                 raise RuntimeError(f"Permission set assignment failed: {ps_result.get('error', 'unknown') if isinstance(ps_result, dict) else 'unknown'}")
@@ -8087,7 +21545,54 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             req['iam_permission_set_arn'] = ps_result.get('permission_set_arn', '')
             req['iam_permission_set_name'] = ps_result.get('permission_set_name', '')
             _set_activation_step(req, 'permission_set_attached', 'done', 'Permission set created and attached to user.')
-            req['status'] = 'ACTIVE'
+            if not has_materialized_vault_user and not vault_first_iam_flow:
+                _set_activation_step(req, 'vault_user_created', 'in_progress', 'Creating database user in Vault...')
+                vault_lock = _db_activation_lock_for(rid)
+                if not vault_lock.acquire(blocking=False):
+                    raise RuntimeError('Activation in progress')
+                try:
+                    existing_db_user = str(req.get('db_username') or '').strip()
+                    existing_lease = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+                    has_materialized_vault_user = bool(existing_db_user) and bool(existing_lease) and not _is_db_request_expired(req, now=datetime.now())
+                    if has_materialized_vault_user and existing_lease:
+                        req['db_username'] = existing_db_user
+                        req['vault_lease_id'] = existing_lease
+                        req['lease_id'] = existing_lease
+                    else:
+                        vault_creds = VaultManager.create_database_session(
+                            request_id=rid,
+                            engine=engine,
+                            db_instance_id=str(req.get('db_instance_id') or '').strip(),
+                            connection_name=vault_connection_name,
+                            db_names=db_names,
+                            schema_name=str(req.get('requested_schema_name') or '').strip(),
+                            table_names=list(req.get('requested_tables') or []) or [str(req.get('requested_table_name') or '').strip()],
+                            allowed_ops=allowed_ops,
+                            duration_hours=duration_hours,
+                            request_role=str(req.get('role') or '').strip().lower(),
+                            requester=requester,
+                            auth_type='iam',
+                            plane=req_plane,
+                        )
+                        role_name = vault_creds.get('vault_role_name', '')
+                        lease_id = vault_creds.get('lease_id', '')
+                        req['vault_role_name'] = role_name
+                        req['role_name'] = role_name
+                        req['vault_lease_id'] = lease_id
+                        req['lease_id'] = lease_id
+                        req['vault_token'] = ''
+                        req['password'] = ''
+                        req['db_username'] = vault_creds.get('db_username', '') or preview_db_username
+                        req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
+                        req['expires_at'] = vault_creds.get('expires_at') or (datetime.now() + timedelta(hours=duration_hours)).isoformat()
+                        req['expiry_time'] = req['expires_at']
+                finally:
+                    vault_lock.release()
+                created_name = str(req.get('db_username') or '').strip()
+                _set_activation_step(req, 'vault_user_created', 'done', f"User created: {created_name}" if created_name else 'User created.')
+                _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
+            req['activated_at'] = datetime.now().isoformat()
+            req['status'] = 'active'
             req.pop('activation_error', None)
             _set_activation_step(req, 'access_ready', 'done', 'Access is ready. Follow DB login details to connect.')
             print(f"DB IAM: permission set created and assigned for {rid}", flush=True)
@@ -8098,9 +21603,14 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             vault_creds = VaultManager.create_database_session(
                 request_id=rid,
                 engine=engine,
+                db_instance_id=str(req.get('db_instance_id') or '').strip(),
+                connection_name=vault_connection_name,
                 db_names=db_names,
+                schema_name=str(req.get('requested_schema_name') or '').strip(),
+                table_names=list(req.get('requested_tables') or []) or [str(req.get('requested_table_name') or '').strip()],
                 allowed_ops=allowed_ops,
                 duration_hours=duration_hours,
+                request_role=str(req.get('role') or '').strip().lower(),
                 requester=requester,
                 auth_type='password',
                 plane=req_plane,
@@ -8118,7 +21628,8 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
             req['lease_duration'] = int(vault_creds.get('lease_duration') or 0)
             req['expires_at'] = vault_creds.get('expires_at') or (now + timedelta(hours=duration_hours)).isoformat()
             req['expiry_time'] = req['expires_at']
-            req['status'] = 'ACTIVE'
+            req['activated_at'] = datetime.now().isoformat()
+            req['status'] = 'active'
             _set_activation_step(req, 'vault_user_created', 'done', f"User created: {req.get('db_username') or ''}".strip())
             _set_activation_step(req, 'db_permissions_attached', 'done', 'Attached DB permissions.')
             _set_activation_step(req, 'access_ready', 'done', 'Access is ready. Credentials are available.')
@@ -8137,16 +21648,64 @@ def _activate_database_access_request(request_id: str, force_retry: bool = False
         _set_activation_error(req, safe_msg)
         for k in ('vault_token', 'password', 'db_password'):
             req[k] = ''
+        # Redshift/IAM can otherwise end up partially provisioned: permission set attached,
+        # predicted username shown, but Vault user creation failed. Roll back IAM access
+        # immediately and clear any phantom DB username when activation does not complete.
+        if effective_auth == 'iam':
+            try:
+                cleanup_result = _cleanup_database_iam_access(req, request_id=rid, reason='activation_failed')
+                if cleanup_result.get('status') in ('done', 'deleted'):
+                    req['iam_permission_set_arn'] = ''
+                    req['iam_permission_set_name'] = ''
+            except Exception as cleanup_err:
+                print(f"IAM cleanup exception for activation failure {rid}: {cleanup_err}", flush=True)
+            if not str(req.get('vault_lease_id') or req.get('lease_id') or '').strip():
+                req['db_username'] = ''
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                str(req.get('user_email') or '').strip().lower() or 'system',
+                'database_access_activation_failed',
+                request_id=rid,
+                details={
+                    'instance': str(req.get('db_instance_id') or req.get('requested_instance_input') or '').strip(),
+                    'database': str(req.get('requested_database_name') or '').strip(),
+                    'execution_plane': str(req.get('execution_plane') or '').strip(),
+                    'auth_mode': effective_auth,
+                    'error': safe_msg,
+                },
+            )
+        except Exception:
+            pass
         _save_requests()
         return {'status': 'approved', 'error': str(e)}
 
+    try:
+        from audit_log import log_pam_action
+        log_pam_action(
+            str(req.get('user_email') or '').strip().lower() or 'system',
+            'database_access_activated',
+            request_id=rid,
+            details={
+                'instance': str(req.get('db_instance_id') or req.get('requested_instance_input') or '').strip(),
+                'database': str(req.get('requested_database_name') or '').strip(),
+                'db_username': str(req.get('db_username') or '').strip(),
+                'execution_plane': str(req.get('execution_plane') or '').strip(),
+                'auth_mode': effective_auth,
+                'expires_at': str(req.get('expires_at') or '').strip(),
+            },
+        )
+    except Exception:
+        pass
     _save_requests()
-    return {'status': req.get('status', 'ACTIVE')}
+    return {'status': str(req.get('status') or 'active').strip().lower() or 'active'}
 
 @app.route('/api/databases/ai-chat', methods=['POST'])
 def database_ai_chat():
     """AI chat for database access requests."""
     try:
+        if not session.get('user'):
+            return jsonify({'error': 'Authentication required'}), 401
         data = request.get_json()
         if not data:
             return jsonify({'error': 'JSON body required'}), 400
@@ -8196,7 +21755,8 @@ def database_ai_chat():
                 auth_profile = _resolve_rds_auth_profile(
                     instance_id=selected_instance_id or None,
                     host=selected_host or None,
-                    region=context_region
+                    region=context_region,
+                    account_id=context_account or None
                 )
             else:
                 auth_profile['auth_mode'] = _compute_auth_mode(
@@ -9130,7 +22690,7 @@ def database_ai_chat():
         
     except Exception as e:
         print(f"AI chat error: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/gcp/projects', methods=['GET'])
 def get_gcp_projects():
@@ -9179,88 +22739,132 @@ def get_databases():
     """Get databases - from AWS RDS. Tries to fetch when account_id provided."""
     try:
         account_id = request.args.get('account_id')
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
         region = request.args.get('region', 'ap-south-1')
 
-        # Always try to fetch RDS when account selected (uses instance role/creds)
+        # Always try to fetch database targets when account selected (uses instance role/creds)
         if account_id:
             try:
-                rds = boto3.client('rds', region_name=region)
-                response = rds.describe_db_instances()
                 filter_engine = request.args.get('engine', '').lower()
                 databases = []
-                for db in response.get('DBInstances', []):
-                    raw_engine = (db.get('Engine') or 'mysql').lower()
-                    # Never return real RDS endpoints to the browser.
-                    # Instance selection should use identifier + metadata only.
-                    if not (db.get('Endpoint', {}) or {}).get('Address'):
-                        continue
-                    # Normalize engine for display
-                    if 'mysql' in raw_engine and 'aurora' not in raw_engine:
-                        norm_engine = 'mysql'
-                    elif 'mariadb' in raw_engine:
-                        norm_engine = 'maria'
-                    elif 'postgres' in raw_engine:
-                        norm_engine = 'postgres'
-                    elif 'sqlserver' in raw_engine or 'mssql' in raw_engine:
-                        norm_engine = 'mssql'
-                    elif 'aurora' in raw_engine:
-                        norm_engine = 'aurora'
-                    else:
-                        norm_engine = raw_engine
-                    # Filter by selected engine tab - show only matching engines
-                    if filter_engine and norm_engine != filter_engine:
-                        continue
-                    display_engine = 'MySQL' if norm_engine == 'mysql' else 'MariaDB' if norm_engine == 'maria' else 'PostgreSQL' if norm_engine == 'postgres' else 'MSSQL' if norm_engine == 'mssql' else 'Aurora'
-                    iam_enabled = bool(db.get('IAMDatabaseAuthenticationEnabled'))
-                    password_enabled = True
-                    auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
-                    tags = []
-                    arn = str(db.get('DBInstanceArn') or '').strip()
-                    if arn:
-                        try:
-                            tags = rds.list_tags_for_resource(ResourceName=arn).get('TagList', [])
-                        except Exception:
-                            tags = []
-                    tag_meta = _classify_rds_data_tags(tags)
-                    account_env = _resolve_account_environment(account_id)
-                    enforce_read_only = (account_env == 'prod' and bool(tag_meta.get('is_sensitive')))
-                    missing_tags = not bool(tag_meta.get('classification_tag_present'))
-                    databases.append({
-                        'id': db['DBInstanceIdentifier'],
-                        'name': db.get('DBName', db['DBInstanceIdentifier']),
-                        'engine': display_engine,
-                        'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable'),
-                        'iam_auth_enabled': iam_enabled,
-                        'password_auth_enabled': password_enabled,
-                        'auth_mode': auth_mode,
-                        'db_resource_id': db.get('DbiResourceId', ''),
-                        'region': region,
-                        'account_env': account_env,
-                        'data_classification': str(tag_meta.get('classification') or ''),
-                        'is_sensitive_classification': bool(tag_meta.get('is_sensitive')),
-                        'enforce_read_only': bool(enforce_read_only),
-                        'classification_tag_present': bool(tag_meta.get('classification_tag_present')),
-                        'tags_present': bool(tag_meta.get('classification_tag_present')),
-                        'request_allowed': not missing_tags,
-                        'request_block_reason': (
-                            "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com."
-                            if missing_tags else ''
+                account_env = _resolve_account_environment(account_id)
+
+                if filter_engine == 'redshift':
+                    redshift = _resource_client('redshift', region_name=region, account_id=account_id)
+                    response = redshift.describe_clusters()
+                    for cluster in response.get('Clusters', []):
+                        endpoint = cluster.get('Endpoint') or {}
+                        if not endpoint.get('Address'):
+                            continue
+                        cluster_id = str(cluster.get('ClusterIdentifier') or '').strip()
+                        if not cluster_id:
+                            continue
+                        databases.append({
+                            'id': cluster_id,
+                            'name': cluster_id,
+                            'engine': 'Redshift',
+                            'status': str(cluster.get('ClusterStatus') or 'available').strip() or 'available',
+                            'region': region,
+                            'account_env': account_env,
+                            'resource_kind': 'redshift_cluster',
+                            'topology_role': 'cluster',
+                            'cluster_identifier': cluster_id,
+                            'iam_auth_enabled': True,
+                            'password_auth_enabled': False,
+                            'auth_mode': 'iam_only',
+                            'iam_readiness_reason': '',
+                            'classification_tag_present': True,
+                            'tags_present': True,
+                            'request_allowed': True,
+                            'request_block_reason': '',
+                        })
+                else:
+                    rds = _resource_client('rds', region_name=region, account_id=account_id)
+                    response = rds.describe_db_instances()
+                    for db in response.get('DBInstances', []):
+                        raw_engine = (db.get('Engine') or 'mysql').lower()
+                        # Never return real RDS endpoints to the browser.
+                        # Instance selection should use identifier + metadata only.
+                        if not (db.get('Endpoint', {}) or {}).get('Address'):
+                            continue
+                        # Normalize engine for display
+                        if 'mysql' in raw_engine and 'aurora' not in raw_engine:
+                            norm_engine = 'mysql'
+                        elif 'mariadb' in raw_engine:
+                            norm_engine = 'maria'
+                        elif 'postgres' in raw_engine:
+                            norm_engine = 'postgres'
+                        elif 'sqlserver' in raw_engine or 'mssql' in raw_engine:
+                            norm_engine = 'mssql'
+                        elif 'aurora' in raw_engine:
+                            norm_engine = 'aurora'
+                        else:
+                            norm_engine = raw_engine
+                        # Filter by selected engine tab - show only matching engines
+                        if filter_engine and norm_engine != filter_engine:
+                            continue
+                        display_engine = 'MySQL' if norm_engine == 'mysql' else 'MariaDB' if norm_engine == 'maria' else 'PostgreSQL' if norm_engine == 'postgres' else 'MSSQL' if norm_engine == 'mssql' else 'Aurora'
+                        iam_enabled = bool(db.get('IAMDatabaseAuthenticationEnabled'))
+                        password_enabled = True
+                        tags = _load_rds_tags_with_cluster_fallback(rds, db)
+                        tag_iam_enabled = _normalize_iam_auth_tag(tags)
+                        if tag_iam_enabled is not None:
+                            iam_enabled = bool(tag_iam_enabled)
+                        auth_mode = _compute_auth_mode(iam_enabled, password_enabled)
+                        tag_meta = _classify_rds_data_tags(tags)
+                        enforce_read_only = (account_env == 'prod' and bool(tag_meta.get('is_sensitive')))
+                        missing_tags = not bool(tag_meta.get('classification_tag_present'))
+                        block_reason = _database_request_block_reason(
+                            target_label='RDS instance',
+                            tags_present=not missing_tags,
+                            iam_auth_enabled=iam_enabled,
                         )
-                    })
-                # Sort by engine, then id
+                        replica_source = str(db.get('ReadReplicaSourceDBInstanceIdentifier') or '').strip()
+                        topology_role = 'replica' if replica_source else 'primary'
+                        instance_id = db['DBInstanceIdentifier']
+                        databases.append({
+                            'id': instance_id,
+                            'name': db.get('DBName', instance_id),
+                            'engine': display_engine,
+                            'status': db.get('DBInstanceStatus', 'available' if db.get('DBInstanceStatus') == 'available' else 'unavailable'),
+                            'iam_auth_enabled': iam_enabled,
+                            'password_auth_enabled': password_enabled,
+                            'auth_mode': auth_mode,
+                            'db_resource_id': db.get('DbiResourceId', ''),
+                            'region': region,
+                            'account_env': account_env,
+                            'resource_kind': 'rds_instance',
+                            'topology_role': topology_role,
+                            'source_instance_id': replica_source,
+                            'is_read_replica': bool(replica_source),
+                            'data_classification': str(tag_meta.get('classification') or ''),
+                            'is_sensitive_classification': bool(tag_meta.get('is_sensitive')),
+                            'enforce_read_only': bool(enforce_read_only),
+                            'classification_tag_present': bool(tag_meta.get('classification_tag_present')),
+                            'tags_present': bool(tag_meta.get('classification_tag_present')),
+                            'iam_readiness_reason': '' if iam_enabled else _database_iam_not_enabled_reason('RDS instance'),
+                            'request_allowed': not missing_tags and iam_enabled,
+                            'request_block_reason': block_reason
+                        })
+                # Sort by engine, topology role, then id
                 databases.sort(key=lambda x: (x['engine'], x['id']))
                 return jsonify({'databases': databases})
             except Exception as e:
-                print(f"RDS fetch failed: {e}")
+                target_label = 'Redshift clusters' if filter_engine == 'redshift' else 'RDS instances'
+                print(f"{target_label} fetch failed: {e}")
                 return jsonify({
                     'databases': [],
                     'error': str(e),
-                    'error_type': 'rds_fetch_failed',
+                    'error_type': 'redshift_fetch_failed' if filter_engine == 'redshift' else 'rds_fetch_failed',
                     'instructions': [
-                        'Ensure the app instance role has rds:DescribeDBInstances permission.',
-                        'Verify RDS instances exist in the selected region (default: ap-south-1).',
+                        'Ensure the app instance role has the required read permissions for the selected service.',
+                        'Verify the selected account has resources in the selected region (default: ap-south-1).',
                         'Check AWS credentials (instance role or env vars) are valid.'
-                    ]
+                    ],
+                    'resource_label': 'Redshift cluster' if filter_engine == 'redshift' else 'RDS instance',
+                    'resource_label_plural': target_label,
                 })
 
         # No account selected
@@ -9271,13 +22875,198 @@ def get_databases():
             'instructions': ['Select an account from the dropdown to list RDS instances.']
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
+
+
+@app.route('/api/databases/workflow-preview', methods=['POST'])
+def preview_database_workflow():
+    try:
+        data = request.get_json(silent=True) or {}
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        profile_gate = _business_profile_gate_for_request(caller_email)
+        if profile_gate:
+            return jsonify(profile_gate), 400
+        account_id = str(data.get('account_id') or '').strip()
+        if not account_id:
+            return jsonify({'error': 'account_id is required'}), 400
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
+        selected_role_id = str(data.get('iam_role_template_id') or '').strip()
+        permissions = data.get('permissions') if isinstance(data.get('permissions'), list) else []
+        role = str(data.get('role') or '').strip().lower()
+        access_level = _approval_access_level_for_request(role=role, permissions=permissions)
+        account_env = _resolve_account_environment(account_id)
+        max_duration_hours = _database_request_max_duration_hours(account_env, role, permissions)
+        max_duration_days = _database_request_max_duration_days(account_env, role, permissions)
+        db_instance_id = str(data.get('db_instance_id') or data.get('rds_instance') or '').strip()
+        selected_engine = _normalize_db_engine_family(data.get('engine') or '')
+        requested_region = str(data.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
+        try:
+            db_owner_email = _normalize_database_owner_email(data.get('db_owner_email'))
+        except ValueError as owner_err:
+            return jsonify({'error': str(owner_err)}), 400
+        requested_user_emails = data.get('user_emails') if isinstance(data.get('user_emails'), list) else []
+        target_emails, denied_response, denied_status = _normalized_db_request_target_emails(caller_email, requested_user_emails)
+        if denied_response is not None:
+            return denied_response, denied_status
+        for target_email in target_emails:
+            write_guardrail = _evaluate_db_write_guardrail(
+                account_id=account_id,
+                db_instance_id=db_instance_id,
+                user_email=target_email,
+                perms=permissions,
+                selected_role_id=selected_role_id,
+            )
+            if write_guardrail.get('blocked'):
+                prefix = f'{target_email}: ' if len(target_emails) > 1 else ''
+                return jsonify({'error': prefix + str(write_guardrail.get('reason') or 'Write access request blocked by guardrail policy.')}), 403
+            requestable_error = _validate_requestable_db_permissions(
+                account_id=account_id,
+                db_instance_id=db_instance_id,
+                user_email=target_email,
+                perms=permissions,
+                selected_role_id=selected_role_id,
+                engine=selected_engine,
+            )
+            if requestable_error:
+                prefix = f'{target_email}: ' if len(target_emails) > 1 else ''
+                return jsonify({'error': prefix + requestable_error}), 400
+        auth_profile = _resolve_database_auth_profile(
+            instance_id=db_instance_id or None,
+            region=requested_region,
+            account_id=account_id,
+            engine=selected_engine,
+        ) if db_instance_id else {}
+        if db_instance_id and (
+            not bool((auth_profile or {}).get('tags_present'))
+            or not bool((auth_profile or {}).get('iam_auth_enabled'))
+        ):
+            return jsonify({
+                'error': _database_request_block_reason(
+                    target_label='Redshift cluster' if selected_engine == 'redshift' else 'RDS instance',
+                    tags_present=bool((auth_profile or {}).get('tags_present')),
+                    iam_auth_enabled=bool((auth_profile or {}).get('iam_auth_enabled')),
+                )
+            }), 400
+        derived_classification = str((auth_profile or {}).get('data_classification') or data.get('data_classification') or '').strip().lower()
+        derived_is_pii = bool((auth_profile or {}).get('is_pii')) or bool(data.get('is_pii'))
+        workflow = resolve_approval_workflow({
+            'service_type': 'database',
+            'account_id': account_id,
+            'environment': account_env,
+            'data_classification': derived_classification,
+            'is_pii': derived_is_pii,
+            'access_level': access_level,
+            'iam_role_template_id': selected_role_id,
+        })
+        if not workflow:
+            return jsonify({'error': 'No matching approval workflow found.'}), 404
+        workflow = _apply_database_workflow_contact_overrides(
+            workflow,
+            db_owner_email=db_owner_email,
+        )
+        missing_contacts = workflow_missing_required_contacts(workflow)
+        if missing_contacts:
+            return jsonify({'error': 'This workflow is not fully configured yet. Missing: ' + ', '.join(missing_contacts) + '.'}), 400
+        if access_level != 'read_only' and workflow_has_self_approval_stage(workflow):
+            return jsonify({
+                'error': 'Write or admin database requests cannot use a self-approval workflow. Configure a manager/SecOps approval workflow or block them with guardrails.'
+            }), 400
+        contacts = workflow.get('approver_contacts') if isinstance(workflow.get('approver_contacts'), dict) else {}
+        requires_request_approver = workflow_requires_requester_primary_email(workflow)
+        has_self_approval = workflow_has_self_approval_stage(workflow)
+        return jsonify({
+            'workflow_id': str(workflow.get('id') or '').strip(),
+            'workflow_name': str(workflow.get('name') or '').strip(),
+            'pending_request_expiry_hours': int(workflow.get('pending_request_expiry_hours') or 12),
+            'security_lead_email': str(contacts.get('security_lead') or workflow.get('security_lead_email') or '').strip(),
+            'primary_approver_email': str(contacts.get('primary') or workflow.get('primary_email') or '').strip(),
+            'secondary_approver_email': str(contacts.get('secondary') or workflow.get('secondary_email') or '').strip(),
+            'db_owner_email': str(contacts.get('db_owner') or workflow.get('db_owner_email') or '').strip(),
+            'requires_request_approver': requires_request_approver,
+            'self_approval_allowed': has_self_approval,
+            'environment': account_env,
+            'access_level': access_level,
+            'data_classification': derived_classification,
+            'is_pii': derived_is_pii,
+            'max_duration_hours': max_duration_hours,
+            'max_duration_days': max_duration_days,
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/databases/requestable-actions', methods=['POST'])
+def get_database_requestable_actions():
+    try:
+        data = request.get_json(silent=True) or {}
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        if not caller_email:
+            return jsonify({'error': 'Authenticated session required'}), 401
+        account_id = str(data.get('account_id') or '').strip()
+        if not account_id:
+            return jsonify({'error': 'account_id is required'}), 400
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
+        db_instance_id = str(data.get('db_instance_id') or data.get('rds_instance') or '').strip()
+        requested_user_emails = data.get('user_emails') if isinstance(data.get('user_emails'), list) else []
+        target_emails, denied_response, denied_status = _normalized_db_request_target_emails(caller_email, requested_user_emails)
+        if denied_response is not None:
+            return denied_response, denied_status
+        allowed_sets = []
+        for target_email in target_emails:
+            allowed_sets.append(set(_allowed_db_write_actions_for_identity(account_id, db_instance_id, target_email)))
+        if allowed_sets:
+            allowed_write_actions = sorted(set.intersection(*allowed_sets)) if len(allowed_sets) > 1 else sorted(allowed_sets[0])
+        else:
+            allowed_write_actions = []
+        visible_actions = list(_DB_READ_OPS_ORDERED) + [op for op in allowed_write_actions if op not in _DB_READ_OPS]
+        return jsonify({
+            'read_only_actions': list(_DB_READ_OPS_ORDERED),
+            'allowed_write_actions': allowed_write_actions,
+            'visible_actions': visible_actions,
+            'never_requestable_actions': list(_DB_NEVER_REQUESTABLE_OPS_ORDERED),
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/iam-roles/effective', methods=['POST'])
+def get_effective_database_iam_roles():
+    try:
+        data = request.get_json(silent=True) or {}
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        if not caller_email:
+            return jsonify({'error': 'Authenticated session required'}), 401
+        account_id = str(data.get('account_id') or '').strip()
+        if not account_id:
+            return jsonify({'error': 'account_id is required'}), 400
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
+        db_instance_id = str(data.get('db_instance_id') or data.get('rds_instance') or '').strip()
+        requested_user_emails = data.get('user_emails') if isinstance(data.get('user_emails'), list) else []
+        target_emails, denied_response, denied_status = _normalized_db_request_target_emails(caller_email, requested_user_emails)
+        if denied_response is not None:
+            return denied_response, denied_status
+        selected_engine = _normalize_db_engine_family(data.get('engine') or '')
+        roles = _effective_iam_role_templates_for_targets(account_id, db_instance_id, target_emails, engine=selected_engine)
+        return jsonify({'roles': roles})
+    except Exception as e:
+        return _safe_error_response(e)
 
 @app.route('/api/databases/request-access', methods=['POST'])
 def request_database_access():
     try:
         data = request.get_json() or {}
         caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        if not caller_email:
+            return jsonify({'error': 'Authenticated session required'}), 401
+        profile_gate = _business_profile_gate_for_request(caller_email)
+        if profile_gate:
+            return jsonify(profile_gate), 400
         user_email = str(data.get('user_email') or '').strip()
         if not user_email:
             user_email = caller_email
@@ -9287,12 +23076,41 @@ def request_database_access():
                 email=caller_email, nameid=_current_request_identity().get('nameid') or '', hints=_current_request_identity().get('hints') or {}
             ):
                 return jsonify({'error': 'You can only request database access for yourself unless you are a PAM admin'}), 403
-        databases = data.get('databases', [])
+            target_profile_gate = _business_profile_gate_for_request(user_email)
+            if target_profile_gate:
+                return jsonify({
+                    'error': f'The selected user must complete their workforce profile before you can raise a database access request for them.',
+                    'target_user_email': user_email,
+                    'missing_fields': target_profile_gate.get('missing_fields') or [],
+                }), 400
+        raw_databases = data.get('databases', [])
         user_full_name = str(data.get('user_full_name') or '').strip()
         requested_db_username = str(data.get('db_username') or '').strip()
+        selected_role_id = str(data.get('iam_role_template_id') or '').strip()
         permissions_raw = data.get('permissions')
         query_types = data.get('query_types', [])
         requested_tables_raw = data.get('requested_tables', [])
+        manual_database_name = str(data.get('database_name') or data.get('db_name') or '').strip()
+        manual_schema_name = str(data.get('schema_name') or data.get('db_schema') or '').strip()
+        manual_table_name = str(data.get('table_name') or '').strip()
+        manual_column_name = str(data.get('column_name') or data.get('field_name') or data.get('document_scope') or '').strip()
+        manual_access_type = str(data.get('access_type') or data.get('access_types') or '').strip()
+        actor_ident = _current_request_identity()
+        actor_is_admin = bool(_pam_admin_record_for_identity(
+            email=caller_email,
+            nameid=actor_ident.get('nameid') or '',
+            hints=actor_ident.get('hints') or {}
+        ))
+        default_request_approver_email = _default_profile_approver_email(user_email or caller_email)
+        raw_request_approver_email = str(data.get('request_approver_email') or '').strip()
+        if not raw_request_approver_email:
+            raw_request_approver_email = default_request_approver_email
+        if not actor_is_admin:
+            normalized_requested_approver = _normalize_email_address(raw_request_approver_email)
+            normalized_default_approver = _normalize_email_address(default_request_approver_email)
+            if normalized_requested_approver and normalized_default_approver and normalized_requested_approver != normalized_default_approver:
+                return jsonify({'error': 'Only NPAMX admins can override the approver email. Please contact admins to reroute approval.'}), 403
+            raw_request_approver_email = default_request_approver_email
         justification = str(data.get('justification') or '').strip()
         ai_generated = bool(data.get('ai_generated', False))
         conversation_id = str(data.get('conversation_id') or '').strip()
@@ -9300,8 +23118,19 @@ def request_database_access():
         role = (data.get('role') or 'custom').strip().lower()
 
         account_id = str(data.get('account_id') or '').strip()
+        denied = _enforce_request_account_visibility(account_id)
+        if denied:
+            return denied
+        account_env = _resolve_account_environment(account_id)
+        preliminary_permissions = _normalize_permissions_list(permissions_raw)
+        if not preliminary_permissions:
+            preliminary_permissions = _normalize_permissions_list(manual_access_type)
+        max_duration_hours = _database_request_max_duration_hours(account_env, role, preliminary_permissions)
+        max_duration_days = _database_request_max_duration_days(account_env, role, preliminary_permissions)
         requested_region = str(data.get('region') or os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
-        selected_instance_id = str(data.get('db_instance_id') or '').strip()
+        selected_instance_id = str(data.get('db_instance_id') or data.get('rds_instance') or '').strip()
+        if not account_id:
+            return jsonify({'error': 'account_id is required for database access requests'}), 400
 
         preferred_auth = _normalize_auth_choice(data.get('preferred_auth'))
 
@@ -9313,6 +23142,10 @@ def request_database_access():
         duration_hours = data.get('duration_hours', 2)
         start_date = str(data.get('start_date') or '').strip()
         end_date = str(data.get('end_date') or '').strip()
+        try:
+            db_owner_email = _normalize_database_owner_email(data.get('db_owner_email'))
+        except ValueError as owner_err:
+            return jsonify({'error': str(owner_err)}), 400
         if conversation_id and conversation_id in db_conversation_states:
             st = db_conversation_states[conversation_id]
             if not justification:
@@ -9327,10 +23160,10 @@ def request_database_access():
                 if end_d < start_d:
                     return jsonify({'error': 'end_date must be on or after start_date'}), 400
                 delta = end_d - start_d
-                if delta.days >= 3:
-                    return jsonify({'error': 'Date range cannot exceed 3 days'}), 400
+                if delta.days >= max_duration_days:
+                    return jsonify({'error': f'Date range cannot exceed {max_duration_days} days'}), 400
                 duration_hours = (delta.days + 1) * 24
-                duration_hours = max(1, min(72, duration_hours))
+                duration_hours = max(1, min(max_duration_hours, duration_hours))
             except ValueError:
                 return jsonify({'error': 'start_date and end_date must be YYYY-MM-DD'}), 400
         else:
@@ -9338,11 +23171,28 @@ def request_database_access():
                 duration_hours = int(duration_hours)
             except Exception:
                 duration_hours = 2
-            if duration_hours < 1 or duration_hours > 72:
-                return jsonify({'error': 'duration_hours must be between 1 and 72 (max 3 days)'}), 400
+            if duration_hours < 1 or duration_hours > max_duration_hours:
+                return jsonify({'error': f'duration_hours must be between 1 and {max_duration_hours} (max {max_duration_days} days)'}), 400
 
-        if not databases or not isinstance(databases, list):
-            return jsonify({'error': 'At least one database target is required'}), 400
+        databases = []
+        if isinstance(raw_databases, list):
+            for item in raw_databases:
+                if not isinstance(item, dict):
+                    continue
+                databases.append({
+                    'id': str(item.get('id') or '').strip(),
+                    'name': str(item.get('name') or '').strip(),
+                    'engine': str(item.get('engine') or '').strip(),
+                })
+        databases = [db for db in databases if db.get('id') or db.get('name')]
+        if manual_database_name:
+            databases = [{
+                'id': selected_instance_id or manual_database_name,
+                'name': manual_database_name,
+                'engine': str(data.get('engine') or '').strip(),
+            }]
+        if not databases:
+            return jsonify({'error': 'Database Name is required'}), 400
         if not user_email:
             return jsonify({'error': 'user_email is required'}), 400
         if not justification or len(justification) < 3:
@@ -9350,34 +23200,66 @@ def request_database_access():
         if len(justification) > MAX_JUSTIFICATION_LENGTH:
             return jsonify({'error': 'Justification must be at most {} characters.'.format(MAX_JUSTIFICATION_LENGTH)}), 400
         justification = justification[:MAX_JUSTIFICATION_LENGTH]
-
+        first_db = databases[0] if isinstance(databases[0], dict) else {}
+        selected_engine = str(first_db.get('engine') or data.get('engine') or '').strip()
+        normalized_engine = _normalize_db_engine_family(selected_engine)
+        scope_meta = _db_request_scope_meta(normalized_engine, str(data.get('resource_kind') or '').strip().lower())
         perms = _normalize_permissions_list(permissions_raw)
+        manual_access_ops = _normalize_permissions_list(manual_access_type)
+        if not perms and manual_access_ops:
+            perms = manual_access_ops
+        requestable_error = _validate_requestable_db_permissions(
+            account_id=account_id,
+            db_instance_id=selected_instance_id,
+            user_email=user_email or caller_email,
+            perms=perms,
+            selected_role_id=selected_role_id,
+            engine=normalized_engine,
+        )
+        if requestable_error:
+            return jsonify({'error': requestable_error}), 400
         perms_upper = [p.upper() for p in perms]
         if not perms_upper:
-            return jsonify({'error': 'At least one permission/query operation is required'}), 400
+            perms_upper = ['SELECT']
+            perms = ['SELECT']
+            if not manual_access_type:
+                manual_access_type = 'SELECT'
         if isinstance(requested_tables_raw, list):
             requested_tables = [str(t).strip() for t in requested_tables_raw if str(t).strip()]
         elif isinstance(requested_tables_raw, str):
             requested_tables = [str(t).strip() for t in requested_tables_raw.split(',') if str(t).strip()]
         else:
             requested_tables = []
+        if manual_table_name:
+            requested_tables = [manual_table_name]
+        elif requested_tables:
+            manual_table_name = requested_tables[0]
 
-        first_db = databases[0] if isinstance(databases[0], dict) else {}
-        selected_engine = str(first_db.get('engine') or data.get('engine') or '').strip()
-        permission_validation_error = _validate_permissions_for_engine(selected_engine, perms_upper)
-        if permission_validation_error:
-            engine_label = selected_engine or 'selected database engine'
-            return jsonify({
-                'error': f"Requested operations are not supported for {engine_label}: {permission_validation_error}"
-            }), 400
+        resolved_instance_id = selected_instance_id or str(first_db.get('id') or '').strip()
+        if not resolved_instance_id:
+            return jsonify({'error': 'RDS Instance is required for database access requests'}), 400
+        resolved_database_name = manual_database_name or str(first_db.get('name') or '').strip()
+        if not resolved_database_name:
+            return jsonify({'error': 'Database Name is required for database access requests'}), 400
+        if scope_meta.get('schema_required') and not manual_schema_name:
+            return jsonify({'error': 'Schema Name is required for this database engine.'}), 400
+        if scope_meta.get('object_required') and not manual_table_name:
+            object_label = str(scope_meta.get('object_label') or 'object').title()
+            return jsonify({'error': f'{object_label} Name is required for this database engine.'}), 400
+        if scope_meta.get('detail_required') and not manual_column_name:
+            detail_label = str(scope_meta.get('detail_label') or 'detail').title()
+            return jsonify({'error': f'{detail_label} Name is required for this database engine.'}), 400
+        resource_kind = str(data.get('resource_kind') or '').strip().lower() or str(scope_meta.get('resource_kind') or '').strip().lower()
+        if not resource_kind:
+            resource_kind = 'redshift_cluster' if normalized_engine == 'redshift' else 'rds_instance'
 
         # Guardrail: block DB write requests on selected account/instance unless requester is explicitly excepted.
-        target_instance_id = selected_instance_id or str(first_db.get('id') or '').strip()
         write_guardrail = _evaluate_db_write_guardrail(
             account_id=account_id,
-            db_instance_id=target_instance_id,
+            db_instance_id=resolved_instance_id,
             user_email=user_email,
-            perms=perms_upper
+            perms=perms_upper,
+            selected_role_id=selected_role_id,
         )
         if write_guardrail.get('blocked'):
             return jsonify({'error': str(write_guardrail.get('reason') or 'Write access request blocked by guardrail policy.')}), 403
@@ -9394,36 +23276,79 @@ def request_database_access():
             else:
                 role = 'read_only'
 
-        auth_profile = _resolve_rds_auth_profile(
-            instance_id=selected_instance_id or str(first_db.get('id') or ''),
-            host=str(first_db.get('host') or ''),
-            region=requested_region
-        )
-        effective_auth = _resolve_effective_auth_choice(preferred_auth, auth_profile)
+        effective_auth = 'iam' if normalized_engine == 'redshift' else (preferred_auth or 'password')
 
         # Policy-based validation and approval routing (PROD/NONPROD/PII)
-        account_env = _resolve_account_environment(account_id)
         execution_plane = _resolve_execution_plane(account_env)
-        tags_present = bool(auth_profile.get('classification_tag_present') or auth_profile.get('tags_present'))
-        data_classification = str(auth_profile.get('data_classification') or '').strip()
-        is_pii = bool(auth_profile.get('is_pii'))
-
-        # Guardrail: Requests are blocked when required classification tag is missing.
-        if not tags_present:
+        auth_profile = _resolve_database_auth_profile(
+            instance_id=resolved_instance_id or None,
+            region=requested_region,
+            account_id=account_id,
+            engine=normalized_engine,
+            resource_kind=resource_kind,
+        )
+        tags_present = bool((auth_profile or {}).get('tags_present'))
+        data_classification = str((auth_profile or {}).get('data_classification') or '').strip().lower()
+        is_pii = bool((auth_profile or {}).get('is_pii'))
+        if (not tags_present) or (not bool((auth_profile or {}).get('iam_auth_enabled'))):
             return jsonify({
-                'error': "Oops, I don't see required Data_Classification tag on the selected RDS. Please reach out to devops@nykaa.com."
-            }), 400
-
-        # Guardrail: Sensitive/PII/Confidential data can only request read-only operations.
-        if account_env == 'prod' and is_pii and not _is_read_only_ops(perms_upper):
-            return jsonify({
-                'error': (
-                    "Selected RDS is tagged as sensitive data. Only view access is allowed "
-                    "(SELECT/SHOW/EXPLAIN/DESCRIBE/ANALYZE)."
+                'error': _database_request_block_reason(
+                    target_label='Redshift cluster' if normalized_engine == 'redshift' else 'RDS instance',
+                    tags_present=tags_present,
+                    iam_auth_enabled=bool((auth_profile or {}).get('iam_auth_enabled')),
                 )
             }), 400
 
-        initial_status, approval_required, approval_message = _compute_db_approval_requirements(account_env, is_pii, perms_upper)
+        access_level = _approval_access_level_for_request(role=role, permissions=perms_upper)
+        matched_workflow = resolve_approval_workflow({
+            'service_type': 'database',
+            'account_id': account_id,
+            'environment': account_env,
+            'data_classification': data_classification,
+            'is_pii': is_pii,
+            'access_level': access_level,
+            'iam_role_template_id': selected_role_id,
+        })
+        if not matched_workflow:
+            return jsonify({
+                'error': 'No active approval workflow matches this database request. Configure one in Admin Management > Approval Workflow.'
+            }), 400
+        matched_workflow = _apply_database_workflow_contact_overrides(
+            matched_workflow,
+            db_owner_email=db_owner_email,
+        )
+        missing_contacts = workflow_missing_required_contacts(matched_workflow)
+        if missing_contacts:
+            return jsonify({
+                'error': 'The matched approval workflow is incomplete. Missing: ' + ', '.join(missing_contacts) + '. Please contact NPAMx admin.'
+            }), 400
+        if access_level != 'read_only' and workflow_has_self_approval_stage(matched_workflow):
+            return jsonify({
+                'error': 'Write or admin database requests cannot use a self-approval workflow. Configure a manager/SecOps approval workflow or block them with guardrails.'
+            }), 400
+        requires_request_approver = workflow_requires_requester_primary_email(matched_workflow)
+        try:
+            request_approver_email = _normalize_request_approver_email(raw_request_approver_email) if raw_request_approver_email else ''
+        except ValueError as ve:
+            return jsonify({'error': str(ve)}), 400
+        if requires_request_approver and not request_approver_email:
+            return jsonify({'error': f'Approver email is required and must end with @{_request_approver_email_domain()}.'}), 400
+        approval_runtime = build_approval_runtime_state(matched_workflow, requester_email=user_email)
+        approval_message = _approval_pending_message(approval_runtime)
+        pending_request_expiry_hours = int(matched_workflow.get('pending_request_expiry_hours') or 12)
+        pending_expires_at = (datetime.now(timezone.utc) + timedelta(hours=pending_request_expiry_hours)).isoformat()
+        approver_contacts = matched_workflow.get('approver_contacts') if isinstance(matched_workflow.get('approver_contacts'), dict) else {}
+        security_lead_email = str(approver_contacts.get('security_lead') or matched_workflow.get('security_lead_email') or '').strip()
+        db_owner_email = str(approver_contacts.get('db_owner') or matched_workflow.get('db_owner_email') or '').strip()
+        primary_approver_email = request_approver_email or str(approver_contacts.get('primary') or matched_workflow.get('primary_email') or '').strip()
+        if request_approver_email:
+            workflow_for_runtime = _apply_database_workflow_contact_overrides(
+                matched_workflow,
+                request_approver_email=request_approver_email,
+                db_owner_email=db_owner_email,
+            )
+            approval_runtime = build_approval_runtime_state(workflow_for_runtime, requester_email=user_email)
+            approval_message = _approval_pending_message(approval_runtime)
 
         request_id = str(uuid.uuid4())
         created_at = datetime.now().isoformat()
@@ -9440,19 +23365,31 @@ def request_database_access():
             'databases': databases,  # stored internally (contains real endpoint); never returned to client
             'user_email': user_email,
             'user_full_name': user_full_name,
+            'requested_by_email': caller_email,
             'requested_db_username': requested_db_username,
+            'requested_instance_input': resolved_instance_id,
+            'requested_database_name': resolved_database_name,
+            'requested_schema_name': manual_schema_name,
+            'requested_table_name': manual_table_name,
+            'requested_column_name': manual_column_name,
+            'requested_access_type': manual_access_type or ', '.join(perms_upper),
+            'iam_role_template_id': selected_role_id,
+            'iam_role_template_name': str(data.get('iam_role_template_name') or '').strip(),
             'requested_auth': preferred_auth or '',
-            'effective_auth': effective_auth,
-            'auth_mode': auth_profile.get('auth_mode'),
-            'iam_auth_enabled': bool(auth_profile.get('iam_auth_enabled')),
-            'password_auth_enabled': bool(auth_profile.get('password_auth_enabled')),
-            'db_instance_id': auth_profile.get('instance_id') or selected_instance_id or str(first_db.get('id') or ''),
-            'db_resource_id': auth_profile.get('db_resource_id', ''),
-            'db_region': auth_profile.get('region', requested_region),
+            'effective_auth': effective_auth or '',
+            'auth_mode': 'manual_request',
+            'iam_auth_enabled': bool((auth_profile or {}).get('iam_auth_enabled')),
+            'password_auth_enabled': bool((auth_profile or {}).get('password_auth_enabled')),
+            'db_instance_id': resolved_instance_id,
+            'db_resource_id': '',
+            'resource_kind': resource_kind,
+            'engine': normalized_engine,
+            'db_region': requested_region,
             'permissions': perms,
             'query_types': query_types if isinstance(query_types, list) else [],
             'requested_tables': requested_tables,
             'role': role,
+            'access_level': access_level,
             'duration_hours': duration_hours,
             'start_date': start_date if start_date else '',
             'end_date': end_date if end_date else '',
@@ -9461,8 +23398,17 @@ def request_database_access():
             'conversation_id': conversation_id,
             # DB requests must always move through explicit approval.
             'status': 'pending',
-            'approval_required': approval_required,
+            'approval_required': [],
             'approval_note': approval_message,
+            'approval_workflow_id': matched_workflow.get('id', ''),
+            'approval_workflow_name': matched_workflow.get('name', ''),
+            'request_approver_email': request_approver_email,
+            'workflow_primary_approver_email': primary_approver_email,
+            'db_owner_email': db_owner_email,
+            'security_lead_email': security_lead_email,
+            'pending_request_expiry_hours': pending_request_expiry_hours,
+            'pending_expires_at': pending_expires_at,
+            'approval_engine': approval_runtime,
             # Vault session fields (populated only after approval/activation)
             'vault_role_name': '',
             'role_name': '',
@@ -9486,6 +23432,44 @@ def request_database_access():
         # Store request first for auditability (even if activation fails).
         requests_db[request_id] = db_request
         _save_requests()
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                caller_email,
+                'database_request_submitted',
+                request_id=request_id,
+                details={
+                    'instance': resolved_instance_id,
+                    'database': resolved_database_name,
+                    'schema': manual_schema_name,
+                    'table': manual_table_name,
+                    'access_type': manual_access_type or ', '.join(perms_upper),
+                    'requester': user_email,
+                    'approver_email': request_approver_email,
+                    'db_owner_email': db_owner_email,
+                    'security_lead_email': security_lead_email,
+                    'workflow': matched_workflow.get('name', ''),
+                    'timestamp': created_at,
+                },
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+        try:
+            _publish_request_notification_to_sns(
+                request_obj=db_request,
+                event_type='database_request_submitted',
+                approver_email=request_approver_email or primary_approver_email,
+            )
+        except Exception:
+            pass
+        try:
+            _send_database_request_pending_email(db_request)
+        except Exception as email_exc:
+            try:
+                print(f"Database pending-approval email send failed for request {request_id}: {email_exc}", flush=True)
+            except Exception:
+                pass
 
         create_error = None
         create_error_public = None
@@ -9498,70 +23482,82 @@ def request_database_access():
             st['submitted_request_id'] = request_id
 
         # Never return credentials to client (they are shown only via credentials endpoint after approval).
-        req_obj = requests_db.get(request_id) or {}
-        status = req_obj.get('status') or 'pending'
-        msg = req_obj.get('approval_note') or approval_message or 'Request submitted.'
-        if str(status).strip().lower() == 'active':
-            msg = (
-                "✅ Access is active. Temporary credentials are available under My Requests > Databases "
-                "and will expire automatically."
-            )
-        elif str(status).strip().lower() == 'approved':
-            msg = (
-                "✅ Request approved. Activating database access now. "
-                "If credentials are not visible yet, please retry in a few minutes."
-            )
-        elif str(status).strip().lower() == 'pending':
-            msg = approval_message
-        elif str(status).strip().lower() == 'failed':
-            msg = f"❌ Request created but activation failed. {create_error_public or 'Please contact an administrator.'}"
-
         return jsonify({
-            'status': status,
+            'status': 'pending',
             'request_id': request_id,
-            'message': msg,
+            'message': approval_message or 'Request submitted and is waiting for approval.',
+            'approval_workflow_name': str(matched_workflow.get('name') or '').strip(),
+            'security_lead_email': security_lead_email,
+            'request_approver_email': request_approver_email,
+            'db_owner_email': db_owner_email,
+            'pending_request_expiry_hours': pending_request_expiry_hours,
+            'pending_expires_at': pending_expires_at,
             # Never expose internal activation details to the browser.
             'creation_error': create_error_public,
-            'auth_mode': auth_profile.get('auth_mode'),
-            'effective_auth': effective_auth,
+            'auth_mode': 'manual_request',
+            'effective_auth': effective_auth or '',
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/databases/approved', methods=['GET'])
 def get_approved_databases():
     try:
-        user_email = str(request.args.get('user_email') or '').strip().lower()
+        user_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
         approved_databases = []
         if not user_email:
-            return jsonify({'databases': approved_databases})
+            return jsonify({'error': 'Authentication required'}), 401
         
         for req_id, req in requests_db.items():
-            status = str(req.get('status') or '').lower()
+            status = str(req.get('status') or '').strip().lower()
             if (req.get('type') == 'database_access' and
                 str(req.get('user_email') or '').strip().lower() == user_email and
-                status in ('active', 'approved')):
-                
-                # Skip expired - only show databases you can actually use
-                if _is_db_request_expired(req):
-                    continue
+                status in ('active', 'approved', 'expired')):
+                is_expired = _is_db_request_expired(req) or status == 'expired'
+                display_status = 'expired' if is_expired else status
                 req_account_env = _request_account_env(req)
                 req_plane = _request_execution_plane(req)
-                proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
-                    account_env=req_account_env,
-                    execution_plane=req_plane
-                )
+                try:
+                    proxy_host, proxy_port, _, endpoint_mode = _resolve_db_user_connect_endpoint(req)
+                except Exception as endpoint_exc:
+                    app.logger.warning(
+                        'DB endpoint resolution failed for approved request %s: %s',
+                        req_id,
+                        endpoint_exc,
+                    )
+                    proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+                        account_env=req_account_env,
+                        execution_plane=req_plane,
+                        account_id=str(req.get('account_id') or '').strip(),
+                    )
+                    endpoint_mode = 'proxy'
                 
-                for db in req.get('databases', []):
+                activation_error = _safe_activation_error_for_response(req)
+                db_entries = []
+                for db in (req.get('databases') or []):
+                    if isinstance(db, dict):
+                        db_entries.append(db)
+                if not db_entries:
+                    db_entries = [{
+                        'name': str(req.get('requested_database_name') or req.get('db_name') or 'default').strip() or 'default',
+                        'engine': str(req.get('engine') or '').strip(),
+                    }]
+
+                for db in db_entries:
                     effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
                     masked_username = _mask_secret(req.get('db_username', ''), visible=2)
                     approved_databases.append({
                         'request_id': req_id,
+                        'status': display_status,
+                        'original_status': status,
+                        'is_expired': bool(is_expired),
+                        'activation_error': activation_error,
                         'db_name': db.get('name', ''),
                         'engine': db.get('engine', ''),
                         # Never expose the real DB endpoint to users. Always show the proxy endpoint.
                         'host': proxy_host,
                         'port': proxy_port,
+                        'connect_endpoint_mode': endpoint_mode,
                         'account_env': req_account_env,
                         'execution_plane': req_plane,
                         'masked_username': masked_username,
@@ -9570,7 +23566,11 @@ def get_approved_databases():
                         'auth_mode': req.get('auth_mode', 'password_only'),
                         'iam_permission_set_name': req.get('iam_permission_set_name', ''),
                         'credentials_note': (
-                            'Generate an IAM token under Login details when you need to connect (valid ~15 minutes).'
+                            (
+                                'Fetch temporary Redshift credentials under Login details when you need to connect (valid ~15 minutes).'
+                                if str(req.get('resource_kind') or '').strip().lower() == 'redshift_cluster' or str(req.get('engine') or '').strip().lower() == 'redshift'
+                                else 'Generate an IAM token under Login details when you need to connect (valid ~15 minutes).'
+                            )
                             if effective_auth == 'iam'
                             else 'Temporary username/password available in this request.'
                         ),
@@ -9579,7 +23579,7 @@ def get_approved_databases():
         
         return jsonify({'databases': approved_databases})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
 @app.route('/api/databases/request/<request_id>/credentials', methods=['GET'])
@@ -9590,32 +23590,61 @@ def get_database_request_credentials(request_id):
     This endpoint never exposes the real DB endpoint, only the proxy endpoint.
     """
     try:
-        user_email = str(request.args.get('user_email') or '').strip()
-        if not user_email:
-            return jsonify({'error': 'user_email required'}), 400
+        caller_email = (_email_from_saml_session() or '').strip().lower()
+        ident = {}
+        admin_record = None
+        try:
+            ident, admin_record = _current_admin_actor()
+            if not caller_email:
+                caller_email = str((ident or {}).get('email') or '').strip().lower()
+        except Exception:
+            ident, admin_record = ({}, None)
+        is_admin = bool(admin_record)
+        payload, status_code = _build_database_request_credentials_payload(
+            request_id,
+            caller_email=caller_email,
+            is_admin=is_admin,
+        )
+        return jsonify(payload), int(status_code or 200)
+    except Exception as e:
+        try:
+            import traceback
+            print(f"❌ get_database_request_credentials failed for {request_id}: {e}", flush=True)
+            traceback.print_exc()
+        except Exception:
+            pass
+        return jsonify({'error': 'Failed to prepare database login details. Please retry or contact an administrator.'}), 500
+
+
+def _build_database_request_credentials_payload(request_id, *, caller_email='', is_admin=False):
+    try:
+        if not caller_email:
+            return {'error': 'Authentication required'}, 401
         if request_id not in requests_db:
-            return jsonify({'error': 'Request not found'}), 404
+            return {'error': 'Request not found'}, 404
 
         req = requests_db[request_id]
         if req.get('type') != 'database_access':
-            return jsonify({'error': 'Not a database request'}), 400
-        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
-            return jsonify({'error': 'Access denied'}), 403
+            return {'error': 'Not a database request'}, 400
+        if not is_admin and str(req.get('user_email') or '').strip().lower() != caller_email:
+            return {'error': 'Access denied'}, 403
 
         status = str(req.get('status') or '').lower()
         if status not in ('active', 'approved'):
-            return jsonify({'error': 'Request is not active yet'}), 400
+            return {'error': 'Request is not active yet'}, 400
         if _is_db_request_expired(req):
-            return jsonify({'error': 'Request expired'}), 400
+            return {'error': 'Request expired'}, 400
 
         effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
         # If approved but credentials are not materialized yet, try one activation pass on-demand.
         if status == 'approved':
             needs_activation = False
             if effective_auth == 'iam':
+                lease_probe = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
                 needs_activation = (
                     not str(req.get('db_username') or '').strip()
                     or not str(req.get('iam_permission_set_arn') or '').strip()
+                    or not lease_probe
                 )
             else:
                 pwd_probe = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
@@ -9625,110 +23654,311 @@ def get_database_request_credentials(request_id):
                 result = _activate_database_access_request(request_id)
                 if result.get('error'):
                     safe_msg, safe_code = _public_db_activation_error(result['error'])
-                    return jsonify({
+                    return {
                         'status': 'approved',
                         'message': _activation_message_for_code(safe_code),
                         'error': safe_msg,
-                        'activation_progress': _activation_progress_for_response(req)
-                    }), 400
+                        'activation_progress': _activation_progress_for_response(req),
+                        'activation_error_code': safe_code,
+                        'activation_retryable': _is_retryable_activation_code(safe_code),
+                    }, 400
                 req = requests_db.get(request_id, req)
                 status = str(req.get('status') or '').lower()
                 if status not in ('active', 'approved'):
-                    return jsonify({'error': 'Request is not active yet'}), 400
+                    return {'error': 'Request is not active yet'}, 400
 
         if effective_auth == 'iam' and not str(req.get('iam_permission_set_arn') or '').strip():
-            return jsonify({
+            return {
                 'status': 'approved',
                 'message': '✅ Approved. IAM permission assignment is pending.',
                 'error': 'IAM permission assignment is not complete yet. Please retry shortly.',
-                'activation_progress': _activation_progress_for_response(req)
-            }), 400
+                'activation_progress': _activation_progress_for_response(req),
+                'activation_error_code': 'IDC_ASSIGNMENT_FAILED',
+                'activation_retryable': True,
+            }, 400
 
-        req_account_env = _request_account_env(req)
-        req_plane = _request_execution_plane(req)
-        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
-            account_env=req_account_env,
-            execution_plane=req_plane
-        )
+        try:
+            req_account_env = _request_account_env(req)
+        except Exception:
+            req_account_env = 'nonprod'
+        try:
+            req_plane = _request_execution_plane(req)
+        except Exception:
+            req_plane = 'nonprod'
+        try:
+            proxy_host, proxy_port, _, endpoint_mode = _resolve_db_user_connect_endpoint(req)
+        except Exception:
+            proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+                account_env=req_account_env,
+                execution_plane=req_plane,
+                account_id=str(req.get('account_id') or '').strip(),
+            )
+            endpoint_mode = 'proxy'
         if not proxy_host or proxy_host == 'proxy-not-configured':
-            return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
+            return {'error': 'Database access service is not configured. Please contact an administrator.'}, 500
         dbs = req.get('databases') or []
         db_names = [str(d.get('name') or '').strip() for d in dbs if isinstance(d, dict) and d.get('name')]
         db_name = db_names[0] if db_names else 'default'
+        engine = str(req.get('engine') or (dbs[0].get('engine') if dbs and isinstance(dbs[0], dict) else '') or '').strip().lower()
+        resource_kind = str(req.get('resource_kind') or '').strip().lower()
 
         if effective_auth == 'iam':
             username = str(req.get('db_username') or '').strip()
+            lease_id = str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
             if not username:
-                return jsonify({
+                return {
                     'error': 'Credentials are not available (request may be pending or expired).',
                     'activation_progress': _activation_progress_for_response(req)
-                }), 400
-            try:
+                }, 400
+            if not lease_id:
+                return {
+                    'status': 'approved',
+                    'message': 'Database access is still being prepared. Please retry shortly.',
+                    'error': 'Database user provisioning is not complete yet. Please retry shortly.',
+                    'activation_progress': _activation_progress_for_response(req),
+                    'activation_error_code': 'VAULT_CREDS_NOT_RETURNED',
+                    'activation_retryable': True,
+                }, 400
+            region = str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip()
+            payload = {
+                'request_id': request_id,
+                'effective_auth': 'iam',
+                'proxy_host': proxy_host,
+                'proxy_port': proxy_port,
+                'connect_endpoint_mode': endpoint_mode,
+                'account_env': req_account_env,
+                'execution_plane': req_plane,
+                'db_username': username,
+                'region': region,
+                # Do not mint IAM tokens on server-side credentials.
+                # User must generate token using their own Identity Center session.
+                'password': '',
+                'iam_token_expires_at': '',
+                'expires_at': str(req.get('expires_at') or '').strip(),
+                'note': (
+                    'Generate temporary Redshift credentials locally with your own Identity Center credentials (valid ~15 minutes).'
+                    if resource_kind == 'redshift_cluster' or engine == 'redshift'
+                    else 'Generate IAM token locally with your own Identity Center credentials (valid ~15 minutes).'
+                ),
+                'database': db_name,
+                'engine': engine,
+                'resource_kind': resource_kind,
+            }
+            if resource_kind == 'redshift_cluster' or engine == 'redshift':
+                local_instructions = _local_redshift_iam_instructions(
+                    cluster_identifier=str(req.get('db_instance_id') or '').strip(),
+                    region=region,
+                    db_username=username,
+                    db_name=db_name,
+                    hostname=proxy_host,
+                    port=proxy_port,
+                )
+            else:
                 local_instructions = _local_iam_token_instructions(
                     instance_id=str(req.get('db_instance_id') or '').strip(),
-                    region=str(req.get('db_region') or os.getenv('AWS_REGION') or 'ap-south-1').strip(),
+                    region=region,
                     db_username=username,
+                    db_name=db_name,
+                    engine=engine,
+                    account_id=str(req.get('account_id') or '').strip(),
+                    connect_host=proxy_host,
+                    connect_port=proxy_port,
                 )
-                payload = {
-                    'request_id': request_id,
-                    'effective_auth': 'iam',
-                    'proxy_host': proxy_host,
-                    'proxy_port': proxy_port,
-                    'account_env': req_account_env,
-                    'execution_plane': req_plane,
-                    'db_username': username,
-                    # Do not mint IAM tokens on server-side credentials.
-                    # User must generate token using their own Identity Center session.
-                    'password': '',
-                    'iam_token_expires_at': '',
-                    'expires_at': str(req.get('expires_at') or '').strip(),
-                    'note': 'Generate IAM token locally with your own Identity Center credentials (valid ~15 minutes).',
+                if not local_instructions.get('available'):
+                    local_instructions = _basic_local_iam_token_instructions(
+                        hostname=proxy_host,
+                        port=proxy_port,
+                        db_username=username,
+                        region=region,
+                        db_name=db_name,
+                        engine=engine,
+                )
+            if local_instructions.get('available'):
+                local_instructions['identity_center'] = {
+                    'start_url': str(CONFIG.get('sso_start_url') or '').strip(),
+                    'region': _identity_center_region(),
+                    'account_id': str(req.get('account_id') or '').strip(),
+                    'permission_set_name': str(req.get('iam_permission_set_name') or '').strip(),
+                    'permission_set_arn': str(req.get('iam_permission_set_arn') or '').strip(),
                 }
-                if local_instructions.get('available'):
-                    payload['local_token_instructions'] = local_instructions
-                return jsonify(payload)
-            except Exception:
-                return jsonify({'error': 'Failed to prepare IAM token instructions. Please retry or contact an administrator.'}), 500
+                payload['local_token_instructions'] = local_instructions
+            return payload, 200
 
         username = str(req.get('db_username') or '').strip()
         token = str(req.get('password') or req.get('vault_token') or req.get('db_password') or '').strip()
         if not username or not token:
-            return jsonify({
+            return {
                 'error': 'Credentials are not available (request may be pending or expired).',
                 'activation_progress': _activation_progress_for_response(req)
-            }), 400
+            }, 400
 
-        return jsonify({
+        return {
             'request_id': request_id,
             'effective_auth': 'password',
             'proxy_host': proxy_host,
             'proxy_port': proxy_port,
+            'connect_endpoint_mode': endpoint_mode,
             'account_env': req_account_env,
             'execution_plane': req_plane,
             'db_username': username,
             'password': token,
             'vault_token': token,  # backward-compat (UI may still read vault_token)
             'database': db_name,
+            'engine': engine,
+            'resource_kind': resource_kind,
             'expires_at': str(req.get('expires_at') or '').strip(),
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        }, 200
+    except Exception:
+        raise
+
+
+def _agent_database_session_summary(req_id, req):
+    if not isinstance(req, dict) or req.get('type') != 'database_access':
+        return {}
+    dbs = req.get('databases') or []
+    db_names = [str(d.get('name') or '').strip() for d in dbs if isinstance(d, dict) and d.get('name')]
+    db_name = db_names[0] if db_names else str(req.get('requested_database_name') or '').strip() or 'default'
+    engine = str(req.get('engine') or (dbs[0].get('engine') if dbs and isinstance(dbs[0], dict) else '') or '').strip().lower()
+    account_id = str(req.get('account_id') or '').strip()
+    account_name = ''
+    if account_id:
+        acct_cfg = (CONFIG.get('accounts') or {}).get(account_id) or {}
+        account_name = str(acct_cfg.get('name') or '').strip()
+    try:
+        req_account_env = _request_account_env(req)
+    except Exception:
+        req_account_env = 'nonprod'
+    try:
+        req_plane = _request_execution_plane(req)
+    except Exception:
+        req_plane = 'nonprod'
+    try:
+        proxy_host, proxy_port, _, endpoint_mode = _resolve_db_user_connect_endpoint(req)
+    except Exception:
+        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
+            account_env=req_account_env,
+            execution_plane=req_plane,
+            account_id=account_id,
+        )
+        endpoint_mode = 'proxy'
+    return {
+        'request_id': str(req_id or '').strip(),
+        'status': str(req.get('status') or '').strip().lower(),
+        'effective_auth': _normalize_auth_choice(req.get('effective_auth')) or 'password',
+        'engine': engine,
+        'resource_kind': str(req.get('resource_kind') or '').strip().lower(),
+        'account_id': account_id,
+        'account_name': account_name,
+        'iam_permission_set_name': str(req.get('iam_permission_set_name') or '').strip(),
+        'iam_permission_set_arn': str(req.get('iam_permission_set_arn') or '').strip(),
+        'db_instance_id': str(req.get('db_instance_id') or '').strip(),
+        'database': db_name,
+        'db_username': str(req.get('db_username') or '').strip(),
+        'proxy_host': str(proxy_host or '').strip(),
+        'proxy_port': int(proxy_port or 0) if str(proxy_port or '').strip() else 0,
+        'connect_endpoint_mode': str(endpoint_mode or '').strip().lower(),
+        'expires_at': str(req.get('expires_at') or '').strip(),
+        'execution_plane': req_plane,
+        'account_env': req_account_env,
+        'activation_progress': _activation_progress_for_response(req),
+        'activation_error': _safe_activation_error_for_response(req),
+        'identity_center': {
+            'start_url': str(CONFIG.get('sso_start_url') or '').strip(),
+            'region': _identity_center_region(),
+            'account_id': account_id,
+            'permission_set_name': str(req.get('iam_permission_set_name') or '').strip(),
+            'permission_set_arn': str(req.get('iam_permission_set_arn') or '').strip(),
+        },
+        'dbeaver_profile': {
+            'name': 'NPAMX - ' + (account_name or account_id or 'database') + ' - ' + (str(req.get('db_instance_id') or '').strip() or db_name),
+            'host': str(proxy_host or '').strip(),
+            'port': int(proxy_port or 0) if str(proxy_port or '').strip() else 0,
+            'database': db_name,
+            'username': str(req.get('db_username') or '').strip(),
+        },
+    }
+
+
+@app.route('/api/agent/v1/database/sessions', methods=['GET'])
+@_rate_limit_exempt
+def desktop_agent_database_sessions():
+    settings, token_record, auth_error = _require_desktop_agent_auth()
+    if auth_error:
+        return auth_error
+    user_email = str((token_record or {}).get('user_email') or '').strip().lower()
+    agent_id = str((token_record or {}).get('agent_id') or '').strip()
+    if not user_email:
+        return jsonify({'error': 'Agent token is not bound to a user.', 'code': 'NPAMX-AGENT-403'}), 401
+    _apply_pending_request_expiry()
+    sessions = []
+    for req_id, req in requests_db.items():
+        if not isinstance(req, dict) or req.get('type') != 'database_access':
+            continue
+        if str(req.get('user_email') or '').strip().lower() != user_email:
+            continue
+        status = str(req.get('status') or '').strip().lower()
+        if status != 'active':
+            continue
+        if _is_db_request_expired(req):
+            continue
+        summary = _agent_database_session_summary(req_id, req)
+        if not summary:
+            continue
+        summary['agent_id'] = agent_id
+        summary['credentials_ready'] = bool(str(req.get('db_username') or '').strip())
+        summary['is_expired'] = False
+        sessions.append(summary)
+    sessions.sort(key=lambda item: str(item.get('expires_at') or ''), reverse=True)
+    return jsonify({
+        'status': 'success',
+        'agent_id': agent_id,
+        'user_email': user_email,
+        'sessions': sessions,
+        'server_time': datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route('/api/agent/v1/database/sessions/<request_id>/credentials', methods=['GET'])
+@_rate_limit_exempt
+def desktop_agent_database_session_credentials(request_id):
+    settings, token_record, auth_error = _require_desktop_agent_auth()
+    if auth_error:
+        return auth_error
+    user_email = str((token_record or {}).get('user_email') or '').strip().lower()
+    if not user_email:
+        return jsonify({'error': 'Agent token is not bound to a user.', 'code': 'NPAMX-AGENT-403'}), 401
+    try:
+        payload, status_code = _build_database_request_credentials_payload(
+            request_id,
+            caller_email=user_email,
+            is_admin=False,
+        )
+        if int(status_code or 200) >= 400:
+            return jsonify(payload), int(status_code or 400)
+        if isinstance(payload, dict):
+            payload['agent_delivery'] = 'desktop_agent'
+            payload['server_time'] = datetime.now(timezone.utc).isoformat()
+        return jsonify(payload), int(status_code or 200)
+    except Exception as exc:
+        app.logger.exception('Desktop agent session credential fetch failed for %s', request_id)
+        return jsonify({'error': 'Failed to prepare database login details.', 'code': 'NPAMX-AGENT-DB-500'}), 500
 
 
 @app.route('/api/databases/request/<request_id>/activate', methods=['POST'])
 def activate_database_request(request_id):
     """Owner-only retry endpoint for approved (but not active) DB requests."""
     try:
-        data = request.get_json(silent=True) or {}
-        user_email = str(data.get('user_email') or request.args.get('user_email') or '').strip()
-        if not user_email:
-            return jsonify({'error': 'user_email required'}), 400
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        ident, admin_record = _current_admin_actor()
+        is_admin = bool(admin_record)
+        if not ident.get('nameid') or not caller_email:
+            return jsonify({'error': 'Authentication required'}), 401
         if request_id not in requests_db:
             return jsonify({'error': 'Request not found'}), 404
         req = requests_db[request_id]
         if req.get('type') != 'database_access':
             return jsonify({'error': 'Not a database request'}), 400
-        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+        if not is_admin and str(req.get('user_email') or '').strip().lower() != caller_email:
             return jsonify({'error': 'Access denied'}), 403
 
         status = str(req.get('status') or '').strip().lower()
@@ -9745,6 +23975,8 @@ def activate_database_request(request_id):
                 'error': safe_msg,
                 'message': _activation_message_for_code(safe_code),
                 'activation_progress': _activation_progress_for_response(req),
+                'activation_error_code': safe_code,
+                'activation_retryable': _is_retryable_activation_code(safe_code),
             }), 200
 
         return jsonify({
@@ -9757,27 +23989,161 @@ def activate_database_request(request_id):
         return jsonify({'error': 'Activation failed. Please retry or contact an administrator.'}), 500
 
 
-@app.route('/api/databases/request/<request_id>/delete', methods=['DELETE'])
-def delete_database_request(request_id):
-    """Owner-only delete for pending/expired/rejected DB requests."""
+@app.route('/api/databases/request/<request_id>/cancel-processing', methods=['POST'])
+def cancel_database_request_processing(request_id):
+    """Owner/admin cancel for approved database requests that are still provisioning."""
     try:
-        data = request.get_json(silent=True) or {}
-        user_email = str(data.get('user_email') or request.args.get('user_email') or '').strip()
-        if not user_email:
-            return jsonify({'error': 'user_email required'}), 400
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        ident, admin_record = _current_admin_actor()
+        is_admin = bool(admin_record)
+        if not ident.get('nameid') or not caller_email:
+            return jsonify({'error': 'Authentication required'}), 401
         if request_id not in requests_db:
             return jsonify({'error': 'Request not found'}), 404
         req = requests_db[request_id]
         if req.get('type') != 'database_access':
             return jsonify({'error': 'Not a database request'}), 400
-        if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+        if not is_admin and str(req.get('user_email') or '').strip().lower() != caller_email:
             return jsonify({'error': 'Access denied'}), 403
 
         status = str(req.get('status') or '').strip().lower()
-        expired = _is_db_request_expired(req)
-        deletable_statuses = {'pending', 'denied', 'rejected', 'failed', 'revoked', 'expired'}
-        if status not in deletable_statuses and not expired:
-            return jsonify({'error': 'Only pending or expired requests can be deleted. Completed records are retained for audit.'}), 400
+        if status != 'approved':
+            return jsonify({'error': 'Only approved requests that are still processing can be cancelled.'}), 400
+        if _is_db_request_expired(req):
+            return jsonify({'error': 'Request is already expired.'}), 400
+
+        effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+        has_materialized_access = False
+        if effective_auth == 'iam':
+            has_materialized_access = bool(
+                str(req.get('iam_permission_set_arn') or '').strip()
+                and str(req.get('db_username') or '').strip()
+                and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            )
+        else:
+            has_materialized_access = bool(
+                str(req.get('db_username') or '').strip()
+                and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            )
+        if has_materialized_access or status == 'active':
+            return jsonify({'error': 'Access is already active. Use revoke instead of cancel.'}), 400
+
+        vault_warning = ''
+        iam_warning = ''
+        try:
+            vault_cleanup_result = _cleanup_database_vault_access(req, request_id=request_id, reason='user_cancel_processing')
+            if vault_cleanup_result.get('status') in ('partial', 'error'):
+                vault_warning = str(vault_cleanup_result.get('error') or '').strip()
+        except Exception as cleanup_err:
+            vault_warning = str(cleanup_err or '').strip()
+            print(f"Vault cleanup exception for cancel-processing {request_id}: {cleanup_err}", flush=True)
+        try:
+            iam_cleanup_result = _cleanup_database_iam_access(req, request_id=request_id, reason='user_cancel_processing')
+            if iam_cleanup_result.get('status') in ('partial', 'error'):
+                iam_warning = str(iam_cleanup_result.get('error') or '').strip()
+        except Exception as cleanup_err:
+            iam_warning = str(cleanup_err or '').strip()
+            print(f"IAM cleanup exception for cancel-processing {request_id}: {cleanup_err}", flush=True)
+
+        now_iso = datetime.now().isoformat()
+        actor_email = caller_email or (_current_actor_email() or '').strip().lower()
+        req['status'] = 'cancelled'
+        req['cancelled_at'] = now_iso
+        req['cancellation_reason'] = 'Provisioning cancelled by user. A new request and approvals are required to retry.'
+        req['cancelled_by'] = actor_email
+        req['approval_note'] = 'Provisioning cancelled by user. Submit a new request and complete approvals again to retry.'
+        req['activation_error'] = ''
+        req['activation_progress'] = {
+            'error': '',
+            'message': 'Provisioning was cancelled by the requester.',
+            'updated_at': now_iso,
+        }
+        req['iam_permission_set_arn'] = ''
+        req['iam_permission_set_name'] = ''
+        req['vault_role_name'] = ''
+        req['role_name'] = ''
+        req['vault_lease_id'] = ''
+        req['lease_id'] = ''
+        req['vault_token'] = ''
+        req['password'] = ''
+        req['db_password'] = ''
+        req['db_username'] = ''
+        req['expires_at'] = ''
+        req['expiry_time'] = ''
+        req['activated_at'] = ''
+        _save_requests()
+
+        try:
+            from audit_log import log_pam_action
+            log_pam_action(
+                actor_email or 'unknown',
+                'database_request_processing_cancelled',
+                request_id=request_id,
+                details={
+                    'warning': '; '.join([item for item in (vault_warning, iam_warning) if item]),
+                    'type': 'database_access',
+                },
+                ip=request.remote_addr,
+            )
+        except Exception:
+            pass
+
+        response = {
+            'status': 'cancelled',
+            'message': 'Provisioning cancelled. To get access again, submit a new request and complete approvals again.',
+            'request_id': request_id,
+        }
+        warning = '; '.join([item for item in (vault_warning, iam_warning) if item])
+        if warning:
+            response['warning'] = warning
+        return jsonify(response)
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/databases/request/<request_id>/delete', methods=['DELETE'])
+def delete_database_request(request_id):
+    """Delete a DB request. Users can delete their own non-active requests; admins can clean up orphaned records."""
+    try:
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        ident, admin_record = _current_admin_actor()
+        is_admin = bool(admin_record)
+        if not ident.get('nameid') or not caller_email:
+            return jsonify({'error': 'Authentication required'}), 401
+        if request_id not in requests_db:
+            return jsonify({'error': 'Request not found'}), 404
+        req = requests_db[request_id]
+        if req.get('type') != 'database_access':
+            return jsonify({'error': 'Not a database request'}), 400
+        if not is_admin and str(req.get('user_email') or '').strip().lower() != caller_email:
+            return jsonify({'error': 'Access denied'}), 403
+
+        status = str(req.get('status') or '').strip().lower()
+        effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+        has_materialized_access = False
+        if effective_auth == 'iam':
+            has_materialized_access = bool(
+                str(req.get('iam_permission_set_arn') or '').strip()
+                and str(req.get('db_username') or '').strip()
+                and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            )
+        else:
+            has_materialized_access = bool(
+                str(req.get('db_username') or '').strip()
+                and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+            )
+        deletable_statuses = {'pending', 'approved', 'denied', 'rejected', 'failed', 'cancelled', 'canceled'}
+        if status not in deletable_statuses:
+            return jsonify({'error': 'Only non-active database requests can be deleted.'}), 400
+        if status == 'approved' and has_materialized_access:
+            return jsonify({'error': 'Access is already active. Revoke it instead of deleting the request.'}), 400
+
+        try:
+            vault_cleanup_result = _cleanup_database_vault_access(req, request_id=request_id, reason='user_delete')
+            if vault_cleanup_result.get('status') in ('error', 'partial'):
+                print(f"Vault cleanup warning for delete {request_id}: {vault_cleanup_result}")
+        except Exception as cleanup_err:
+            print(f"Vault cleanup exception for delete {request_id}: {cleanup_err}")
 
         try:
             cleanup_result = _cleanup_database_iam_access(req, request_id=request_id, reason='user_delete')
@@ -9786,27 +24152,29 @@ def delete_database_request(request_id):
         except Exception as cleanup_err:
             print(f"IAM cleanup exception for delete {request_id}: {cleanup_err}")
 
+        _mark_request_ticket_deleted(request_id, deleted_by=caller_email, reason='database_request_deleted')
         del requests_db[request_id]
         if request_id in approvals_db:
             del approvals_db[request_id]
         _save_requests()
         return jsonify({'status': 'deleted', 'request_id': request_id})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 @app.route('/api/databases/requests/bulk-delete', methods=['POST'])
 def bulk_delete_database_requests():
-    """Owner-only bulk delete for pending/expired/rejected DB requests."""
+    """Bulk delete DB requests. Users can delete their own non-active requests; admins can clean up orphaned records."""
     try:
         data = request.get_json(silent=True) or {}
-        user_email = str(data.get('user_email') or '').strip()
+        caller_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
+        ident, admin_record = _current_admin_actor()
+        is_admin = bool(admin_record)
         request_ids = data.get('request_ids') or []
-        if not user_email:
-            return jsonify({'error': 'user_email required'}), 400
+        if not ident.get('nameid') or not caller_email:
+            return jsonify({'error': 'Authentication required'}), 401
         if not isinstance(request_ids, list) or not request_ids:
             return jsonify({'error': 'request_ids must be a non-empty list'}), 400
 
-        deletable_statuses = {'pending', 'denied', 'rejected', 'failed', 'revoked', 'expired'}
         deleted = []
         failed = []
         changed = False
@@ -9822,15 +24190,37 @@ def bulk_delete_database_requests():
             if req.get('type') != 'database_access':
                 failed.append({'request_id': rid, 'error': 'not_database_request'})
                 continue
-            if str(req.get('user_email') or '').strip().lower() != user_email.lower():
+            if not is_admin and str(req.get('user_email') or '').strip().lower() != caller_email:
                 failed.append({'request_id': rid, 'error': 'access_denied'})
                 continue
 
             status = str(req.get('status') or '').strip().lower()
-            expired = _is_db_request_expired(req)
-            if status not in deletable_statuses and not expired:
+            effective_auth = _normalize_auth_choice(req.get('effective_auth')) or 'password'
+            has_materialized_access = False
+            if effective_auth == 'iam':
+                has_materialized_access = bool(
+                    str(req.get('iam_permission_set_arn') or '').strip()
+                    and str(req.get('db_username') or '').strip()
+                    and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+                )
+            else:
+                has_materialized_access = bool(
+                    str(req.get('db_username') or '').strip()
+                    and str(req.get('vault_lease_id') or req.get('lease_id') or '').strip()
+                )
+            if status not in {'pending', 'approved', 'denied', 'rejected', 'failed', 'cancelled', 'canceled'}:
                 failed.append({'request_id': rid, 'error': 'not_deletable_for_audit'})
                 continue
+            if status == 'approved' and has_materialized_access:
+                failed.append({'request_id': rid, 'error': 'active_access_requires_revoke'})
+                continue
+
+            try:
+                vault_cleanup_result = _cleanup_database_vault_access(req, request_id=rid, reason='user_bulk_delete')
+                if vault_cleanup_result.get('status') in ('error', 'partial'):
+                    print(f"Vault cleanup warning for bulk delete {rid}: {vault_cleanup_result}")
+            except Exception as cleanup_err:
+                print(f"Vault cleanup exception for bulk delete {rid}: {cleanup_err}")
 
             try:
                 cleanup_result = _cleanup_database_iam_access(req, request_id=rid, reason='user_bulk_delete')
@@ -9839,6 +24229,7 @@ def bulk_delete_database_requests():
             except Exception as cleanup_err:
                 print(f"IAM cleanup exception for bulk delete {rid}: {cleanup_err}")
 
+            _mark_request_ticket_deleted(rid, deleted_by=caller_email, reason='database_request_bulk_deleted')
             requests_db.pop(rid, None)
             approvals_db.pop(rid, None)
             deleted.append(rid)
@@ -9849,7 +24240,7 @@ def bulk_delete_database_requests():
 
         return jsonify({'deleted': deleted, 'failed': failed, 'requested': len(request_ids)})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 
 @app.route('/vault/create-db-session', methods=['POST'])
@@ -9880,12 +24271,12 @@ def execute_database_query():
     try:
         data = request.get_json() or {}
         request_id = data.get('request_id')
-        user_email = data.get('user_email')
+        user_email = (_email_from_saml_session() or _current_request_identity().get('email') or '').strip().lower()
         query = data.get('query', '').strip()
         db_name = data.get('dbName')
         
         if not request_id or not user_email:
-            return jsonify({'error': 'Request ID and user email required for audit'}), 400
+            return jsonify({'error': 'Authentication required'}), 401
         
         # Time-based enforcement: validate access is still valid
         if request_id not in requests_db:
@@ -9894,13 +24285,38 @@ def execute_database_query():
         db_request = requests_db[request_id]
         if db_request.get('type') != 'database_access':
             return jsonify({'error': 'Invalid request type'}), 400
-        if db_request.get('user_email') != user_email:
+        if str(db_request.get('user_email') or '').strip().lower() != user_email:
             return jsonify({'error': 'Access denied: user mismatch'}), 403
         if str(db_request.get('status') or '').lower() not in ('active',):
             return jsonify({'error': 'Access not active. Please wait for approval.'}), 403
 
         if _is_db_request_expired(db_request):
             return jsonify({'error': 'Access expired. Please request new database access.'}), 403
+
+        query_guardrail = _evaluate_db_query_guardrail(
+            account_id=db_request.get('account_id'),
+            db_instance_id=db_request.get('db_instance_id') or db_request.get('requested_instance_input'),
+            user_email=user_email,
+            query=query,
+        )
+        if query_guardrail.get('blocked'):
+            try:
+                from audit_log import log_db_query
+                log_db_query(
+                    user_email,
+                    request_id,
+                    db_request.get('role', 'read_only'),
+                    query,
+                    allowed=False,
+                    rows_returned=None,
+                    error=str(query_guardrail.get('reason') or 'Query blocked by database guardrails.'),
+                )
+            except Exception:
+                pass
+            return jsonify({
+                'error': str(query_guardrail.get('reason') or 'Query blocked by database guardrails.'),
+                'matched_patterns': query_guardrail.get('matched_patterns') or [],
+            }), 403
         
         # MVP 2: Resolve credentials from backend - never trust client
         databases = db_request.get('databases', [])
@@ -9910,10 +24326,7 @@ def execute_database_query():
         # Users must connect only via proxy. For PAM Terminal, backend also connects via proxy when configured.
         req_account_env = _request_account_env(db_request)
         req_plane = _request_execution_plane(db_request)
-        proxy_host, proxy_port, _ = _resolve_db_connect_proxy_endpoint(
-            account_env=req_account_env,
-            execution_plane=req_plane
-        )
+        proxy_host, proxy_port, _, _endpoint_mode = _resolve_db_user_connect_endpoint(db_request)
         if not proxy_host or proxy_host == 'proxy-not-configured':
             return jsonify({'error': 'Database access service is not configured. Please contact an administrator.'}), 500
         host = proxy_host
@@ -9959,7 +24372,7 @@ def execute_database_query():
         
         return jsonify(result)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return _safe_error_response(e)
 
 # Register versioned API (v1) – delegates to existing views; legacy /api/... still works
 try:

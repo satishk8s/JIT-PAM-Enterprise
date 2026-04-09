@@ -35,7 +35,6 @@ credentials
 *.local
 
 # Excluded from repo (not needed for PAM app)
-Dockerfile
 k8s-deployment.yaml
 sql_commands.webp
 sql_commands (1).webp
@@ -114,9 +113,13 @@ backend/*.md
 frontend/*.md
 !README.md
 !backend/README.md
+!docs/
+!docs/SECURITY_HARDENING.md
+!CONTEXT_HANDOFF.md
 
 # Backend runtime data
 backend/data/
+backend/vault-ca.pem
 
 # Generated frontend bundles (created by scripts/bundle-frontend.sh on deploy)
 frontend/bundle.css

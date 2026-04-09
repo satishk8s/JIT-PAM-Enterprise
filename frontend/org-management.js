@@ -2,6 +2,21 @@
  * Organization Users & Groups Management
  */
 
+function getOrgManagementApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
+function escapeOrgMgmtHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Show create group modal
 function showCreateOrgGroupModal() {
     const modal = document.createElement('div');
@@ -36,9 +51,10 @@ function showCreateOrgGroupModal() {
         const description = document.getElementById('orgGroupDesc').value;
         
         try {
-            const response = await fetch('http://127.0.0.1:5000/api/admin/groups', {
+            const response = await fetch(`${getOrgManagementApiBase()}/admin/groups`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
+                credentials: 'include',
                 body: JSON.stringify({name, description})
             });
             
@@ -61,7 +77,7 @@ function showCreateOrgGroupModal() {
 // Show create user modal
 function showCreateOrgUserModal() {
     // First load groups
-    fetch('http://127.0.0.1:5000/api/admin/groups')
+    fetch(`${getOrgManagementApiBase()}/admin/groups`, { credentials: 'include' })
         .then(r => r.json())
         .then(data => {
             const groups = data.groups || [];
@@ -85,7 +101,7 @@ function showCreateOrgUserModal() {
                             <label style="display: block; margin-bottom: 5px; color: var(--text-primary);">Group *</label>
                             <select id="orgUserGroup" required style="width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--bg-secondary); color: var(--text-primary);">
                                 <option value="">Select Group</option>
-                                ${groups.map(g => `<option value="${g.id}">${g.name}</option>`).join('')}
+                                ${groups.map(g => `<option value="${escapeOrgMgmtHtml(g.id)}">${escapeOrgMgmtHtml(g.name)}</option>`).join('')}
                             </select>
                         </div>
                         <div style="display: flex; gap: 10px; justify-content: flex-end;">
@@ -106,9 +122,10 @@ function showCreateOrgUserModal() {
                 const group_id = document.getElementById('orgUserGroup').value;
                 
                 try {
-                    const response = await fetch('http://127.0.0.1:5000/api/admin/org-users', {
+                    const response = await fetch(`${getOrgManagementApiBase()}/admin/org-users`, {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
+                        credentials: 'include',
                         body: JSON.stringify({name, email, group_id})
                     });
                     
@@ -132,7 +149,7 @@ function showCreateOrgUserModal() {
 // Load organization groups
 async function loadOrgGroups() {
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/groups');
+        const response = await fetch(`${getOrgManagementApiBase()}/admin/groups`, { credentials: 'include' });
         const data = await response.json();
         
         const container = document.getElementById('orgGroupsList');
@@ -149,10 +166,10 @@ async function loadOrgGroups() {
             <div style="padding: 15px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 10px;">
                 <div style="display: flex; justify-content: space-between; align-items: start;">
                     <div>
-                        <h4 style="margin: 0 0 5px 0; color: var(--text-primary);">${group.name}</h4>
-                        <p style="margin: 0; font-size: 12px; color: var(--text-secondary);">${group.description || 'No description'}</p>
+                        <h4 style="margin: 0 0 5px 0; color: var(--text-primary);">${escapeOrgMgmtHtml(group.name)}</h4>
+                        <p style="margin: 0; font-size: 12px; color: var(--text-secondary);">${escapeOrgMgmtHtml(group.description || 'No description')}</p>
                         <p style="margin: 5px 0 0 0; font-size: 11px; color: var(--text-secondary);">
-                            <i class="fas fa-users"></i> ${group.members.length} member(s)
+                            <i class="fas fa-users"></i> ${Array.isArray(group.members) ? group.members.length : 0} member(s)
                         </p>
                     </div>
                 </div>
@@ -167,7 +184,7 @@ async function loadOrgGroups() {
 // Load organization users
 async function loadOrgUsers() {
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/org-users');
+        const response = await fetch(`${getOrgManagementApiBase()}/admin/org-users`, { credentials: 'include' });
         const data = await response.json();
         
         const container = document.getElementById('orgUsersList');
@@ -176,7 +193,7 @@ async function loadOrgUsers() {
         const users = data.users || [];
         
         // Also load groups to show group names
-        const groupsResponse = await fetch('http://127.0.0.1:5000/api/admin/groups');
+        const groupsResponse = await fetch(`${getOrgManagementApiBase()}/admin/groups`, { credentials: 'include' });
         const groupsData = await groupsResponse.json();
         const groups = groupsData.groups || [];
         
@@ -203,10 +220,10 @@ async function loadOrgUsers() {
                         
                         return `
                             <tr style="border-bottom: 1px solid var(--border-color);">
-                                <td style="padding: 10px; color: var(--text-primary);">${user.name}</td>
-                                <td style="padding: 10px; color: var(--text-primary);">${user.email}</td>
-                                <td style="padding: 10px; color: var(--text-primary);">${groupName}</td>
-                                <td style="padding: 10px; color: var(--text-secondary); font-size: 12px;">${createdDate}</td>
+                                <td style="padding: 10px; color: var(--text-primary);">${escapeOrgMgmtHtml(user.name)}</td>
+                                <td style="padding: 10px; color: var(--text-primary);">${escapeOrgMgmtHtml(user.email)}</td>
+                                <td style="padding: 10px; color: var(--text-primary);">${escapeOrgMgmtHtml(groupName)}</td>
+                                <td style="padding: 10px; color: var(--text-secondary); font-size: 12px;">${escapeOrgMgmtHtml(createdDate)}</td>
                             </tr>
                         `;
                     }).join('')}

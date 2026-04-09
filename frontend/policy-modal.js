@@ -2,6 +2,12 @@
 
 let currentModalType = null;
 
+function getPolicyModalApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
 function openPolicyModal(type) {
     currentModalType = type;
     const modal = document.getElementById('policyConfigModal');
@@ -363,7 +369,7 @@ function openPolicyModal(type) {
 }
 
 function loadRestrictedSettings() {
-    fetch('http://127.0.0.1:5000/api/admin/policy-settings')
+    fetch(`${getPolicyModalApiBase()}/admin/policy-settings`, { credentials: 'include' })
     .then(res => res.json())
     .then(data => {
         document.getElementById('modalAllowDeleteNonProd').checked = data.allowDeleteNonProd !== false;
@@ -393,9 +399,10 @@ async function savePolicyConfig() {
         
         try {
             // Save delete policy
-            await fetch('http://127.0.0.1:5000/api/admin/delete-permissions-policy', {
+            await fetch(`${getPolicyModalApiBase()}/admin/delete-permissions-policy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     allowDeleteNonProd: deleteNonProd,
                     allowDeleteProd: deleteProd
@@ -403,9 +410,10 @@ async function savePolicyConfig() {
             });
             
             // Save create policy
-            await fetch('http://127.0.0.1:5000/api/admin/create-permissions-policy', {
+            await fetch(`${getPolicyModalApiBase()}/admin/create-permissions-policy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     allowCreateNonProd: createNonProd,
                     allowCreateProd: createProd
@@ -413,9 +421,10 @@ async function savePolicyConfig() {
             });
             
             // Save admin policy
-            await fetch('http://127.0.0.1:5000/api/admin/admin-permissions-policy', {
+            await fetch(`${getPolicyModalApiBase()}/admin/admin-permissions-policy`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     allowAdminNonProd: adminNonProd,
                     allowAdminProd: adminProd,

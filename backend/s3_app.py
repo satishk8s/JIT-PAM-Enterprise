@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-import os, sqlite3, uuid, bcrypt, pyotp, qrcode, io, base64, boto3
+import os, sqlite3, uuid, bcrypt, pyotp, qrcode, io, base64, boto3, time
 from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Lock
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -13,18 +15,29 @@ from fastapi import Depends
 s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "ap-south-1"))
 
 # --- Config ---
-DB_PATH = "s3x.db"
+DB_PATH = os.getenv("S3X_DB_PATH") or str(Path(__file__).resolve().parent / "data" / "s3x.db")
 SESSION_TTL_MIN = 60
 PREAUTH_TTL_MIN = 15
 PWDRESET_TTL_MIN = 20
 COOKIE_NAME = "s3x_session"
 APP_ISSUER = "S3 File Explorer"
+_IS_PRODUCTION = str(os.getenv("FLASK_ENV") or "").strip().lower() == "production"
+RATE_LIMIT_LOGIN = (5, 300)
+RATE_LIMIT_MFA = (10, 300)
+_RATE_LIMIT_LOCK = Lock()
+_cors_origins = [
+    origin.strip()
+    for origin in str(os.getenv("S3X_CORS_ORIGINS") or os.getenv("CORS_ORIGINS") or "").split(",")
+    if origin.strip()
+]
+if _IS_PRODUCTION and not _cors_origins:
+    raise RuntimeError("S3X_CORS_ORIGINS must be set in production")
 
 app = FastAPI(title="S3 File Explorer")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins or ["http://localhost", "http://127.0.0.1", "http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,8 +45,12 @@ app.add_middleware(
 
 # --- DB helpers ---
 def db():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL;")
     return con
 
 def init_db():
@@ -81,16 +98,32 @@ def init_db():
     );
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS rate_limit_events (
+        bucket_key TEXT NOT NULL,
+        event_ts REAL NOT NULL
+    );
+    """)
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_s3x_rate_limit_key_ts
+    ON rate_limit_events(bucket_key, event_ts)
+    """)
+
     cur.execute("SELECT COUNT(*) c FROM users")
     if cur.fetchone()["c"] == 0:
-        ph = bcrypt.hashpw(b"ChangeMe!123", bcrypt.gensalt())
-        now = datetime.utcnow().isoformat()
-        cur.execute("""
-            INSERT INTO users (username, password_hash, role, mfa_enabled, email_verified,
-                               must_reset_password, password_last_set)
-            VALUES (?,?,?,?,?,?,?)
-        """, ("admin@local", ph, "admin", 0, 0, 1, now))
-        print("Bootstrap admin: admin@local / ChangeMe!123")
+        bootstrap_password = str(os.getenv("S3X_BOOTSTRAP_ADMIN_PASSWORD") or "").strip()
+        bootstrap_username = str(os.getenv("S3X_BOOTSTRAP_ADMIN_USERNAME") or "admin@local").strip() or "admin@local"
+        if bootstrap_password:
+            ph = bcrypt.hashpw(bootstrap_password.encode(), bcrypt.gensalt())
+            now = datetime.utcnow().isoformat()
+            cur.execute("""
+                INSERT INTO users (username, password_hash, role, mfa_enabled, email_verified,
+                                   must_reset_password, password_last_set)
+                VALUES (?,?,?,?,?,?,?)
+            """, (bootstrap_username, ph, "admin", 0, 0, 1, now))
+        elif _IS_PRODUCTION:
+            con.close()
+            raise RuntimeError("No S3X bootstrap admin is configured for production")
     
     con.commit(); con.close()
 
@@ -131,14 +164,62 @@ def get_perm_for_bucket(user_id: int, bucket: str):
     """, (user_id, bucket))
     r = cur.fetchone(); con.close()
     
-    # If no specific permissions, grant full access for JIT users
     if not r:
-        return {"can_read": 1, "can_upload": 1, "can_download": 1, "can_delete": 1}
+        return {"can_read": 0, "can_upload": 0, "can_download": 0, "can_delete": 0}
     
     return dict(r)
 
 def safe_key(key: str) -> bool:
     return key and ("\x00" not in key) and not key.startswith("../") and not key.startswith("/")
+
+
+def _client_ip(req: Request) -> str:
+    forwarded = (req.headers.get("X-Real-IP") or "").strip()
+    if forwarded:
+        return forwarded
+    xff = (req.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if xff:
+        return xff
+    return (req.client.host if req.client else "") or "unknown"
+
+
+def _check_rate_limit(bucket_key: str, max_requests: int, window_seconds: int) -> bool:
+    now = time.time()
+    cutoff = now - window_seconds
+    with _RATE_LIMIT_LOCK:
+        con = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                "DELETE FROM rate_limit_events WHERE bucket_key = ? AND event_ts < ?",
+                (bucket_key, cutoff),
+            )
+            current = con.execute(
+                "SELECT COUNT(*) FROM rate_limit_events WHERE bucket_key = ?",
+                (bucket_key,),
+            ).fetchone()
+            if int((current or [0])[0]) >= max_requests:
+                con.rollback()
+                return False
+            con.execute(
+                "INSERT INTO rate_limit_events(bucket_key, event_ts) VALUES (?, ?)",
+                (bucket_key, now),
+            )
+            con.commit()
+            return True
+        finally:
+            con.close()
+
+
+def _enforce_rate_limit(req: Request, prefix: str, limits: tuple[int, int], identity: str = "") -> None:
+    ip_key = f"{prefix}:ip:{_client_ip(req)}"
+    if not _check_rate_limit(ip_key, limits[0], limits[1]):
+        raise HTTPException(429, "Too many attempts. Please wait and try again.")
+    identity_norm = str(identity or "").strip().lower()
+    if identity_norm:
+        id_key = f"{prefix}:identity:{identity_norm}"
+        if not _check_rate_limit(id_key, limits[0], limits[1]):
+            raise HTTPException(429, "Too many attempts. Please wait and try again.")
 
 # --- Models ---
 class LoginReq(BaseModel): username: str; password: str
@@ -160,7 +241,7 @@ def _set_cookie(response: Response, sid: str, ttl_min: int, stage: str):
         value=f"{sid}:{stage}",
         max_age=ttl_min*60,
         httponly=True,
-        secure=False,
+        secure=_IS_PRODUCTION,
         samesite="Lax",
         path="/"
     )
@@ -181,35 +262,28 @@ def _get_session(cookie: str | None):
     cur.execute("SELECT * FROM sessions WHERE sid=?", (sid,))
     r = cur.fetchone(); con.close()
     if not r: return None
+    try:
+        if datetime.fromisoformat(r["expires_at"]) <= datetime.utcnow():
+            return None
+    except Exception:
+        return None
     return {"sid": r["sid"], "user_id": r["user_id"], "stage": r["stage"],
             "expires_at": r["expires_at"]}
 
 def require_auth(req: Request) -> dict:
-    # Use default JIT user for all requests
-    con = db(); cur = con.cursor()
-    cur.execute("SELECT id FROM users WHERE username=?", ("jit_user",))
-    u = cur.fetchone()
-    
-    if not u:
-        # Create default JIT user with all permissions
-        ph = bcrypt.hashpw(b"dummy", bcrypt.gensalt())
-        now = datetime.utcnow().isoformat()
-        cur.execute("""
-            INSERT INTO users (username, password_hash, role, mfa_enabled, email_verified,
-                               must_reset_password, password_last_set)
-            VALUES (?,?,?,?,?,?,?)
-        """, ("jit_user", ph, "readwrite", 1, 1, 0, now))
-        con.commit()
-        user_id = cur.lastrowid
-    else:
-        user_id = u["id"]
-    
-    con.close()
-    return {"user_id": user_id, "stage": "auth", "expires_at": (datetime.utcnow() + timedelta(hours=8)).isoformat()}
+    s = _get_session(req.cookies.get(COOKIE_NAME))
+    if not s or s["stage"] != "auth":
+        raise HTTPException(401, "Authentication required")
+    return s
 
 def require_admin(req: Request):
-    # Allow all JIT users to access admin endpoints for viewing metrics
-    return require_auth(req)
+    s = require_auth(req)
+    con = db(); cur = con.cursor()
+    cur.execute("SELECT role FROM users WHERE id=?", (s["user_id"],))
+    user = cur.fetchone(); con.close()
+    if not user or str(user["role"] or "").strip().lower() != "admin":
+        raise HTTPException(403, "Admin access required")
+    return s
 
 # --- Utility functions ---
 def is_password_expired(iso_ts): 
@@ -226,7 +300,8 @@ def secret_to_qr(username, secret):
 
 # --- Auth endpoints ---
 @app.post("/api/login")
-def login(body: LoginReq, response: Response):
+def login(body: LoginReq, response: Response, req: Request):
+    _enforce_rate_limit(req, "login", RATE_LIMIT_LOGIN, identity=body.username)
     con = db(); cur = con.cursor()
     cur.execute("SELECT * FROM users WHERE username=?", (body.username,))
     u = cur.fetchone(); con.close()
@@ -292,6 +367,7 @@ def mfa_verify(body: VerifyReq, req: Request, response: Response):
     s = _get_session(req.cookies.get(COOKIE_NAME))
     if not s or s["stage"] != "preauth": 
         raise HTTPException(401, "Not logged in")
+    _enforce_rate_limit(req, "mfa_verify", RATE_LIMIT_MFA, identity=str(s["user_id"]))
     
     con = db(); cur = con.cursor()
     cur.execute("SELECT * FROM users WHERE id=?", (s["user_id"],))
@@ -462,35 +538,18 @@ def get_all_permissions(s: dict = Depends(require_admin)):
 # --- S3 endpoints ---
 @app.get("/api/s3/all-buckets")
 def list_all_buckets(req: Request):
-    s = require_auth(req)
+    require_admin(req)
     try:
         response = s3.list_buckets()
         buckets = [b["Name"] for b in response["Buckets"]]
         return {"buckets": buckets}
-    except ClientError as e:
-        raise HTTPException(500, f"S3 error: {e}")
+    except ClientError:
+        raise HTTPException(500, "Failed to list S3 buckets")
 
 @app.get("/api/s3/buckets")
 def list_user_buckets(req: Request):
     s = require_auth(req)
     rows = get_user_perm_rows(s["user_id"])
-    
-    # If no specific permissions, grant access to all buckets for JIT users
-    if not rows:
-        try:
-            response = s3.list_buckets()
-            rows = [{
-                "bucket_name": b["Name"],
-                "prefix_path": "",
-                "can_read": 1,
-                "can_upload": 1,
-                "can_download": 1,
-                "can_delete": 1,
-                "username": "jit_user"
-            } for b in response["Buckets"]]
-        except ClientError:
-            rows = []
-    
     rows.sort(key=lambda r: r["bucket_name"])
     return {"buckets": rows}
 
@@ -527,8 +586,8 @@ def list_objects(bucket: str, req: Request, prefix: Optional[str] = "", max_keys
             "is_truncated": resp.get("IsTruncated", False),
             "next_token": resp.get("NextContinuationToken")
         }
-    except ClientError as e:
-        raise HTTPException(500, f"S3 error: {e.response['Error']['Message']}")
+    except ClientError:
+        raise HTTPException(500, "Failed to list S3 objects")
 
 class KeyBody(BaseModel):
     key: str
@@ -550,8 +609,8 @@ def presign_download(bucket: str, body: KeyBody, req: Request):
             ExpiresIn=body.expires
         )
         return {"url": url}
-    except ClientError as e:
-        raise HTTPException(500, f"Presign error: {e.response['Error']['Message']}")
+    except ClientError:
+        raise HTTPException(500, "Failed to create download URL")
 
 class UploadBody(BaseModel):
     key: str
@@ -574,8 +633,8 @@ def presign_upload(bucket: str, body: UploadBody, req: Request):
             ExpiresIn=body.expires
         )
         return {"url": url}
-    except ClientError as e:
-        raise HTTPException(500, f"Presign error: {e.response['Error']['Message']}")
+    except ClientError:
+        raise HTTPException(500, "Failed to create upload URL")
 
 class DeleteBody(BaseModel):
     key: str
@@ -592,8 +651,8 @@ def delete_object(bucket: str, body: DeleteBody, req: Request):
     try:
         s3.delete_object(Bucket=bucket, Key=body.key)
         return {"status": "ok"}
-    except ClientError as e:
-        raise HTTPException(500, f"Delete error: {e.response['Error']['Message']}")
+    except ClientError:
+        raise HTTPException(500, "Failed to delete S3 object")
 
 @app.on_event("startup")
 def cleanup_sessions():

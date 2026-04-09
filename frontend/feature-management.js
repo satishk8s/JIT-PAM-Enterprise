@@ -18,8 +18,16 @@
         database_terminal_access: true,
         vm_terminal_access: true,
         request_calendar: true,
-        database_ai_assistant: true
+        database_ai_assistant: false,
+        npamx_chatbot: true,
+        documentation_portal: true,
+        support_portal: true
     };
+
+    const FEATURE_FAIL_CLOSED = Object.freeze(Object.keys(FEATURE_DEFAULTS).reduce(function (acc, key) {
+        acc[key] = false;
+        return acc;
+    }, {}));
 
     const FEATURE_KEY_ALIASES = {
         cloud: 'cloud_access',
@@ -58,20 +66,50 @@
         requestable_for_access_calendar: 'request_calendar',
         database_ai: 'database_ai_assistant',
         ai: 'database_ai_assistant',
-        database_ai_assistant: 'database_ai_assistant'
+        database_ai_assistant: 'database_ai_assistant',
+        npamx_chatbot: 'npamx_chatbot',
+        npamx_assistant: 'npamx_chatbot',
+        chatbot: 'npamx_chatbot',
+        documentation: 'documentation_portal',
+        documentation_portal: 'documentation_portal',
+        support: 'support_portal',
+        support_portal: 'support_portal'
     };
+
+    function looksLikeFailClosedSnapshot(flags) {
+        const src = flags || {};
+        return (
+            src.cloud_access === false &&
+            src.storage_access === false &&
+            src.databases_access === false &&
+            src.workloads_access === false &&
+            src.terminal_access === false
+        );
+    }
 
     let currentFeatures = (function () {
         try {
             const raw = localStorage.getItem('npam_feature_flags');
             if (!raw) return Object.assign({}, FEATURE_DEFAULTS);
             const parsed = JSON.parse(raw);
-            return normalizeFeatures(parsed, FEATURE_DEFAULTS);
+            const normalized = normalizeFeatures(parsed, FEATURE_DEFAULTS);
+            return looksLikeFailClosedSnapshot(normalized)
+                ? Object.assign({}, FEATURE_DEFAULTS)
+                : normalized;
         } catch (_) {
             return Object.assign({}, FEATURE_DEFAULTS);
         }
     })();
     let adminFeatureLoadInFlight = false;
+    let featureFlagsReady = false;
+
+    function markFeatureFlagsReady() {
+        if (featureFlagsReady) return;
+        featureFlagsReady = true;
+        if (typeof document !== 'undefined' && document.documentElement) {
+            document.documentElement.classList.remove('feature-flags-pending');
+        }
+    }
 
     function getApiBases() {
         const bases = [];
@@ -100,7 +138,6 @@
         if (typeof window !== 'undefined' && window.API_BASE) {
             pushWithApiVariants(window.API_BASE);
         }
-        pushBase(window.location.protocol + '//' + window.location.hostname + ':5000/api');
         return bases;
     }
 
@@ -138,6 +175,14 @@
         const normalized = String(base || '').replace(/\/+$/, '');
         if (!normalized) return;
         window.API_BASE = normalized;
+    }
+
+    function getCsrfHeaderValue() {
+        if (typeof window.getCsrfToken === 'function') {
+            return String(window.getCsrfToken() || '').trim();
+        }
+        const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
+        return match ? decodeURIComponent(match[1]) : '';
     }
 
     function canonicalFeatureKey(key) {
@@ -189,6 +234,13 @@
     function isPageAllowedByFeatures(pageId) {
         const p = String(pageId || '').trim();
         if (!p) return true;
+        if (p === 'databases' && typeof window.hasPamCapability === 'function') {
+            try {
+                if (window.hasPamCapability('databases.request.view')) {
+                    return true;
+                }
+            } catch (_) {}
+        }
         const required = {
             aws: ['cloud_access', 'aws_access'],
             gcp: ['cloud_access', 'gcp_access'],
@@ -225,7 +277,10 @@
             featureDatabaseTerminalAccess: 'database_terminal_access',
             featureVmTerminalAccess: 'vm_terminal_access',
             featureRequestCalendar: 'request_calendar',
-            featureDatabaseAIAssistant: 'database_ai_assistant'
+            featureDatabaseAIAssistant: 'database_ai_assistant',
+            featureNpamxChatbot: 'npamx_chatbot',
+            featureDocumentationPortal: 'documentation_portal',
+            featureSupportPortal: 'support_portal'
         };
         Object.keys(mapping).forEach(function (id) {
             const el = document.getElementById(id);
@@ -266,7 +321,8 @@
             { key: 'workloads_access', badgeId: 'featureWorkloadsStatusBadge', textId: 'featureWorkloadsStatusText' },
             { key: 'terminal_access', badgeId: 'featureTerminalStatusBadge', textId: 'featureTerminalStatusText' },
             { key: 'request_calendar', badgeId: 'featureCalendarStatusBadge', textId: 'featureCalendarStatusText' },
-            { key: 'database_ai_assistant', badgeId: 'featureDbAiStatusBadge', textId: 'featureDbAiStatusText' }
+            { key: 'database_ai_assistant', badgeId: 'featureDbAiStatusBadge', textId: 'featureDbAiStatusText' },
+            { key: 'npamx_chatbot', badgeId: 'featureNpamxChatbotStatusBadge', textId: 'featureNpamxChatbotStatusText' }
         ];
 
         statusMap.forEach(function (entry) {
@@ -284,6 +340,9 @@
     }
 
     function applySidebarGating(flags) {
+        const dbNavAllowed = (typeof window.hasPamCapability === 'function')
+            ? !!window.hasPamCapability('databases.request.view')
+            : true;
         const cloudParent = !!flags.cloud_access;
         const awsEnabled = cloudParent && !!flags.aws_access;
         const gcpEnabled = cloudParent && !!flags.gcp_access;
@@ -315,9 +374,9 @@
         setVisible(document.getElementById('navItemInstances'), instancesEnabled, 'flex');
         setVisible(document.getElementById('navItemGcpVms'), gcpVmsEnabled, 'flex');
 
-        setVisible(document.getElementById('navCategoryDatabasesAccess'), dbParent, 'block');
+        setVisible(document.getElementById('navCategoryDatabasesAccess'), dbNavAllowed, 'block');
         setVisible(document.getElementById('navItemDatabases'), false, 'flex');
-        setVisible(document.getElementById('navItemDatabasesStructured'), dbStructuredEnabled, 'flex');
+        setVisible(document.getElementById('navItemDatabasesStructured'), dbNavAllowed, 'flex');
 
         setVisible(document.getElementById('navItemDatabaseTerminal'), showDbTerminal, 'flex');
         setVisible(document.getElementById('navItemVmTerminal'), showVmTerminal, 'flex');
@@ -331,7 +390,10 @@
 
         setVisible(document.getElementById('requestsCloudCard'), cloudVisible, 'block');
         setVisible(document.getElementById('requestsStorageCard'), storageVisible, 'block');
-        setVisible(document.getElementById('requestsDatabasesCard'), !!flags.databases_access, 'block');
+        const dbRequestsVisible = (typeof window.hasPamCapability === 'function')
+            ? !!window.hasPamCapability('databases.request.view')
+            : !!flags.databases_access;
+        setVisible(document.getElementById('requestsDatabasesCard'), dbRequestsVisible, 'block');
         setVisible(document.getElementById('requestsWorkloadsCard'), workloadsVisible, 'block');
 
         if (typeof currentRequestsCategory !== 'undefined') {
@@ -371,7 +433,7 @@
         const pageId = String(activePage.id || '').replace(/Page$/, '');
         if (!pageId || isPageAllowedByFeatures(pageId)) return;
         if (typeof showPage === 'function') {
-            showPage('requests');
+            showPage('home');
         }
     }
 
@@ -382,6 +444,22 @@
             } catch (e) {
                 console.warn('Failed to apply database feature flags', e);
             }
+        }
+    }
+
+    function applyHeaderFeatureGating(flags) {
+        const documentationEnabled = !!flags.documentation_portal;
+        const supportEnabled = !!flags.support_portal;
+        const documentationBtn = document.getElementById('documentationHeaderBtn');
+        const supportBtn = document.getElementById('supportHeaderBtn');
+        if (documentationBtn && !documentationEnabled) {
+            setVisible(documentationBtn, false, 'inline-flex');
+        }
+        if (supportBtn && !supportEnabled) {
+            setVisible(supportBtn, false, 'inline-flex');
+        }
+        if (typeof window.applyRuntimeSettings === 'function') {
+            window.applyRuntimeSettings();
         }
     }
 
@@ -405,6 +483,10 @@
         applyRequestsGating(normalized);
         applyFeatureOptionGating(normalized);
         applyDatabasePageFeatureFlags(normalized);
+        applyHeaderFeatureGating(normalized);
+        if (typeof window.updateHomeFeatureVisibility === 'function') {
+            window.updateHomeFeatureVisibility(normalized);
+        }
         applyRuntimePageGuard();
         publishFeatureUpdate(normalized);
         return Object.assign({}, normalized);
@@ -464,9 +546,14 @@
             applyFeatureVisibility(payload);
             return Object.assign({}, currentFeatures);
         } catch (e) {
-            console.warn('Using local/default feature flags:', e.message || e);
-            applyFeatureVisibility(currentFeatures);
+            console.warn('Using cached/default feature flags:', e.message || e);
+            const safeFlags = looksLikeFailClosedSnapshot(currentFeatures)
+                ? Object.assign({}, FEATURE_DEFAULTS)
+                : normalizeFeatures(currentFeatures, FEATURE_DEFAULTS);
+            applyFeatureVisibility(safeFlags);
             return Object.assign({}, currentFeatures);
+        } finally {
+            markFeatureFlagsReady();
         }
     }
 
@@ -482,6 +569,7 @@
             await refreshFeaturesFromServer();
         } finally {
             adminFeatureLoadInFlight = false;
+            markFeatureFlagsReady();
         }
     }
 
@@ -491,9 +579,12 @@
         let last = { ok: false, status: 0, data: { error: 'Backend unavailable' }, sawNotFound: false };
         for (const url of candidates) {
             try {
+                const headers = { 'Content-Type': 'application/json' };
+                const csrfToken = getCsrfHeaderValue();
+                if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
                 const res = await fetch(url, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: headers,
                     credentials: 'include',
                     body: JSON.stringify(body || {})
                 });

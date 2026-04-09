@@ -46,9 +46,12 @@ fi
 # If you see "Access denied for user 'X'@'localhost'" after approval, set these:
 #   export DB_ADMIN_USER=root
 #   export DB_ADMIN_PASSWORD=your_mysql_root_password
-export DB_ADMIN_USER="${DB_ADMIN_USER:-admin}"
-export DB_ADMIN_PASSWORD="${DB_ADMIN_PASSWORD:-admin123}"
+export DB_ADMIN_USER="${DB_ADMIN_USER:-}"
+export DB_ADMIN_PASSWORD="${DB_ADMIN_PASSWORD:-}"
 export USE_DB_PROXY="${USE_DB_PROXY:-true}"
+if [ "$USE_DB_PROXY" = "true" ] && { [ -z "$DB_ADMIN_USER" ] || [ -z "$DB_ADMIN_PASSWORD" ]; }; then
+  echo "WARNING: DB_ADMIN_USER / DB_ADMIN_PASSWORD are not set. Database provisioning flows will stay unavailable until configured."
+fi
 
 # 5. Kill any existing processes on 5000/5002
 for port in 5000 5002; do

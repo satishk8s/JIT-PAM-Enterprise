@@ -1,18 +1,37 @@
 // Policy Configuration Functions
 
+function getPolicyConfigApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
+function escapePolicyConfigHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function policyConfigJsString(value) {
+    return JSON.stringify(String(value == null ? '' : value));
+}
+
 // Load account classification table
 async function loadAccountClassification() {
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/accounts');
+        const response = await fetch(`${getPolicyConfigApiBase()}/accounts`, { credentials: 'include' });
         const accounts = await response.json();
         
         const tbody = document.getElementById('accountClassificationTable');
         tbody.innerHTML = Object.values(accounts).map(account => `
             <tr>
-                <td>${account.id}</td>
-                <td>${account.name}</td>
+                <td>${escapePolicyConfigHtml(account.id)}</td>
+                <td>${escapePolicyConfigHtml(account.name)}</td>
                 <td>
-                    <select onchange="updateAccountTag('${account.id}', this.value)">
+                    <select onchange="updateAccountTag(${policyConfigJsString(account.id)}, this.value)">
                         <option value="">Not Tagged</option>
                         <option value="prod" ${account.environment === 'prod' ? 'selected' : ''}>Production</option>
                         <option value="nonprod" ${account.environment === 'nonprod' ? 'selected' : ''}>Non-Production</option>
@@ -21,18 +40,18 @@ async function loadAccountClassification() {
                     </select>
                 </td>
                 <td>
-                    <select onchange="updateAccountJIT('${account.id}', this.value)">
+                    <select onchange="updateAccountJIT(${policyConfigJsString(account.id)}, this.value)">
                         <option value="yes" ${account.jit_required !== false ? 'selected' : ''}>Yes</option>
                         <option value="no" ${account.jit_required === false ? 'selected' : ''}>No</option>
                     </select>
                 </td>
                 <td>
-                    <input type="number" value="${account.max_duration || 8}" min="1" max="120" 
-                           onchange="updateAccountDuration('${account.id}', this.value)" 
+                    <input type="number" value="${Number(account.max_duration || 8)}" min="1" max="120" 
+                           onchange="updateAccountDuration(${policyConfigJsString(account.id)}, this.value)" 
                            style="width: 60px;">
                 </td>
                 <td>
-                    <button class="btn-link" onclick="viewAccountDetails('${account.id}')">Details</button>
+                    <button class="btn-link" onclick="viewAccountDetails(${policyConfigJsString(account.id)})">Details</button>
                 </td>
             </tr>
         `).join('');
@@ -46,8 +65,9 @@ async function syncAccountsFromOU() {
     if (!confirm('This will auto-tag accounts based on AWS OU structure. Continue?')) return;
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/sync-accounts-from-ou', {
-            method: 'POST'
+        const response = await fetch(`${getPolicyConfigApiBase()}/admin/sync-accounts-from-ou`, {
+            method: 'POST',
+            credentials: 'include'
         });
         const result = await response.json();
         
@@ -61,9 +81,10 @@ async function syncAccountsFromOU() {
 // Update account tag
 async function updateAccountTag(accountId, environment) {
     try {
-        await fetch(`http://127.0.0.1:5000/api/admin/account/${accountId}/tag`, {
+        await fetch(`${getPolicyConfigApiBase()}/admin/account/${encodeURIComponent(accountId)}/tag`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify({environment})
         });
         console.log(`Account ${accountId} tagged as ${environment}`);
@@ -75,9 +96,10 @@ async function updateAccountTag(accountId, environment) {
 // Update account JIT requirement
 async function updateAccountJIT(accountId, jitRequired) {
     try {
-        await fetch(`http://127.0.0.1:5000/api/admin/account/${accountId}/jit`, {
+        await fetch(`${getPolicyConfigApiBase()}/admin/account/${encodeURIComponent(accountId)}/jit`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify({jit_required: jitRequired === 'yes'})
         });
         console.log(`Account ${accountId} JIT set to ${jitRequired}`);
@@ -89,9 +111,10 @@ async function updateAccountJIT(accountId, jitRequired) {
 // Update account max duration
 async function updateAccountDuration(accountId, duration) {
     try {
-        await fetch(`http://127.0.0.1:5000/api/admin/account/${accountId}/duration`, {
+        await fetch(`${getPolicyConfigApiBase()}/admin/account/${encodeURIComponent(accountId)}/duration`, {
             method: 'PUT',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify({max_duration: parseInt(duration)})
         });
         console.log(`Account ${accountId} max duration set to ${duration}hrs`);

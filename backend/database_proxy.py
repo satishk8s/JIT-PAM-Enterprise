@@ -10,20 +10,40 @@ Listens on: http://127.0.0.1:5002 (internal only - not exposed to internet)
 """
 
 import os
+import boto3
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from botocore.config import Config
 
 # Import our enforcer and database executor
 from sql_enforcer import enforce_select_only
 from database_manager import execute_query
 
 app = Flask(__name__)
-CORS(app)  # Only for localhost; in production, restrict origin
+_db_proxy_cors_origins = str(os.getenv('DB_PROXY_CORS_ORIGINS') or '').strip()
+if _db_proxy_cors_origins:
+    CORS(app, origins=[o.strip() for o in _db_proxy_cors_origins.split(',') if o.strip()], supports_credentials=True)
 
 # Config
 MAX_ROWS = 10000
 QUERY_TIMEOUT_SEC = 30
 GUARDRAILS_OFF = os.getenv('GUARDRAILS_OFF', 'false').lower() == 'true'
+
+
+def _db_proxy_env_or_secret(name: str) -> str:
+    direct = str(os.getenv(name) or '').strip()
+    if direct:
+        return direct
+    secret_name = str(os.getenv(f'{name}_SECRET_NAME') or '').strip()
+    if not secret_name:
+        return ''
+    region = str(os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'ap-south-1').strip()
+    sm = boto3.client('secretsmanager', region_name=region, config=Config(connect_timeout=3, read_timeout=5))
+    resp = sm.get_secret_value(SecretId=secret_name) or {}
+    return str(resp.get('SecretString') or '').strip()
+
+
+_DB_PROXY_INTERNAL_TOKEN = _db_proxy_env_or_secret('DB_PROXY_INTERNAL_TOKEN')
 
 
 def log_proxy_action(user_email: str, request_id: str, query: str, allowed: bool, rows: int = 0, error: str = None):
@@ -64,6 +84,10 @@ def execute():
     never sees them. Flask got them from Vault or its internal store.
     """
     try:
+        if not _DB_PROXY_INTERNAL_TOKEN:
+            return jsonify({'error': 'Database proxy is not configured'}), 503
+        if str(request.headers.get('X-Internal-Token') or '').strip() != _DB_PROXY_INTERNAL_TOKEN:
+            return jsonify({'error': 'Forbidden'}), 403
         data = request.get_json()
         if not data:
             return jsonify({'error': 'JSON body required'}), 400
@@ -116,11 +140,10 @@ def execute():
         return jsonify(result)
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': 'Query execution failed'}), 500
 
 
 if __name__ == '__main__':
     port = int(os.getenv('DB_PROXY_PORT', 5002))
     # Bind to 127.0.0.1 only - not exposed to network
     app.run(host='127.0.0.1', port=port, debug=False)
-

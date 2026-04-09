@@ -7,9 +7,7 @@ const TERMINAL_API_BASE = (typeof DB_API_BASE !== 'undefined')
     ? DB_API_BASE
     : ((typeof API_BASE !== 'undefined')
         ? API_BASE.replace('/api', '')
-        : (window.location.port === '80' || window.location.port === '443' || window.location.port === ''
-            ? window.location.origin
-            : `${window.location.protocol}//${window.location.hostname}:5000`));
+        : ((window.API_BASE ? String(window.API_BASE).replace(/\/api$/, '') : '') || window.location.origin));
 
 const TERMINAL_MODES = {
     database: {
@@ -115,7 +113,14 @@ async function loadTerminalDbConnections(mode = 'database') {
     const { empty, items } = getTerminalElements(mode);
     if (!empty || !items) return;
 
-    const userEmail = localStorage.getItem('userEmail') || 'satish@nykaa.com';
+    const userEmail = String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+    if (!userEmail) {
+        empty.style.display = 'block';
+        items.style.display = 'none';
+        items.innerHTML = '';
+        empty.innerHTML = '<p>Sign in to view approved database connections.</p>';
+        return;
+    }
     const url = `${TERMINAL_API_BASE}/api/databases/approved?user_email=${encodeURIComponent(userEmail)}`;
 
     try {
@@ -166,7 +171,14 @@ async function loadTerminalVmConnections(mode = 'vm') {
     if (!empty || !items) return;
 
     try {
-        const userEmail = localStorage.getItem('userEmail') || 'satish@nykaa.com';
+        const userEmail = String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+        if (!userEmail) {
+            empty.style.display = 'block';
+            items.style.display = 'none';
+            items.innerHTML = '';
+            empty.innerHTML = '<p>Sign in to view approved VM connections.</p>';
+            return;
+        }
         const res = await fetch(`${TERMINAL_API_BASE}/api/instances/approved?user_email=${encodeURIComponent(userEmail)}`);
         const data = await res.json();
         const instances = data.instances || [];

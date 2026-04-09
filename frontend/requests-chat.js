@@ -1,5 +1,28 @@
 // Requests Chat - Handles requests page chat interface
 let requestsChatConversationId = null;
+let requestsChatCollectedData = null;
+
+function getRequestsChatApiBase() {
+    const base = String(
+        (typeof window !== 'undefined' && window.API_BASE)
+            ? window.API_BASE
+            : ((typeof API_BASE !== 'undefined') ? API_BASE : '/api')
+    ).replace(/\/+$/, '');
+    return base || '/api';
+}
+
+function getRequestsChatHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (typeof getCsrfToken === 'function') {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    }
+    return headers;
+}
+
+function getRequestsChatUserEmail() {
+    return String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+}
 
 function sendRequestsChatMessage() {
     const input = document.getElementById('requestsChatInput');
@@ -32,13 +55,14 @@ function sendRequestsChatMessage() {
     }
     
     // Otherwise, use unified assistant
-    fetch('http://127.0.0.1:5000/api/unified-assistant', {
+    fetch(getRequestsChatApiBase() + '/unified-assistant', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getRequestsChatHeaders(),
+        credentials: 'include',
         body: JSON.stringify({
             conversation_id: requestsChatConversationId,
             user_message: message,
-            user_email: localStorage.getItem('userEmail') || 'user@example.com'
+            user_email: getRequestsChatUserEmail()
         })
     })
     .then(response => response.json())
@@ -156,6 +180,7 @@ function loadRequestsList() {
 
 function resetRequestsChat() {
     requestsChatConversationId = null;
+    requestsChatCollectedData = null;
     const messagesDiv = document.getElementById('requestsChatMessages');
     if (messagesDiv) {
         messagesDiv.innerHTML = `
@@ -190,6 +215,7 @@ function resetRequestsChat() {
 }
 
 function showGenerateButtonInRequests(collectedData) {
+    requestsChatCollectedData = collectedData || null;
     const messagesDiv = document.getElementById('requestsChatMessages');
     const buttonDiv = document.createElement('div');
     buttonDiv.className = 'unified-generate-button-container';
@@ -215,9 +241,10 @@ async function generatePolicyFromRequestsChat() {
     addRequestsChatMessage('assistant', 'Generating your access policy...', true);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/unified-assistant/generate', {
+        const response = await fetch(getRequestsChatApiBase() + '/unified-assistant/generate', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getRequestsChatHeaders(),
+            credentials: 'include',
             body: JSON.stringify({
                 conversation_id: requestsChatConversationId
             })
@@ -230,14 +257,15 @@ async function generatePolicyFromRequestsChat() {
         }
         
         if (data.ready && data.data) {
-            const permResponse = await fetch('http://127.0.0.1:5000/api/generate-permissions', {
+            const permResponse = await fetch(getRequestsChatApiBase() + '/generate-permissions', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getRequestsChatHeaders(),
+                credentials: 'include',
                 body: JSON.stringify({
                     use_case: data.data.use_case,
                     account_id: data.data.account_id,
                     conversation_id: requestsChatConversationId,
-                    user_email: localStorage.getItem('userEmail') || 'user@example.com',
+                    user_email: getRequestsChatUserEmail(),
                     selected_resources: data.data.selected_resources,
                     region: data.data.region
                 })
@@ -263,6 +291,7 @@ async function generatePolicyFromRequestsChat() {
 }
 
 function showSubmitButtonInRequests(formData) {
+    requestsChatCollectedData = formData || requestsChatCollectedData;
     const messagesDiv = document.getElementById('requestsChatMessages');
     const buttonDiv = document.createElement('div');
     buttonDiv.className = 'unified-submit-button-container';
@@ -283,12 +312,47 @@ async function submitRequestFromRequestsChat() {
         alert('No policy generated yet');
         return;
     }
+    const userEmail = getRequestsChatUserEmail();
+    if (!userEmail) {
+        alert('Your session is missing the authenticated user email. Sign in again and retry.');
+        return;
+    }
+    const collected = requestsChatCollectedData || {};
+    const accountId = String(collected.account_id || '').trim();
+    const justification = String(
+        collected.justification ||
+        collected.business_reason ||
+        collected.reason ||
+        ''
+    ).trim();
+    const durationHours = Number(collected.duration_hours || collected.duration || 0) || 8;
+    const useCase = String(
+        collected.use_case ||
+        window.currentAIPermissions.description ||
+        ''
+    ).trim();
+    if (!accountId) {
+        alert('The request conversation is missing the target account. Restart the request and select the correct account.');
+        return;
+    }
+    if (!justification || justification.length < 3) {
+        alert('The request conversation is missing business justification. Provide the reason in chat before submitting.');
+        return;
+    }
+    if (!useCase) {
+        alert('The generated policy is missing the access use case. Restart the request generation and retry.');
+        return;
+    }
     
     // Use existing request submission logic
     if (typeof handleNewRequest === 'function') {
         // Create a synthetic form submission
         const formData = {
-            use_case: window.currentAIPermissions.description || 'AI-generated access request',
+            user_email: userEmail,
+            account_id: accountId,
+            duration_hours: durationHours,
+            justification: justification,
+            use_case: useCase,
             ai_generated: true,
             is_jit: true,
             ai_permissions: window.currentAIPermissions
@@ -296,9 +360,10 @@ async function submitRequestFromRequestsChat() {
         
         // Submit via existing endpoint
         try {
-            const response = await fetch('http://127.0.0.1:5000/api/request-access', {
+            const response = await fetch(getRequestsChatApiBase() + '/request-access', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: getRequestsChatHeaders(),
+                credentials: 'include',
                 body: JSON.stringify(formData)
             });
             
@@ -327,6 +392,5 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
-
 
 

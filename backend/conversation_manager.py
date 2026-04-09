@@ -13,6 +13,18 @@ class ConversationManager:
     conversations = {}
     bedrock_config = None
     bedrock_client = None
+
+    @staticmethod
+    def cleanup_expired():
+        now = datetime.now()
+        expired_ids = [
+            conv_id
+            for conv_id, conv in list(ConversationManager.conversations.items())
+            if not isinstance(conv, dict) or conv.get('expires_at') is None or now > conv['expires_at']
+        ]
+        for conv_id in expired_ids:
+            ConversationManager.conversations.pop(conv_id, None)
+        return len(expired_ids)
     
     @staticmethod
     def load_bedrock_config():
@@ -38,8 +50,7 @@ class ConversationManager:
     
     @staticmethod
     def start_conversation(user_email, initial_message, account_env='nonprod', selected_resources=None, account_id=None, region=None):
-        # Clear old conversations
-        ConversationManager.conversations.clear()
+        ConversationManager.cleanup_expired()
         conversation_id = f"{user_email}_{datetime.now().timestamp()}"
         ConversationManager.conversations[conversation_id] = {
             'user_email': user_email,

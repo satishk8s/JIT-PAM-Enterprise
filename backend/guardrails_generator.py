@@ -26,8 +26,8 @@ class GuardrailsGenerator:
         try:
             # Check if this is a fresh start (no conversation_id or invalid conversation)
             if not conversation_id or not ConversationManager.get_conversation(conversation_id):
-                # Fresh start - clear any old conversations and start new
-                ConversationManager.conversations.clear()
+                # Fresh start - drop only expired conversations, never wipe all user sessions.
+                ConversationManager.cleanup_expired()
                 conversation_id = ConversationManager.start_conversation(
                     user_email='admin',
                     initial_message=requirement,

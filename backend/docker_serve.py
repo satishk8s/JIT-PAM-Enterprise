@@ -9,9 +9,19 @@ from app import app
 
 FRONTEND_DIR = os.environ.get('FRONTEND_DIR', '').strip()
 if FRONTEND_DIR and os.path.isdir(FRONTEND_DIR):
+    def _serve_frontend_file(filename: str, *, is_html: bool = False):
+        response = send_from_directory(FRONTEND_DIR, filename)
+        if is_html:
+            # Always fetch a fresh HTML shell after blue/green cutovers so the
+            # browser picks up the latest versioned JS/CSS assets immediately.
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+        return response
+
     @app.route('/')
     def index():
-        return send_from_directory(FRONTEND_DIR, 'index.html')
+        return _serve_frontend_file('index.html', is_html=True)
 
     @app.route('/<path:path>')
     def serve_frontend(path):
@@ -19,5 +29,5 @@ if FRONTEND_DIR and os.path.isdir(FRONTEND_DIR):
             abort(404)
         file_path = os.path.join(FRONTEND_DIR, path)
         if os.path.isfile(file_path):
-            return send_from_directory(FRONTEND_DIR, path)
-        return send_from_directory(FRONTEND_DIR, 'index.html')
+            return _serve_frontend_file(path, is_html=path.endswith('.html'))
+        return _serve_frontend_file('index.html', is_html=True)

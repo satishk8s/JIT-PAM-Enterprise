@@ -1,5 +1,21 @@
 // Global Help Assistant - Available on all pages
 let helpConversationId = null;
+const HELP_ASSISTANT_API_BASE = (typeof API_BASE !== 'undefined' && API_BASE)
+    ? API_BASE
+    : (window.API_BASE || `${window.location.origin}/api`);
+
+function escapeHelpHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatHelpMessage(value) {
+    return escapeHelpHtml(value).replace(/\n/g, '<br>');
+}
 
 function toggleHelpChat() {
     const popup = document.getElementById('helpChatPopup');
@@ -41,9 +57,10 @@ async function sendHelpMessage() {
     chatArea.scrollTop = chatArea.scrollHeight;
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/help-assistant', {
+        const response = await fetch(`${HELP_ASSISTANT_API_BASE}/help-assistant`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({ 
                 conversation_id: helpConversationId,
                 user_message: input
@@ -81,13 +98,13 @@ function addHelpChatMessage(role, message) {
     messageDiv.className = `chat-message ${role}`;
     
     if (role === 'user') {
-        messageDiv.innerHTML = `<strong>You</strong>${message.replace(/\n/g, '<br>')}`;
+        messageDiv.innerHTML = `<strong>You</strong>${formatHelpMessage(message)}`;
     } else if (role === 'assistant') {
-        messageDiv.innerHTML = `<strong>NPAMX Assistant</strong>${message.replace(/\n/g, '<br>')}`;
+        messageDiv.innerHTML = `<strong>NPAMX Assistant</strong>${formatHelpMessage(message)}`;
     } else if (role === 'error') {
         messageDiv.style.background = '#ff5252';
         messageDiv.style.color = 'white';
-        messageDiv.innerHTML = message.replace(/\n/g, '<br>');
+        messageDiv.innerHTML = formatHelpMessage(message);
     }
     
     chatArea.appendChild(messageDiv);

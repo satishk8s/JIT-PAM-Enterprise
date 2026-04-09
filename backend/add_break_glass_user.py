@@ -7,8 +7,7 @@ Usage:
   cd /opt/npamx/app/backend
   sudo -u npamx python3 add_break_glass_user.py
 
-Then enter email and password when prompted. To non-interactively set (e.g. from env):
-  EMAIL=admin@company.com PASSWORD=your-secure-password python3 add_break_glass_user.py
+Then enter email and password when prompted.
 """
 import os
 import sys
@@ -23,29 +22,44 @@ if __name__ == '__main__':
 from break_glass_db import init_db, add_user, get_user_by_email
 
 def main():
+    import re
+
     init_db()
     email = (os.environ.get('EMAIL') or '').strip().lower()
-    password = os.environ.get('PASSWORD') or ''
     if not email or '@' not in email:
         email = input('Break-glass admin email (e.g. admin@company.com): ').strip().lower()
     if not email or '@' not in email:
         print('Error: valid email required.')
         sys.exit(1)
-    if not password:
-        import getpass
-        password = getpass.getpass('Password: ')
-        password2 = getpass.getpass('Confirm password: ')
-        if password != password2:
-            print('Error: passwords do not match.')
-            sys.exit(1)
-    if len(password) < 8:
-        print('Error: password must be at least 8 characters.')
+    import getpass
+    password = getpass.getpass('Password: ')
+    password2 = getpass.getpass('Confirm password: ')
+    if password != password2:
+        print('Error: passwords do not match.')
+        sys.exit(1)
+    if len(password) < 14:
+        print('Error: password must be at least 14 characters.')
+        sys.exit(1)
+    if not re.search(r'[A-Z]', password):
+        print('Error: password must include at least one uppercase letter.')
+        sys.exit(1)
+    if not re.search(r'[a-z]', password):
+        print('Error: password must include at least one lowercase letter.')
+        sys.exit(1)
+    if not re.search(r'\d', password):
+        print('Error: password must include at least one number.')
+        sys.exit(1)
+    if not re.search(r'[^A-Za-z0-9]', password):
+        print('Error: password must include at least one special character.')
         sys.exit(1)
     if get_user_by_email(email):
         print(f'User {email} already exists. Updating password.')
     ok = add_user(email, password, role='SuperAdmin')
     if ok:
-        print(f'Break-glass user {email} created/updated. They can log in with "Login with Password" and have full access.')
+        print(
+            f'Break-glass user {email} created/updated. '
+            'Complete MFA enrollment from the main NPAMX login using the "Break-glass / Local Admin" path.'
+        )
     else:
         print('Error: failed to create user.')
         sys.exit(1)

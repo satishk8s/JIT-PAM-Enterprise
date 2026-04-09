@@ -21,4 +21,4 @@ cat calendar.js wizard.js policy-config.js policy-toggles.js policy-builder.js \
     app.js > bundle.js
 
 echo "Done. bundle.css ($(wc -c < bundle.css) bytes), bundle.js ($(wc -c < bundle.js) bytes)"
-echo "Use index-bundled.html for fast load."
+echo "Bundles are generated for optional static optimization; index.html remains the only supported entry point."

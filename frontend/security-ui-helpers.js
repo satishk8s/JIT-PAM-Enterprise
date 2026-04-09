@@ -24,6 +24,7 @@ function createJITRequestCard(request, account) {
     const approvalState = getApprovalState(request.status);
     const reqId = _escapeHtml(request.id);
     
+    const actionable = request.status === 'pending' && (request.__approval_inbox === true || request.can_approve === true || request.can_deny === true);
     return `
         <div class="jit-request-card" data-request-id="${reqId}">
             <div class="jit-request-header">
@@ -70,7 +71,7 @@ function createJITRequestCard(request, account) {
             </div>
             ` : ''}
             
-            ${request.status === 'pending' ? `
+            ${actionable ? `
             <div class="jit-request-actions">
                 ${aiRecommendation === 'DENY' ? `
                 <button class="btn-secondary" onclick="typeof approveRequestWithJustification==='function'&&approveRequestWithJustification('${reqId}')">
@@ -256,36 +257,54 @@ function approveRequestWithJustification(requestId) {
  * Deny request
  */
 function denyRequest(requestId) {
-    const reason = prompt('Enter reason for denial (required):');
-    
-    if (!reason || reason.length < 10) {
-        alert('Denial reason must be at least 10 characters.');
-        return;
-    }
-    
-    if (!confirm(`❌ Deny Request\n\nReason: ${reason}\n\nThis action cannot be undone.\n\nContinue?`)) {
-        return;
-    }
-    
-    // Call backend to deny request
-    fetch(`${API_BASE}/request/${requestId}/deny`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason })
-    })
-    .then(response => response.json())
-    .then(result => {
-        if (result.error) {
-            alert('Error: ' + result.error);
-        } else {
-            alert('✅ Request denied');
-            loadRequests();
-            updateDashboard();
+    const openPrompt = typeof promptAppAction === 'function'
+        ? promptAppAction(
+            'Provide a reason for denial.',
+            {
+                title: 'Deny request',
+                submitLabel: 'Deny request',
+                cancelLabel: 'Cancel',
+                variant: 'warning',
+                placeholder: 'Enter denial reason (required)',
+                helperText: 'This reason is stored for audit and emailed to the requester.',
+                minLength: 10,
+                required: true,
+            }
+        )
+        : Promise.resolve(prompt('Enter reason for denial (required):'));
+
+    openPrompt.then(function(reason) {
+        if (reason === null) return;
+        const normalizedReason = String(reason || '').trim();
+        if (!normalizedReason || normalizedReason.length < 10) {
+            alert('Denial reason must be at least 10 characters.');
+            return;
         }
-    })
-    .catch(error => {
-        console.error('Error denying request:', error);
-        alert('Error denying request');
+
+        if (!confirm(`❌ Deny Request\n\nReason: ${normalizedReason}\n\nThis action cannot be undone.\n\nContinue?`)) {
+            return;
+        }
+    
+        // Call backend to deny request
+        fetch(`${API_BASE}/request/${requestId}/deny`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: normalizedReason })
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.error) {
+                alert('Error: ' + result.error);
+            } else {
+                alert('✅ Request denied');
+                loadRequests();
+                updateDashboard();
+            }
+        })
+        .catch(error => {
+            console.error('Error denying request:', error);
+            alert('Error denying request');
+        });
     });
 }
 

@@ -3,6 +3,29 @@
 let currentGuardrailView = 'my'; // 'my', 'default', 'create'
 let guardrailAIConversationId = null;
 
+function getGuardrailsRedesignApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
+function escapeGuardrailsRedesignHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function guardrailJsString(value) {
+    return JSON.stringify(String(value == null ? '' : value));
+}
+
+function formatGuardrailsRedesignMessage(value) {
+    return escapeGuardrailsRedesignHtml(value).replace(/\n/g, '<br>');
+}
+
 // Switch between guardrail views
 function showGuardrailView(view) {
     currentGuardrailView = view;
@@ -71,7 +94,7 @@ function toggleGuardrailAIChat() {
 // Load My Guardrails
 async function loadMyGuardrails() {
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/my-guardrails');
+        const response = await fetch(`${getGuardrailsRedesignApiBase()}/admin/my-guardrails`, { credentials: 'include' });
         const data = await response.json();
         
         const container = document.getElementById('myGuardrailsList');
@@ -206,22 +229,22 @@ function createGuardrailCard(guardrail) {
         <div style="display: flex; justify-content: space-between; align-items: start;">
             <div style="flex: 1;">
                 <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-                    <h4 style="margin: 0; color: var(--text-primary); font-size: 15px;">${guardrail.name}</h4>
-                    <span style="background: ${severityColor}20; color: ${severityColor}; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">${guardrail.severity?.toUpperCase() || 'MEDIUM'}</span>
-                    <span style="background: var(--bg-primary); padding: 3px 8px; border-radius: 4px; font-size: 11px;">${typeIcon} ${typeLabel}</span>
+                    <h4 style="margin: 0; color: var(--text-primary); font-size: 15px;">${escapeGuardrailsRedesignHtml(guardrail.name)}</h4>
+                    <span style="background: ${severityColor}20; color: ${severityColor}; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;">${escapeGuardrailsRedesignHtml(guardrail.severity?.toUpperCase() || 'MEDIUM')}</span>
+                    <span style="background: var(--bg-primary); padding: 3px 8px; border-radius: 4px; font-size: 11px;">${escapeGuardrailsRedesignHtml(typeIcon + ' ' + typeLabel)}</span>
                 </div>
-                <p style="margin: 0 0 10px 0; color: var(--text-secondary); font-size: 13px;">${guardrail.description}</p>
+                <p style="margin: 0 0 10px 0; color: var(--text-secondary); font-size: 13px;">${escapeGuardrailsRedesignHtml(guardrail.description)}</p>
                 <div style="display: flex; gap: 15px; font-size: 12px; color: var(--text-secondary);">
-                    <span><i class="fas fa-server"></i> ${guardrail.service?.toUpperCase() || 'N/A'}</span>
-                    <span><i class="fas fa-calendar"></i> ${guardrail.createdAt || 'Recently'}</span>
-                    <span><i class="fas fa-user"></i> ${guardrail.createdByUser || 'Admin'}</span>
+                    <span><i class="fas fa-server"></i> ${escapeGuardrailsRedesignHtml(guardrail.service?.toUpperCase() || 'N/A')}</span>
+                    <span><i class="fas fa-calendar"></i> ${escapeGuardrailsRedesignHtml(guardrail.createdAt || 'Recently')}</span>
+                    <span><i class="fas fa-user"></i> ${escapeGuardrailsRedesignHtml(guardrail.createdByUser || 'Admin')}</span>
                 </div>
             </div>
             <div style="display: flex; gap: 10px; align-items: center;">
-                <button onclick="editGuardrail('${guardrail.id}')" class="btn-secondary btn-sm" title="Edit">
+                <button onclick="editGuardrail(${guardrailJsString(guardrail.id)})" class="btn-secondary btn-sm" title="Edit">
                     <i class="fas fa-edit"></i>
                 </button>
-                <button onclick="deleteGuardrail('${guardrail.id}')" class="btn-danger btn-sm" title="Delete">
+                <button onclick="deleteGuardrail(${guardrailJsString(guardrail.id)})" class="btn-danger btn-sm" title="Delete">
                     <i class="fas fa-trash"></i>
                 </button>
             </div>
@@ -409,9 +432,10 @@ async function sendGuardrailAIMessage() {
         </div> Understanding your requirement...`);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/generate-guardrails', {
+        const response = await fetch(`${getGuardrailsRedesignApiBase()}/admin/generate-guardrails`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 conversation_id: guardrailAIConversationId,
                 user_message: message
@@ -475,7 +499,11 @@ function addGuardrailAIChatMessage(role, content) {
             ? 'background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;'
             : 'background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color);'
     }`;
-    bubble.innerHTML = content;
+    if (String(content || '').indexOf('periscope-inline') >= 0) {
+        bubble.innerHTML = String(content || '');
+    } else {
+        bubble.innerHTML = formatGuardrailsRedesignMessage(content);
+    }
     
     messageDiv.appendChild(bubble);
     
@@ -572,9 +600,10 @@ async function confirmGuardrailCreation(mfaToken) {
         </div> Creating guardrail...`);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/admin/generate-guardrails', {
+        const response = await fetch(`${getGuardrailsRedesignApiBase()}/admin/generate-guardrails`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 conversation_id: guardrailAIConversationId,
                 user_message: 'yes',

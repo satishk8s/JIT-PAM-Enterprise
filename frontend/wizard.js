@@ -3,6 +3,28 @@ let selectedService = '';
 let selectedCloudProvider = '';
 let availableServices = [];
 
+function getWizardApiBase() {
+    const base = String(
+        (typeof window !== 'undefined' && window.API_BASE)
+            ? window.API_BASE
+            : ((typeof API_BASE !== 'undefined') ? API_BASE : '/api')
+    ).replace(/\/+$/, '');
+    return base || '/api';
+}
+
+function getWizardHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (typeof getCsrfToken === 'function') {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    }
+    return headers;
+}
+
+function getWizardUserEmail() {
+    return String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+}
+
 // Load wizard state on page load
 function loadWizardState() {
     const saved = localStorage.getItem('wizardState');
@@ -76,7 +98,7 @@ async function loadAccountsDropdown() {
     if (!accountSelect) return;
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/accounts');
+        const response = await fetch(getWizardApiBase() + '/accounts', { credentials: 'include' });
         const accounts = await response.json();
         
         accountSelect.innerHTML = '<option value="">Select Account</option>' +
@@ -126,7 +148,7 @@ async function loadPermissionSetsDropdown() {
     loadRegionsForAccount(accountId);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/permission-sets');
+        const response = await fetch(getWizardApiBase() + '/permission-sets', { credentials: 'include' });
         const permissionSets = await response.json();
         
         const select = document.getElementById('requestPermissionSet');
@@ -204,7 +226,7 @@ async function fetchAWSResources() {
     
     try {
         // Call discover-services API to get real services from account
-        const response = await fetch(`http://127.0.0.1:5000/api/discover-services?account_id=${accountId}`);
+        const response = await fetch(`${getWizardApiBase()}/discover-services?account_id=${encodeURIComponent(accountId)}`, { credentials: 'include' });
         const data = await response.json();
         
         if (data.error) {
@@ -320,7 +342,7 @@ async function loadResourcesForService(serviceId) {
     document.getElementById('myResourcesSection').style.display = 'block';
     
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/resources/${serviceId}?account_id=${accountId}`);
+        const response = await fetch(`${getWizardApiBase()}/resources/${serviceId}?account_id=${encodeURIComponent(accountId)}`, { credentials: 'include' });
         const data = await response.json();
         
         if (data.resources && data.resources.length > 0) {
@@ -416,9 +438,9 @@ async function loadServiceResources() {
     resourcesList.innerHTML = '<p style="color: #999; font-size: 13px;">Loading resources...</p>';
     
     try {
-        const url = `http://127.0.0.1:5000/api/resources/${service}?account_id=${accountId}`;
+        const url = `${getWizardApiBase()}/resources/${service}?account_id=${encodeURIComponent(accountId)}`;
         console.log('Fetching:', url);
-        const response = await fetch(url);
+        const response = await fetch(url, { credentials: 'include' });
         console.log('Response status:', response.status);
         const data = await response.json();
         console.log('Response data:', data);
@@ -541,10 +563,14 @@ async function chatWithAI() {
     chatBtn.disabled = true;
     
     try {
-        const userEmail = localStorage.getItem('currentUserEmail') || 'satish.korra@nykaa.com';
-        const response = await fetch('http://127.0.0.1:5000/api/generate-permissions', {
+        const userEmail = getWizardUserEmail();
+        if (!userEmail) {
+            throw new Error('Authenticated user email is unavailable. Sign in again and retry.');
+        }
+        const response = await fetch(getWizardApiBase() + '/generate-permissions', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getWizardHeaders(),
+            credentials: 'include',
             body: JSON.stringify({ 
                 use_case: fullUseCase,
                 account_id: accountId,
@@ -912,10 +938,10 @@ function loadAccountsForOthers() {
     const select = document.getElementById('othersRequestAccount');
     select.innerHTML = '<option value="">Select Account</option>';
     
-    fetch('/api/accounts')
+    fetch(getWizardApiBase() + '/accounts', { credentials: 'include' })
         .then(res => res.json())
         .then(accounts => {
-            accounts.forEach(acc => {
+            Object.values(accounts || {}).forEach(acc => {
                 const option = document.createElement('option');
                 option.value = acc.id;
                 option.textContent = `${acc.name} (${acc.id})`;
@@ -933,7 +959,7 @@ async function fetchAWSResourcesForOthers() {
     document.getElementById('othersAWSServicesList').style.display = 'none';
     
     try {
-        const response = await fetch(`http://127.0.0.1:5000/api/discover-services?account_id=${accountId}`);
+        const response = await fetch(`${getWizardApiBase()}/discover-services?account_id=${encodeURIComponent(accountId)}`, { credentials: 'include' });
         const data = await response.json();
         
         if (data.error) {
@@ -992,9 +1018,10 @@ function handleOthersServiceCheck(serviceId) {
 function loadResourcesForOthersService(serviceId) {
     const accountId = document.getElementById('othersRequestAccount').value;
     
-    fetch(`/api/resources/${serviceId}?account=${accountId}`)
+    fetch(`${getWizardApiBase()}/resources/${serviceId}?account_id=${encodeURIComponent(accountId)}`, { credentials: 'include' })
         .then(res => res.json())
-        .then(resources => {
+        .then(data => {
+            const resources = Array.isArray(data) ? data : (data.resources || []);
             if (!othersSelectedResources[serviceId]) {
                 othersSelectedResources[serviceId] = [];
             }
@@ -1202,7 +1229,11 @@ async function submitAccessRequest(event) {
     const accountId = document.getElementById('requestAccount').value;
     const duration = document.getElementById('requestDuration')?.value || 8;
     const justification = document.getElementById('requestJustification')?.value || 'AI-generated access request';
-    const userEmail = localStorage.getItem('currentUserEmail') || 'satish.korra@nykaa.com';
+    const userEmail = getWizardUserEmail();
+    if (!userEmail) {
+        alert('Your session is missing the authenticated user email. Sign in again and retry.');
+        return;
+    }
     
     if (!accountId) {
         alert('Please select an account');
@@ -1212,9 +1243,10 @@ async function submitAccessRequest(event) {
     const chatTranscript = document.getElementById('aiChatArea')?.innerText || conversationHistory.map(h => `User: ${h.user}\nAI: ${h.ai}`).join('\n\n');
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/request-access', {
+        const response = await fetch(getWizardApiBase() + '/request-access', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getWizardHeaders(),
+            credentials: 'include',
             body: JSON.stringify({
                 user_email: userEmail,
                 account_id: accountId,
@@ -1247,7 +1279,7 @@ async function submitAccessRequest(event) {
 
 
 function viewChatTranscript(requestId) {
-    fetch(`http://127.0.0.1:5000/api/request/${requestId}`)
+    fetch(`${getWizardApiBase()}/request/${encodeURIComponent(requestId)}`, { credentials: 'include' })
         .then(res => res.json())
         .then(request => {
             if (!request.chat_transcript) {

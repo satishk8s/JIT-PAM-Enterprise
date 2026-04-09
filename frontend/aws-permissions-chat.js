@@ -1,6 +1,22 @@
 // AWS Permissions Chat - Floating chat box for generating permissions
 let awsPermConversationId = null;
 let awsPermChatHistory = [];
+const AWS_PERM_API_BASE = (typeof API_BASE !== 'undefined' && API_BASE)
+    ? API_BASE
+    : (window.API_BASE || `${window.location.origin}/api`);
+
+function escapeAwsPermHtml(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function formatAwsPermMessage(content) {
+    return escapeAwsPermHtml(content).replace(/\n/g, '<br>');
+}
 
 function toggleAWSPermChat() {
     const popup = document.getElementById('awsPermChatPopup');
@@ -59,6 +75,11 @@ async function sendAWSPermMessage() {
         alert('Please select an AWS account first');
         return;
     }
+    const userEmail = String(localStorage.getItem('currentUserEmail') || localStorage.getItem('userEmail') || '').trim().toLowerCase();
+    if (!userEmail) {
+        alert('Unable to determine the signed-in user email. Please sign in again.');
+        return;
+    }
     
     // Add user message
     addAWSPermChatMessage('user', message);
@@ -74,18 +95,19 @@ async function sendAWSPermMessage() {
             <div class="bubble"></div>
             <div class="bubble"></div>
             <div class="bubble"></div>
-        </div> Analyzing your request...`);
+        </div> Analyzing your request...`, { allowHtml: true });
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/generate-permissions', {
+        const response = await fetch(`${AWS_PERM_API_BASE}/generate-permissions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 use_case: message,
                 account_id: accountId,
                 region: selectedRegion || 'ap-south-1',
                 conversation_id: awsPermConversationId,
-                user_email: localStorage.getItem('currentUserEmail') || 'satish.korra@nykaa.com',
+                user_email: userEmail,
                 selected_resources: selectedResources
             })
         });
@@ -120,7 +142,7 @@ async function sendAWSPermMessage() {
             // Display SCP warnings if any
             if (data.scp_warnings && data.scp_warnings.length > 0) {
                 data.scp_warnings.forEach(warning => {
-                    addAWSPermChatMessage('ai', `⚠️ <strong>SCP Notice:</strong> ${warning.message}`);
+                    addAWSPermChatMessage('ai', `⚠️ SCP Notice: ${warning.message}`);
                 });
             }
         } else if (data.actions) {
@@ -135,7 +157,7 @@ async function sendAWSPermMessage() {
             // Display SCP warnings if any
             if (data.scp_warnings && data.scp_warnings.length > 0) {
                 data.scp_warnings.forEach(warning => {
-                    addAWSPermChatMessage('ai', `⚠️ <strong>SCP Notice:</strong> ${warning.message}`);
+                    addAWSPermChatMessage('ai', `⚠️ SCP Notice: ${warning.message}`);
                 });
             }
         }
@@ -146,9 +168,10 @@ async function sendAWSPermMessage() {
     }
 }
 
-function addAWSPermChatMessage(role, content) {
+function addAWSPermChatMessage(role, content, options) {
     const messagesDiv = document.getElementById('awsPermChatMessages');
     const messageId = `msg-${Date.now()}`;
+    const opts = options || {};
     
     const messageDiv = document.createElement('div');
     messageDiv.id = messageId;
@@ -160,7 +183,7 @@ function addAWSPermChatMessage(role, content) {
             ? 'background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border-radius: 12px 12px 4px 12px;'
             : 'background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 12px 12px 12px 4px;'
     }`;
-    bubble.innerHTML = content;
+    bubble.innerHTML = opts.allowHtml ? String(content || '') : formatAwsPermMessage(content);
     
     messageDiv.appendChild(bubble);
     messagesDiv.appendChild(messageDiv);
@@ -243,17 +266,21 @@ function showPolicyFloatingBox(data) {
             html += `
                 <div style="margin-bottom: 15px; padding: 12px; background: var(--bg-secondary); border-radius: 8px; border-left: 3px solid #667eea;">
                     <div style="font-weight: 600; color: #667eea; margin-bottom: 8px; text-transform: uppercase; font-size: 11px;">
-                        ${service} (${actions.length} actions)
+                        ${escapeAwsPermHtml(service)} (${actions.length} actions)
                     </div>
                     ${actions.map(action => `
                         <div style="padding: 4px 0; color: var(--text-primary); font-family: 'Courier New', monospace; font-size: 11px;">
-                            • ${action}
+                            • ${escapeAwsPermHtml(action)}
                         </div>
                     `).join('')}
                     ${resources.length > 0 ? `
                         <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color); font-size: 10px; color: var(--text-secondary);">
                             <strong>Resources:</strong><br>
-                            ${resources.slice(0, 3).map(r => `<div style="padding: 2px 0;">• ${r.length > 50 ? r.substring(0, 50) + '...' : r}</div>`).join('')}
+                            ${resources.slice(0, 3).map(r => {
+                                const value = String(r || '');
+                                const truncated = value.length > 50 ? value.substring(0, 50) + '...' : value;
+                                return `<div style="padding: 2px 0;">• ${escapeAwsPermHtml(truncated)}</div>`;
+                            }).join('')}
                             ${resources.length > 3 ? `<div style="padding: 2px 0;">... and ${resources.length - 3} more</div>` : ''}
                         </div>
                     ` : ''}
@@ -269,7 +296,7 @@ function showPolicyFloatingBox(data) {
                 </div>
                 ${data.actions.map(action => `
                     <div style="padding: 4px 0; color: var(--text-primary); font-family: 'Courier New', monospace; font-size: 11px;">
-                        • ${action}
+                        • ${escapeAwsPermHtml(action)}
                     </div>
                 `).join('')}
             </div>
@@ -329,7 +356,7 @@ function showFullPolicyModal() {
                 <button onclick="this.closest('div[style*=fixed]').remove()" style="background: none; border: none; font-size: 24px; cursor: pointer; color: white;">&times;</button>
             </div>
             <div style="padding: 20px; overflow: auto; max-height: calc(85vh - 140px);">
-                <pre style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; overflow: auto; color: var(--text-primary); font-size: 13px; line-height: 1.6; margin: 0; border: 1px solid var(--border-color);">${JSON.stringify(policy, null, 2)}</pre>
+                <pre style="background: var(--bg-secondary); padding: 20px; border-radius: 8px; overflow: auto; color: var(--text-primary); font-size: 13px; line-height: 1.6; margin: 0; border: 1px solid var(--border-color);">${escapeAwsPermHtml(JSON.stringify(policy, null, 2))}</pre>
             </div>
             <div style="padding: 20px; border-top: 1px solid var(--border-color); display: flex; gap: 10px;">
                 <button onclick="copyPolicyToClipboard()" class="btn-secondary" style="flex: 1; padding: 10px; border-radius: 8px;"><i class="fas fa-copy"></i> Copy</button>

@@ -1,0 +1,13 @@
+[Unit]
+Description=NPAMX Desktop Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/npamx-agent run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

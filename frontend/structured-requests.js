@@ -14,6 +14,28 @@ let requestData = {
     justification: null
 };
 
+function getStructuredRequestsApiBase() {
+    const base = String(
+        (typeof window !== 'undefined' && window.API_BASE)
+            ? window.API_BASE
+            : ((typeof API_BASE !== 'undefined') ? API_BASE : '/api')
+    ).replace(/\/+$/, '');
+    return base || '/api';
+}
+
+function getStructuredRequestsHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (typeof getCsrfToken === 'function') {
+        const csrfToken = getCsrfToken();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    }
+    return headers;
+}
+
+function getStructuredRequestsUserEmail() {
+    return String(localStorage.getItem('userEmail') || '').trim().toLowerCase();
+}
+
 // Show new request modal
 function showNewRequestModal() {
     const modal = document.getElementById('newRequestModal');
@@ -344,26 +366,30 @@ function loadAccountStep() {
     console.log('✅ Setting innerHTML');
     
     const selectedAccount = requestData.account_id;
-    
+    const availableAccounts = Object.values((typeof window !== 'undefined' && window.accounts && typeof window.accounts === 'object') ? window.accounts : {});
+    const cardsHtml = availableAccounts.length
+        ? availableAccounts.map(account => {
+            const accountId = String(account.id || '').trim();
+            const accountName = String(account.name || accountId || 'Account').trim();
+            const isSelected = selectedAccount === accountId;
+            const selectArgs = `${JSON.stringify(accountId)}, ${JSON.stringify(accountName)}`;
+            return `
+                <button class="account-card ${isSelected ? 'selected' : ''}" onclick='selectAccount(${selectArgs})' style="display: block !important; padding: 30px; border: 3px solid ${isSelected ? '#22C55E' : '#667eea'}; border-radius: 12px; background: ${isSelected ? '#e8f5e9' : 'var(--bg-tertiary)'}; cursor: pointer; font-size: 16px; position: relative;">
+                    ${isSelected ? '<div style="position: absolute; top: 10px; right: 10px; background: #22C55E; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;"><i class="fas fa-check"></i> Selected</div>' : ''}
+                    <i class="fas fa-building" style="font-size: 32px; color: #667eea; display: block; margin-bottom: 10px;"></i>
+                    <div class="account-name" style="font-weight: 500; font-size: 18px; color: var(--text-primary); margin: 10px 0;">${escapeHtml(accountName)}</div>
+                    <div class="account-id" style="color: var(--text-secondary); font-size: 14px;">${escapeHtml(accountId)}</div>
+                </button>
+            `;
+        }).join('')
+        : '<div class="account-card" style="padding: 24px; border: 2px dashed var(--border-color, #cbd5e1); border-radius: 12px; color: var(--text-secondary);">No accounts are loaded in this session. Open the main request page and refresh accounts first.</div>';
+
     contentDiv.innerHTML = `
         <div class="step-content" style="display: block !important; visibility: visible !important; min-height: 300px; background: var(--bg-secondary); padding: 20px;">
             <h4 style="color: var(--text-primary); font-size: 24px; margin-bottom: 20px;">Select AWS Account</h4>
             <p style="color: var(--text-primary); margin-bottom: 20px;">Choose the AWS account you need access to</p>
             <div class="accounts-grid" style="display: grid !important; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-                <button class="account-card ${selectedAccount === '332463837037' ? 'selected' : ''}" onclick="selectAccount('332463837037', 'Current Account')" style="display: block !important; padding: 30px; border: 3px solid ${selectedAccount === '332463837037' ? '#22C55E' : '#667eea'}; border-radius: 12px; background: ${selectedAccount === '332463837037' ? '#e8f5e9' : 'var(--bg-tertiary)'}; cursor: pointer; font-size: 16px; position: relative;">
-                    ${selectedAccount === '332463837037' ? '<div style="position: absolute; top: 10px; right: 10px; background: #22C55E; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;"><i class="fas fa-check"></i> Selected</div>' : ''}
-                    <i class="fas fa-building" style="font-size: 32px; color: #667eea; display: block; margin-bottom: 10px;"></i>
-                    <div class="account-name" style="font-weight: 500; font-size: 18px; color: var(--text-primary); margin: 10px 0;">Current Account</div>
-                    <div class="account-id" style="color: var(--text-secondary); font-size: 14px;">332463837037</div>
-                    <span class="env-badge nonprod" style="display: inline-block; margin-top: 10px; padding: 6px 12px; background: #e3f2fd; color: #1976d2; border-radius: 4px; font-size: 12px;">NON-PROD</span>
-                </button>
-                <button class="account-card ${selectedAccount === '867625663987' ? 'selected' : ''}" onclick="selectAccount('867625663987', 'POC-Account-867625663987')" style="display: block !important; padding: 30px; border: 3px solid ${selectedAccount === '867625663987' ? '#22C55E' : '#667eea'}; border-radius: 12px; background: ${selectedAccount === '867625663987' ? '#e8f5e9' : 'var(--bg-tertiary)'}; cursor: pointer; font-size: 16px; position: relative;">
-                    ${selectedAccount === '867625663987' ? '<div style="position: absolute; top: 10px; right: 10px; background: #22C55E; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;"><i class="fas fa-check"></i> Selected</div>' : ''}
-                    <i class="fas fa-building" style="font-size: 32px; color: #667eea; display: block; margin-bottom: 10px;"></i>
-                    <div class="account-name" style="font-weight: 500; font-size: 18px; color: var(--text-primary); margin: 10px 0;">POC-Account-867625663987</div>
-                    <div class="account-id" style="color: var(--text-secondary); font-size: 14px;">867625663987</div>
-                    <span class="env-badge nonprod" style="display: inline-block; margin-top: 10px; padding: 6px 12px; background: #e3f2fd; color: #1976d2; border-radius: 4px; font-size: 12px;">NON-PROD</span>
-                </button>
+                ${cardsHtml}
             </div>
         </div>
     `;
@@ -567,15 +593,19 @@ async function fetchResourcesForServices() {
         return;
     }
     
-    // Get account ID (should be selected earlier, for now use default)
-    const accountId = requestData.account_id || '332463837037';
+    const accountId = String(requestData.account_id || '').trim();
+    if (!accountId) {
+        container.innerHTML = '<p>Please select an account first.</p>';
+        return;
+    }
     
     try {
         // For each service, fetch resources
         for (const service of requestData.services) {
-            const response = await fetch(`http://127.0.0.1:5000/api/resources/${requestData.provider}/${requestData.region}/${service}?account_id=${accountId}`, {
+            const response = await fetch(`${getStructuredRequestsApiBase()}/resources/${requestData.provider}/${requestData.region}/${service}?account_id=${encodeURIComponent(accountId)}`, {
                 method: 'GET',
-                headers: { 'Content-Type': 'application/json' }
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include'
             });
             
             if (response.ok) {
@@ -915,7 +945,10 @@ function generatePolicyWithExplicitARNs() {
 // Build resource ARN
 function buildResourceARN(provider, region, service, resourceId) {
     // This would need account ID - get from CONFIG or request
-    const accountId = '332463837037'; // Default, should come from selected account
+    const accountId = String(requestData.account_id || '').trim();
+    if (!accountId) {
+        throw new Error('Account selection is required before generating a policy.');
+    }
     
     if (provider === 'aws' || provider === 'ec2' || provider === 's3') {
         if (service === 's3') {
@@ -988,11 +1021,19 @@ function copyPolicy() {
 async function proceedToApproval() {
     // Submit request to backend
     try {
+        const userEmail = getStructuredRequestsUserEmail();
+        if (!userEmail) {
+            throw new Error('Authenticated user email is unavailable. Sign in again and retry.');
+        }
+        const accountId = String(requestData.account_id || '').trim();
+        if (!accountId) {
+            throw new Error('Select an account before submitting the request.');
+        }
         const requestBody = {
-            user_email: localStorage.getItem('userEmail') || 'user@example.com',
+            user_email: userEmail,
             request_type: requestData.type,
             provider: requestData.provider,
-            account_id: requestData.account_id || '332463837037',
+            account_id: accountId,
             justification: requestData.justification,
             duration_hours: requestData.duration_hours
         };
@@ -1010,9 +1051,10 @@ async function proceedToApproval() {
             requestBody.policy = generatePolicyWithExplicitARNs();
         }
         
-        const response = await fetch('http://127.0.0.1:5000/api/request-access', {
+        const response = await fetch(getStructuredRequestsApiBase() + '/request-access', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getStructuredRequestsHeaders(),
+            credentials: 'include',
             body: JSON.stringify(requestBody)
         });
         
@@ -1072,12 +1114,13 @@ async function sendAIHelpMessage() {
     addAIHelpMessage('assistant', 'thinking', true);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/unified-assistant', {
+        const response = await fetch(getStructuredRequestsApiBase() + '/unified-assistant', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getStructuredRequestsHeaders(),
+            credentials: 'include',
             body: JSON.stringify({
                 user_message: message,
-                user_email: localStorage.getItem('userEmail') || 'user@example.com'
+                user_email: getStructuredRequestsUserEmail()
             })
         });
         
@@ -1187,4 +1230,3 @@ console.log('Functions available:', {
     showRequestTypeTab: typeof showRequestTypeTab,
     showNewRequestModal: typeof showNewRequestModal
 });
-

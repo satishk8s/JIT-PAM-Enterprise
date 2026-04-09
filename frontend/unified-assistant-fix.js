@@ -5,6 +5,13 @@
 if (typeof initUnifiedAssistant !== 'undefined') {
     const originalInit = initUnifiedAssistant;
     window.initUnifiedAssistant = function() {
+        if (typeof window.isFeatureEnabled === 'function' && !window.isFeatureEnabled('npamx_chatbot')) {
+            const button = document.getElementById('unifiedAssistantButton');
+            const popup = document.getElementById('unifiedAssistantPopup');
+            if (button) button.remove();
+            if (popup) popup.remove();
+            return;
+        }
         // Only show on requests page
         const currentPage = document.querySelector('.page.active');
         const isRequestsPage = currentPage && currentPage.id === 'requestsPage';
@@ -47,6 +54,5 @@ if (typeof showPage !== 'undefined') {
         }
     };
 }
-
 
 

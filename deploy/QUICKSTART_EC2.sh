@@ -38,12 +38,13 @@ sudo -u npamx "$BACKEND/venv/bin/pip" install -r "$BACKEND/requirements.txt"
 
 # 4) .env if missing
 if [ ! -f "$BACKEND/.env" ]; then
-  echo "Creating $BACKEND/.env – edit FLASK_SECRET_KEY and CORS_ORIGINS."
+  echo "Creating $BACKEND/.env – edit FLASK_SECRET_KEY, CORS_ORIGINS, and APP_BASE_URL."
   sudo -u npamx tee "$BACKEND/.env" << 'ENVEOF'
 FLASK_ENV=production
 FLASK_SECRET_KEY=CHANGE_ME_USE_openssl_rand_hex_32
 PORT=5000
-CORS_ORIGINS=http://localhost
+CORS_ORIGINS=https://npamx.nyk00-int.network
+APP_BASE_URL=https://npamx.nyk00-int.network
 ENVEOF
 fi
 
@@ -102,6 +103,6 @@ NGXEOF
 sudo rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 sudo nginx -t && sudo systemctl enable nginx && sudo systemctl restart nginx
 
-echo "Done. Open http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo 'YOUR_EC2_IP')"
-echo "Edit $BACKEND/.env: set FLASK_SECRET_KEY and CORS_ORIGINS=http://YOUR_EC2_IP"
+echo "Done. Open https://npamx.nyk00-int.network once DNS points to this host."
+echo "Edit $BACKEND/.env: set FLASK_SECRET_KEY and confirm CORS_ORIGINS/APP_BASE_URL use https://npamx.nyk00-int.network"
 echo "Then: sudo systemctl restart npamx"

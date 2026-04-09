@@ -1,23 +1,29 @@
 /**
  * AI Configuration Management
- * Manage AWS Bedrock credentials and settings
+ * Manage AWS Bedrock settings
  */
+
+const AI_CONFIG_API_BASE = (typeof API_BASE !== 'undefined' && API_BASE)
+    ? API_BASE
+    : (window.API_BASE || `${window.location.origin}/api`);
 
 async function loadAIConfig() {
     try {
-        const response = await fetch('http://localhost:5000/api/ai/config');
+        const response = await fetch(`${AI_CONFIG_API_BASE}/ai/config`, { credentials: 'include' });
         const config = await response.json();
         
         document.getElementById('aiEnabled').checked = config.enabled;
         document.getElementById('awsRegion').value = config.aws_region || 'us-east-1';
         document.getElementById('modelId').value = config.model_id || 'anthropic.claude-3-sonnet-20240229-v1:0';
-        document.getElementById('awsAccessKey').value = config.aws_access_key_id || '';
-        document.getElementById('awsSecretKey').value = config.aws_secret_access_key || '';
+        const accessKey = document.getElementById('awsAccessKey');
+        const secretKey = document.getElementById('awsSecretKey');
+        if (accessKey) accessKey.value = '';
+        if (secretKey) secretKey.value = '';
         document.getElementById('maxTokens').value = config.max_tokens || 500;
         document.getElementById('temperature').value = config.temperature || 0.7;
         
         // Show current mode
-        const modeResponse = await fetch('http://localhost:5000/api/ai/mode');
+        const modeResponse = await fetch(`${AI_CONFIG_API_BASE}/ai/mode`, { credentials: 'include' });
         const modeData = await modeResponse.json();
         document.getElementById('currentAIMode').textContent = modeData.description;
         document.getElementById('currentAIMode').className = modeData.mode === 'bedrock' ? 'badge badge-success' : 'badge badge-warning';
@@ -34,15 +40,14 @@ async function saveAIConfig() {
             enabled: document.getElementById('aiEnabled').checked,
             aws_region: document.getElementById('awsRegion').value,
             model_id: document.getElementById('modelId').value,
-            aws_access_key_id: document.getElementById('awsAccessKey').value,
-            aws_secret_access_key: document.getElementById('awsSecretKey').value,
             max_tokens: parseInt(document.getElementById('maxTokens').value),
             temperature: parseFloat(document.getElementById('temperature').value)
         };
         
-        const response = await fetch('http://localhost:5000/api/ai/config', {
+        const response = await fetch(`${AI_CONFIG_API_BASE}/ai/config`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
+            credentials: 'include',
             body: JSON.stringify(config)
         });
         

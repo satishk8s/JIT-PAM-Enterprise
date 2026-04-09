@@ -68,9 +68,8 @@ server {
     # Catch all hostnames (including raw IP) without clashing with stock server_name "_"
     server_name ~^.+$;
     root $WEB_ROOT;
-    # Default to original entry for best visual fidelity.
-    # Bundled entry is still available explicitly at /index-bundled.html.
-    index index.html index-bundled.html;
+    # Single supported entry point.
+    index index.html;
     charset utf-8;
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
@@ -107,7 +106,7 @@ server {
 
     # HTML - SPA fallback
     location / {
-        try_files \$uri \$uri/ /index.html /index-bundled.html;
+        try_files \$uri \$uri/ /index.html;
         add_header Cache-Control "no-cache";
     }
 

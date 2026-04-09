@@ -1,14 +1,21 @@
 // Policy Toggle Management
 
+function getPolicyTogglesApiBase() {
+    return typeof API_BASE !== 'undefined'
+        ? API_BASE
+        : (window.API_BASE || '/api');
+}
+
 function updateDeletePolicy() {
     const allowDeleteNonProd = document.getElementById('allowDeleteNonProd').checked;
     const allowDeleteProd = document.getElementById('allowDeleteProd').checked;
     
     console.log('Updating delete policy:', { allowDeleteNonProd, allowDeleteProd });
     
-    fetch('http://127.0.0.1:5000/api/admin/delete-permissions-policy', {
+    fetch(`${getPolicyTogglesApiBase()}/admin/delete-permissions-policy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
             allowDeleteNonProd: allowDeleteNonProd,
             allowDeleteProd: allowDeleteProd
@@ -29,9 +36,10 @@ function updateCreatePolicy() {
     
     console.log('Updating create policy:', { allowCreateNonProd, allowCreateProd });
     
-    fetch('http://127.0.0.1:5000/api/admin/create-permissions-policy', {
+    fetch(`${getPolicyTogglesApiBase()}/admin/create-permissions-policy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
             allowCreateNonProd: allowCreateNonProd,
             allowCreateProd: allowCreateProd
@@ -53,9 +61,10 @@ function updateAdminPolicy() {
     
     console.log('Updating admin policy:', { allowAdminNonProd, allowAdminProd, allowAdminSandbox });
     
-    fetch('http://127.0.0.1:5000/api/admin/admin-permissions-policy', {
+    fetch(`${getPolicyTogglesApiBase()}/admin/admin-permissions-policy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
             allowAdminNonProd: allowAdminNonProd,
             allowAdminProd: allowAdminProd,
@@ -74,7 +83,7 @@ function updateAdminPolicy() {
 // Load current policy settings on page load
 function loadPolicySettings() {
     console.log('Loading policy settings...');
-    fetch('http://127.0.0.1:5000/api/admin/policy-settings')
+    fetch(`${getPolicyTogglesApiBase()}/admin/policy-settings`, { credentials: 'include' })
     .then(res => res.json())
     .then(data => {
         console.log('Policy settings loaded:', data);

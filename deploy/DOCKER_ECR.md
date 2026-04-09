@@ -12,7 +12,7 @@ This guide covers building a **security-hardened** Docker image, pushing it to E
 | 2 | EC2 | Install Docker, create data/saml dirs and .env, set volume ownership (1000:1000), pull image, run container with `-p 80:5000`. |
 | 3 | AWS Console | Create ALB, target group (port 80), health check `/api/health`, register EC2, add listener. |
 | 4 | EC2 security group | Allow inbound port 80 from the ALB security group. |
-| 5 | EC2 | Set APP_BASE_URL and CORS_ORIGINS in .env to ALB URL; restart container. |
+| 5 | EC2 | Set APP_BASE_URL and CORS_ORIGINS in `.env` to `https://npamx.nyk00-int.network`; restart container. |
 | 6 | EC2 | Create break-glass user: `docker exec -it npamx python3 /app/backend/add_break_glass_user.py`. |
 
 Details for each step are below.
@@ -271,12 +271,17 @@ The **instance** security group must allow **inbound traffic from the ALB** on t
 
 Without this, the ALB health check will fail and the target will show unhealthy.
 
-### 3. .env for ALB URL
+### 3. .env for external URL
 
-Set **APP_BASE_URL** and **CORS_ORIGINS** to the ALB URL (or custom domain in front of the ALB), e.g.:
+Set **APP_BASE_URL** and **CORS_ORIGINS** to the public PAM hostname. Current target:
 
-- `APP_BASE_URL=http://pam-xxxxx.ap-south-1.elb.amazonaws.com`
-- `CORS_ORIGINS=http://pam-xxxxx.ap-south-1.elb.amazonaws.com`
+- `APP_BASE_URL=https://npamx.nyk00-int.network`
+- `CORS_ORIGINS=https://npamx.nyk00-int.network`
+
+For IAM Identity Center SAML, the derived values are:
+
+- ACS URL: `https://npamx.nyk00-int.network/saml/acs`
+- Audience / Entity ID: `https://npamx.nyk00-int.network/saml/metadata`
 
 Then restart the container so the app uses the correct URL for redirects and CORS.
 
@@ -294,7 +299,7 @@ User → ALB (port 80/443) → Target group (EC2:80 or EC2:5000) → Docker (hos
 2. **EC2:** Install Docker, create `/opt/npamx/data`, `/opt/npamx/saml`, `.env`; pull image; `docker run -d --name npamx -p 80:5000 ...`.
 3. **ALB:** Create ALB + target group (port 80), health check `/api/health`, register EC2; add listener HTTP 80 → target group.
 4. **EC2 SG:** Allow inbound port 80 from ALB security group.
-5. **.env:** Set `APP_BASE_URL` and `CORS_ORIGINS` to the ALB URL; restart container.
+5. **.env:** Set `APP_BASE_URL` and `CORS_ORIGINS` to `https://npamx.nyk00-int.network`; restart container.
 6. **Break-glass user:** `docker exec -it npamx python3 /app/backend/add_break_glass_user.py`.
 
 ---

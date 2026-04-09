@@ -12,17 +12,37 @@ let currentState = {
     justification: null,
     step: 'welcome'
 };
+const UNIFIED_ASSISTANT_API_BASE = (typeof API_BASE !== 'undefined' && API_BASE)
+    ? API_BASE
+    : (window.API_BASE || `${window.location.origin}/api`);
+
+function shouldShowUnifiedAssistant() {
+    try {
+        if (typeof window.isFeatureEnabled === 'function' && !window.isFeatureEnabled('npamx_chatbot')) {
+            return false;
+        }
+    } catch (_) {}
+    return true;
+}
+
+function removeUnifiedAssistantUI() {
+    const button = document.getElementById('unifiedAssistantButton');
+    const popup = document.getElementById('unifiedAssistantPopup');
+    if (button) button.remove();
+    if (popup) popup.remove();
+}
 
 // Initialize unified assistant - ENABLED for requests page only when logged in
 function initUnifiedAssistant() {
+    if (!shouldShowUnifiedAssistant()) {
+        removeUnifiedAssistantUI();
+        return;
+    }
     // Never show on login page
     const isLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
     const mainAppVisible = document.getElementById('mainApp') && document.getElementById('mainApp').style.display !== 'none';
     if (!isLoggedIn || !mainAppVisible) {
-        const button = document.getElementById('unifiedAssistantButton');
-        const popup = document.getElementById('unifiedAssistantPopup');
-        if (button) button.remove();
-        if (popup) popup.remove();
+        removeUnifiedAssistantUI();
         return;
     }
     
@@ -32,10 +52,7 @@ function initUnifiedAssistant() {
     
     if (!isRequestsPage) {
         // Remove if exists and not on requests page
-        const button = document.getElementById('unifiedAssistantButton');
-        const popup = document.getElementById('unifiedAssistantPopup');
-        if (button) button.remove();
-        if (popup) popup.remove();
+        removeUnifiedAssistantUI();
         return;
     }
     
@@ -196,6 +213,16 @@ function createUnifiedAssistantUI() {
     }
 }
 
+document.addEventListener('npam-features-updated', function () {
+    if (!shouldShowUnifiedAssistant()) {
+        removeUnifiedAssistantUI();
+        return;
+    }
+    if (typeof initUnifiedAssistant === 'function') {
+        initUnifiedAssistant();
+    }
+});
+
 function toggleUnifiedAssistant() {
     const popup = document.getElementById('unifiedAssistantPopup');
     const button = document.getElementById('unifiedAssistantButton');
@@ -248,13 +275,13 @@ async function sendUnifiedAssistantMessage() {
     const loadingId = addUnifiedAssistantMessage('assistant', 'thinking', true);
     
     try {
-        const response = await fetch('http://127.0.0.1:5000/api/unified-assistant', {
+        const response = await fetch(`${UNIFIED_ASSISTANT_API_BASE}/unified-assistant`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 conversation_id: unifiedConversationId,
-                user_message: message,
-                user_email: localStorage.getItem('userEmail') || 'user@example.com'
+                user_message: message
             })
         });
         
@@ -496,8 +523,7 @@ window.selectOption = async function(type, value, label, service = null) {
                 type: type,
                 value: value,
                 label: label
-            },
-            user_email: localStorage.getItem('userEmail') || 'user@example.com'
+            }
         };
         
         // Add service for resource selection
@@ -516,9 +542,10 @@ window.selectOption = async function(type, value, label, service = null) {
             requestBody.selected_option.fetch_resources = true;
         }
         
-        const response = await fetch('http://127.0.0.1:5000/api/unified-assistant', {
+        const response = await fetch(`${UNIFIED_ASSISTANT_API_BASE}/unified-assistant`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(requestBody)
         });
         
@@ -664,9 +691,10 @@ async function generatePolicyFromConversation() {
     
     try {
         // First, get the collected data
-        const response = await fetch('http://127.0.0.1:5000/api/unified-assistant/generate', {
+        const response = await fetch(`${UNIFIED_ASSISTANT_API_BASE}/unified-assistant/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify({
                 conversation_id: unifiedConversationId
             })
@@ -680,14 +708,14 @@ async function generatePolicyFromConversation() {
         
         if (data.ready && data.data) {
             // Now call the existing generate-permissions endpoint with collected data
-            const permResponse = await fetch('http://127.0.0.1:5000/api/generate-permissions', {
+            const permResponse = await fetch(`${UNIFIED_ASSISTANT_API_BASE}/generate-permissions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify({
                     use_case: data.data.use_case,
                     account_id: data.data.account_id,
                     conversation_id: unifiedConversationId,
-                    user_email: localStorage.getItem('userEmail') || 'user@example.com',
                     selected_resources: data.data.selected_resources,
                     region: data.data.region
                 })
@@ -786,4 +814,3 @@ function resetUnifiedAssistant() {
 }
 
 // AI Assistant initialization disabled - removed from all pages
-
