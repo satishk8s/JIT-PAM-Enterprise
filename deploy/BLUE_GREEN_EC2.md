@@ -144,7 +144,7 @@ Copy the repo script to the EC2 or place it directly as:
 
 Use the current repository version:
 
-- [run-docker-bluegreen.sh](/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/scripts/run-docker-bluegreen.sh)
+- `scripts/run-docker-bluegreen.sh`
 
 Make it executable:
 
@@ -161,7 +161,7 @@ docker buildx build \
   --platform linux/amd64 \
   -t 116155851700.dkr.ecr.ap-south-1.amazonaws.com/npamx:vX.Y \
   --push \
-  /Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+  .
 ```
 
 ### 2. Deploy on PAM EC2

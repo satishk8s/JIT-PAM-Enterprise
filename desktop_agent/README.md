@@ -17,7 +17,7 @@ This folder contains a real agent you can package and host in S3 for NPAMX users
 
 ### macOS / Linux
 ```bash
-cd /Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+cd <repo-root>
 chmod +x desktop_agent/build-agent-macos-linux.sh
 ./desktop_agent/build-agent-macos-linux.sh
 ```
@@ -27,7 +27,7 @@ Important:
 - Use a Python build with Tk support for the desktop-window artifact.
 
 Artifacts are generated in:
-`/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/desktop_agent/dist-artifacts`
+`desktop_agent/dist-artifacts`
 
 ### Windows (run on Windows machine)
 ```powershell

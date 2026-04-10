@@ -11428,6 +11428,12 @@ def delete_request(request_id):
         return jsonify({'error': 'Request not found'}), 404
     
     access_request = requests_db[request_id]
+    live_status = str(access_request.get('status') or '').strip().lower()
+    if live_status in ('approved', 'active'):
+        return jsonify({
+            'error': 'Live access cannot be deleted directly. Revoke the request first, then delete the record.',
+            'code': 'REVOKE_BEFORE_DELETE',
+        }), 400
     _mark_request_ticket_deleted(request_id, deleted_by=_current_actor_email() or '', reason='live_request_deleted')
     
     # Delete from database

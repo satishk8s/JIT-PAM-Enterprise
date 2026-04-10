@@ -1,7 +1,7 @@
 # NPAMX Handoff And Pre-Push Checklist
 
 Date: 2026-04-10  
-Workspace: `/Users/sowmya/Documents/sso/JIT-PAM-Enterprise`
+Workspace: `<repo-root>`
 
 ## Current Release Context
 
@@ -40,7 +40,7 @@ Preferred git remote transport:
 Suggested commands:
 
 ```bash
-cd /Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+cd <repo-root>
 git checkout -b codex/release-2026-04-10-prepush-fixes
 git remote set-url origin git@github.com:satishk8s/JIT-PAM-Enterprise.git
 git add backend/app.py frontend/app.js frontend/index.html frontend/admin-functions.js frontend/databases.js frontend/db-governance.js desktop_agent/npamx_agent.py desktop_agent/build-agent-macos-linux.sh docs/npamx-handoff-2026-04-10.md
@@ -61,7 +61,7 @@ Use this prompt in the company laptop Codex app:
 ```text
 You are working in the NPAMX/PAM repo:
 
-/Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+<repo-root>
 
 Important rules:
 1. Do not redesign or rewrite existing PAM DB access, revoke, approval, ticketing, or desktop-agent flows.
@@ -120,7 +120,7 @@ Use this prompt in Claude CLI when you want a review only, not fixes:
 Review this repo for bugs, regressions, wiring issues, security issues, and admin/user flow inconsistencies, but do not modify code.
 
 Repo:
-/Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+<repo-root>
 
 Focus especially on:
 - DB access request lifecycle
@@ -297,12 +297,12 @@ Rules:
 Run before push:
 
 ```bash
-python3 -m py_compile /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/backend/app.py /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/desktop_agent/npamx_agent.py
-node --check /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/frontend/app.js
-node --check /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/frontend/admin-functions.js
-node --check /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/frontend/databases.js
-node --check /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/frontend/db-governance.js
-bash -n /Users/sowmya/Documents/sso/JIT-PAM-Enterprise/desktop_agent/build-agent-macos-linux.sh
+python3 -m py_compile backend/app.py desktop_agent/npamx_agent.py
+node --check frontend/app.js
+node --check frontend/admin-functions.js
+node --check frontend/databases.js
+node --check frontend/db-governance.js
+bash -n desktop_agent/build-agent-macos-linux.sh
 ```
 
 ## Live Validation Checklist
@@ -322,4 +322,3 @@ Do these after backend deploy and agent rebuild:
 11. Agent heartbeat updates last-seen continuously.
 12. Agent colors remain readable on dark-theme macOS.
 13. Agent permission-set search works and stale deleted entries are not shown.
-

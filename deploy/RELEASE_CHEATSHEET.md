@@ -21,7 +21,7 @@ docker buildx build \
   --platform linux/amd64 \
   -t 116155851700.dkr.ecr.ap-south-1.amazonaws.com/npamx:vX.Y \
   --push \
-  /Users/sowmya/Documents/sso/JIT-PAM-Enterprise
+  .
 ```
 
 ## 2. Deploy on PAM EC2

@@ -809,7 +809,7 @@ function isBreakGlassSession() {
 }
 
 function hasAdminSession() {
-    return isBreakGlassSession() || String(localStorage.getItem('isAdmin') || '').trim().toLowerCase() === 'true';
+    return isBreakGlassSession() || hasFullAdminControls() || canAccessAdminConsole();
 }
 
 // PAM admin check: isAdmin is set from API /api/admin/check-pam-admin (backend stores PAM solution admins)
@@ -838,7 +838,7 @@ function renderProfileNameFallback() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
-    var admin = localStorage.getItem('isAdmin') === 'true';
+    var admin = hasFullAdminControls() || canAccessAdminConsole();
     el.innerHTML = admin
         ? '<i class="fas fa-crown profile-crown-icon" title="PAM Admin"></i> ' + safe
         : safe;
@@ -996,10 +996,7 @@ async function syncSsoProfileFromSession() {
                 : deriveNameFromEmail(resolvedEmail);
         }
 
-        const profileLooksIncomplete = !email && (!profileName || profileName.toLowerCase() === 'user');
-        const isAdminFromSession = profileLooksIncomplete
-            ? (localStorage.getItem('isAdmin') === 'true')
-            : (data.is_admin === true);
+        const isAdminFromSession = data.is_admin === true;
         const authType = String(data.auth_type || '').trim().toLowerCase() === 'break_glass' ? 'break_glass' : 'sso';
         const resolvedRole = normalizePamRole(data.role || (isAdminFromSession ? 'Admin' : 'Employee'));
 
@@ -1122,14 +1119,14 @@ function restoreStoredAuthState() {
     if (localStorage.getItem('isLoggedIn') !== 'true') return false;
     const email = String(localStorage.getItem('userEmail') || '').trim();
     const storedName = String(localStorage.getItem('userName') || '').trim();
-    const role = normalizePamRole(localStorage.getItem('userRole') || (localStorage.getItem('isAdmin') === 'true' ? 'Admin' : 'Employee'));
+    const role = normalizePamRole(localStorage.getItem('userRole') || 'Employee');
     const authType = String(localStorage.getItem('loginMethod') || 'sso').trim().toLowerCase() === 'break_glass' ? 'break_glass' : 'sso';
     const displayName = storedName || deriveNameFromEmail(email) || 'User';
 
     currentUser = {
         email: email,
         name: displayName,
-        isAdmin: localStorage.getItem('isAdmin') === 'true'
+        isAdmin: authType === 'break_glass'
     };
     isAdmin = currentUser.isAdmin;
     localStorage.setItem('userName', displayName);
@@ -3200,7 +3197,7 @@ function renderDesktopAgentIntegrationResults(payload) {
 }
 
 async function refreshDesktopAgentRuntimeStatus() {
-    if (localStorage.getItem('isAdmin') !== 'true') return;
+    if (!canAccessAdminConsole()) return;
     try {
         const data = await apiJson('/admin/integrations/desktop-agent/status');
         desktopAgentRuntimeStatus = (data && data.result && typeof data.result === 'object') ? data.result : null;
@@ -9962,7 +9959,7 @@ function configureIntegration(provider) {
         alert(`${provider} integration settings will be implemented in a later phase.`);
         return;
     }
-    if (localStorage.getItem('isAdmin') !== 'true') {
+    if (!canAccessAdminConsole()) {
         alert('Admin access is required to configure integrations.');
         return;
     }

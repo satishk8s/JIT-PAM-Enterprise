@@ -1235,7 +1235,7 @@ From `backend/`:
 
 ```bash
 source venv/bin/activate
-export FRONTEND_DIR=/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/frontend
+export FRONTEND_DIR="$(pwd)/../frontend"
 PORT=5001 gunicorn --worker-tmp-dir /tmp --workers 2 --threads 4 --timeout 120 --bind 0.0.0.0:5001 docker_serve:app
 ```
 

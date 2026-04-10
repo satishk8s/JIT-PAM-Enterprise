@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/desktop_agent/npamx_agent.py'],
+    ['desktop_agent/npamx_agent.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/build/npamx-agent.icns'],
+    icon=['build/npamx-agent.icns'],
 )
 coll = COLLECT(
     exe,
@@ -46,6 +46,6 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='NPAMX.app',
-    icon='/Users/sowmya/Documents/sso/JIT-PAM-Enterprise/build/npamx-agent.icns',
+    icon='build/npamx-agent.icns',
     bundle_identifier='com.nykaa.npamx.desktop-agent',
 )
