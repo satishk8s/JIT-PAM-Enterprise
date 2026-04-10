@@ -48,7 +48,7 @@ except Exception:
 APP_NAME = "npamx-desktop-agent"
 APP_DISPLAY_NAME = "NPAMX"
 APP_KEYCHAIN_SERVICE = "com.nykaa.npamx.desktop-agent"
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.6"
 DEFAULT_INTERVAL_SECONDS = 30
 DEFAULT_TIMEOUT_SECONDS = 10
 BOOTSTRAP_FILE_NAMES = (
@@ -1306,6 +1306,19 @@ class AgentStatusWindow:
         self.aws_profile_labels: Dict[str, str] = {}
         self.aws_profile_records: list[Dict[str, str]] = []
         self.selected_credentials = {}
+        self._ui_palette = {
+            "app_bg": "#f4f7fb",
+            "panel_bg": "#ffffff",
+            "panel_border": "#d0d5dd",
+            "text": "#101828",
+            "muted_text": "#475467",
+            "entry_bg": "#ffffff",
+            "entry_fg": "#101828",
+            "button_bg": "#f9fafb",
+            "button_fg": "#101828",
+            "selected_bg": "#fce7f3",
+            "selected_fg": "#101828",
+        }
         self._status_palette = {
             "success": "#0f6b2f",
             "error": "#b42318",
@@ -1315,10 +1328,90 @@ class AgentStatusWindow:
         }
         self._tooltips: list[_HoverTip] = []
 
+        self._configure_theme()
         self._build_ui()
         self._load_local_state_into_ui(state=state, cfg=cfg)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(700, self._maybe_autostart_loop)
         self.root.after(1500, self._refresh_from_server_background)
+
+    def _configure_theme(self) -> None:
+        self.root.configure(bg=self._ui_palette["app_bg"])
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(
+            ".",
+            background=self._ui_palette["app_bg"],
+            foreground=self._ui_palette["text"],
+            fieldbackground=self._ui_palette["entry_bg"],
+        )
+        style.configure("TFrame", background=self._ui_palette["app_bg"])
+        style.configure(
+            "TLabelframe",
+            background=self._ui_palette["panel_bg"],
+            bordercolor=self._ui_palette["panel_border"],
+            relief="solid",
+        )
+        style.configure(
+            "TLabelframe.Label",
+            background=self._ui_palette["panel_bg"],
+            foreground=self._ui_palette["text"],
+        )
+        style.configure("TLabel", background=self._ui_palette["app_bg"], foreground=self._ui_palette["text"])
+        style.configure(
+            "TButton",
+            background=self._ui_palette["button_bg"],
+            foreground=self._ui_palette["button_fg"],
+            bordercolor=self._ui_palette["panel_border"],
+            focusthickness=1,
+            focuscolor=self._ui_palette["selected_bg"],
+        )
+        style.map(
+            "TButton",
+            background=[("active", self._ui_palette["selected_bg"])],
+            foreground=[("active", self._ui_palette["button_fg"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=self._ui_palette["entry_bg"],
+            foreground=self._ui_palette["entry_fg"],
+            insertcolor=self._ui_palette["entry_fg"],
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=self._ui_palette["entry_bg"],
+            foreground=self._ui_palette["entry_fg"],
+            arrowsize=14,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", self._ui_palette["entry_bg"])],
+            foreground=[("readonly", self._ui_palette["entry_fg"])],
+            selectbackground=[("readonly", self._ui_palette["selected_bg"])],
+            selectforeground=[("readonly", self._ui_palette["selected_fg"])],
+        )
+        style.configure(
+            "Treeview",
+            background=self._ui_palette["panel_bg"],
+            fieldbackground=self._ui_palette["panel_bg"],
+            foreground=self._ui_palette["text"],
+            bordercolor=self._ui_palette["panel_border"],
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", self._ui_palette["selected_bg"])],
+            foreground=[("selected", self._ui_palette["selected_fg"])],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background="#f2f4f7",
+            foreground=self._ui_palette["text"],
+            bordercolor=self._ui_palette["panel_border"],
+        )
+        style.configure("TPanedwindow", background=self._ui_palette["app_bg"])
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
@@ -1346,7 +1439,15 @@ class AgentStatusWindow:
         logout_wrap.grid(row=1, column=3, sticky="ew", padx=(8, 0), pady=(8, 0))
         ttk.Button(logout_wrap, text="Logout", command=self._logout).pack(side="left")
         self._add_help_badge(logout_wrap, "Remove the local agent login and stop using the current NPAMX pairing token on this machine.")
-        self.bootstrap_label = tk.Label(top, textvariable=self.bootstrap_var, anchor="w", justify="left", wraplength=980, fg=self._status_palette["success"])
+        self.bootstrap_label = tk.Label(
+            top,
+            textvariable=self.bootstrap_var,
+            anchor="w",
+            justify="left",
+            wraplength=980,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._status_palette["success"],
+        )
         self.bootstrap_label.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
         for idx in range(4):
             top.columnconfigure(idx, weight=1 if idx in (1, 3) else 0)
@@ -1362,7 +1463,16 @@ class AgentStatusWindow:
 
         status_frame = ttk.LabelFrame(outer, text="Status", padding=10)
         status_frame.pack(fill="x")
-        self.status_label = tk.Label(status_frame, textvariable=self.status_var, font=("Arial", 11, "bold"), anchor="w", justify="left", wraplength=980, fg=self._status_palette["muted"])
+        self.status_label = tk.Label(
+            status_frame,
+            textvariable=self.status_var,
+            font=("Arial", 11, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=980,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._status_palette["muted"],
+        )
         self.status_label.pack(anchor="w")
         pair_code_row = ttk.Frame(status_frame)
         pair_code_row.pack(fill="x", pady=(6, 0))
@@ -1370,9 +1480,25 @@ class AgentStatusWindow:
         self.pair_code_entry = ttk.Entry(pair_code_row, textvariable=self.pair_code_var, width=22, state="readonly")
         self.pair_code_entry.pack(side="left", padx=(8, 8))
         ttk.Button(pair_code_row, text="Copy Pairing Code", command=self._copy_pair_code).pack(side="left")
-        self.pair_label = tk.Label(status_frame, textvariable=self.pair_var, anchor="w", justify="left", wraplength=980, fg=self._status_palette["warning"])
+        self.pair_label = tk.Label(
+            status_frame,
+            textvariable=self.pair_var,
+            anchor="w",
+            justify="left",
+            wraplength=980,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._status_palette["warning"],
+        )
         self.pair_label.pack(anchor="w", pady=(6, 0))
-        self.summary_label = tk.Label(status_frame, textvariable=self.summary_var, anchor="w", justify="left", wraplength=980, fg=self._status_palette["muted"])
+        self.summary_label = tk.Label(
+            status_frame,
+            textvariable=self.summary_var,
+            anchor="w",
+            justify="left",
+            wraplength=980,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._status_palette["muted"],
+        )
         self.summary_label.pack(anchor="w", pady=(6, 0))
 
         aws_frame = ttk.LabelFrame(outer, text="AWS Session", padding=10)
@@ -1390,7 +1516,15 @@ class AgentStatusWindow:
         self.aws_search_entry = ttk.Entry(aws_frame, textvariable=self.aws_search_var, width=32)
         self.aws_search_entry.grid(row=1, column=1, sticky="ew", padx=(8, 10), pady=(8, 0))
         self.aws_search_entry.bind("<KeyRelease>", lambda _event: self._apply_aws_profile_filter())
-        self.aws_status_label = tk.Label(aws_frame, textvariable=self.aws_status_var, anchor="w", justify="left", wraplength=980, fg=self._status_palette["info"])
+        self.aws_status_label = tk.Label(
+            aws_frame,
+            textvariable=self.aws_status_var,
+            anchor="w",
+            justify="left",
+            wraplength=980,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._status_palette["info"],
+        )
         self.aws_status_label.grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
         for idx in range(5):
             aws_frame.columnconfigure(idx, weight=1 if idx == 1 else 0)
@@ -1423,14 +1557,34 @@ class AgentStatusWindow:
         self.sessions_tree.pack(fill="both", expand=True)
         self.sessions_tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
-        self.detail_text = tk.Text(detail_frame, wrap="word", height=18)
+        self.detail_text = tk.Text(
+            detail_frame,
+            wrap="word",
+            height=18,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._ui_palette["text"],
+            insertbackground=self._ui_palette["text"],
+            relief="solid",
+            bd=1,
+            highlightthickness=0,
+        )
         self.detail_text.pack(fill="both", expand=True)
         self.detail_text.insert("1.0", "No session selected.")
         self.detail_text.configure(state="disabled")
 
         bottom = ttk.LabelFrame(outer, text="Activity Log", padding=8)
         bottom.pack(fill="both", expand=False, pady=(10, 0))
-        self.log_text = tk.Text(bottom, wrap="word", height=8)
+        self.log_text = tk.Text(
+            bottom,
+            wrap="word",
+            height=8,
+            bg=self._ui_palette["panel_bg"],
+            fg=self._ui_palette["text"],
+            insertbackground=self._ui_palette["text"],
+            relief="solid",
+            bd=1,
+            highlightthickness=0,
+        )
         self.log_text.pack(fill="both", expand=True)
         footer = ttk.Frame(bottom)
         footer.pack(fill="x", pady=(8, 0))
@@ -1438,6 +1592,7 @@ class AgentStatusWindow:
             footer,
             text=f"Agent Version: {str(self._initial_cfg.get('agent_version') or APP_VERSION).strip()}",
             anchor="e",
+            bg=self._ui_palette["panel_bg"],
             fg=self._status_palette["muted"],
         )
         self.version_label.pack(side="right")
@@ -1453,6 +1608,7 @@ class AgentStatusWindow:
             parent,
             text="!",
             font=("Arial", 9, "bold"),
+            bg=self._ui_palette["panel_bg"],
             fg=self._status_palette["info"],
             cursor="question_arrow",
         )
@@ -2012,6 +2168,7 @@ class AgentStatusWindow:
                         self.root.after(0, lambda: self._append_log("Login successful. Agent paired and registered."))
                         self.root.after(0, lambda: self._set_pair_code(""))
                         self.root.after(0, lambda: self._set_pair_message("Pairing complete.", "success"))
+                        self.root.after(0, self._start_loop)
                         self.root.after(0, self._refresh_from_server_background)
                         return
                     self.root.after(0, lambda: self._set_status("Waiting for NPAMX approval...", "warning"))
@@ -2078,6 +2235,19 @@ class AgentStatusWindow:
         self.loop_thread = threading.Thread(target=worker, daemon=True)
         self.loop_thread.start()
         self._append_log("Agent loop started.")
+
+    def _maybe_autostart_loop(self) -> None:
+        try:
+            cfg = _load_config()
+            configured = bool(cfg.get("server_url") and cfg.get("agent_token") and cfg.get("user_email"))
+            if not configured:
+                return
+            if self.loop_thread and self.loop_thread.is_alive():
+                return
+            self._append_log("Auto-starting agent loop from saved configuration.")
+            self._start_loop()
+        except Exception as exc:
+            self._append_log(f"Auto-start loop skipped: {str(exc).strip()}")
 
     def _stop_loop(self) -> None:
         self.stop_event.set()

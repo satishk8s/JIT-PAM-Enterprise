@@ -143,6 +143,9 @@ const NPAMX_PRODUCT_NAME = 'NPAMx';
 const NPAMX_VERSION_LABEL = '1.0';
 let ticketsSelection = new Set();
 let ticketsLoadTimer = null;
+let adminDbSessionsLoadSeq = 0;
+let adminDbSessionsRevoking = false;
+let adminDbSessionsLocallyRevoked = new Set();
 window.PAM_CAPABILITIES = Array.isArray(window.PAM_CAPABILITIES) ? window.PAM_CAPABILITIES : [];
 window.PAM_EFFECTIVE_APP_ROLES = Array.isArray(window.PAM_EFFECTIVE_APP_ROLES) ? window.PAM_EFFECTIVE_APP_ROLES : [];
 window.PAM_CAPABILITIES_LOADED = window.PAM_CAPABILITIES_LOADED === true;
@@ -346,7 +349,6 @@ function adminTabCapability(tabId) {
         policies: 'admin.management.view',
         security: 'admin.security.view',
         integrations: 'admin.integrations.view',
-        dbGovernance: 'admin.db_governance.view',
         trends: 'admin.console.view',
         databaseSessions: 'admin.database_sessions.view',
         feedback: 'admin.feedback.view'
@@ -365,12 +367,14 @@ function adminSubTabCapability(group, tabId) {
             policies: 'admin.management.policies.view',
             approvalWorkflow: 'admin.management.approval_workflows.manage',
             pendingApprovals: 'admin.management.approval_workflows.manage',
+            ticketsManagement: 'admin.integrations.ticketing.manage',
             features: 'admin.management.features.manage'
         },
         security: {
             security: 'admin.security.settings.manage',
             iam: 'admin.security.iam_roles.manage',
             guardrails: 'admin.security.guardrails.manage',
+            dbUsers: 'admin.db_governance.view',
             audit: 'admin.security.audit.view'
         },
         integrations: {
@@ -405,6 +409,15 @@ window.getCurrentPamCapabilities = getCurrentPamCapabilities;
 
 function canAccessAdminConsole() {
     return hasPamCapability('admin.console.view');
+}
+
+function isBusinessProfileGateActive() {
+    return window.__npamBusinessProfileGateActive === true;
+}
+
+function syncBusinessProfileGateUi() {
+    const closeBtn = document.getElementById('profileModalCloseBtn');
+    if (closeBtn) closeBtn.style.display = isBusinessProfileGateActive() ? 'none' : '';
 }
 
 function hasFullAdminControls() {
@@ -1976,7 +1989,6 @@ function applyPamCapabilityVisibility() {
         policies: 'admin.management.view',
         security: 'admin.security.view',
         integrations: 'admin.integrations.view',
-        dbGovernance: 'admin.db_governance.view',
         trends: 'admin.console.view',
         databaseSessions: 'admin.database_sessions.view',
         feedback: 'admin.feedback.view'
@@ -1996,18 +2008,22 @@ function applyPamCapabilityVisibility() {
         individualUsersSubTab: 'admin.users.individuals.manage',
         policiesSubTab: 'admin.management.policies.view',
         approvalWorkflowSubTab: 'admin.management.approval_workflows.manage',
+        pendingApprovalsSubTab: 'admin.management.approval_workflows.manage',
+        ticketsManagementSubTab: 'admin.integrations.ticketing.manage',
         featuresSubTab: 'admin.management.features.manage',
         securitySubTab: 'admin.security.settings.manage',
         iamSubTab: 'admin.security.iam_roles.manage',
         guardrailsSubTab: 'admin.security.guardrails.manage',
-        dbUsersSubTab: 'admin.security.audit.view',
+        dbUsersSubTab: 'admin.db_governance.view',
         auditSubTab: 'admin.security.audit.view',
         awsIdcUsersSubTab: 'admin.identity_center.users.view',
         awsIdcGroupsSubTab: 'admin.identity_center.groups.view',
         awsIdcPermissionSetsSubTab: 'admin.identity_center.permission_sets.view',
         awsIdcOrgSubTab: 'admin.identity_center.organization.view',
         intCloudSubTab: 'admin.integrations.cloud.manage',
+        intVaultDbSubTab: 'admin.integrations.cloud.manage',
         intTicketingSubTab: 'admin.integrations.ticketing.manage',
+        intDocumentationSubTab: 'admin.integrations.ticketing.manage',
         intSiemSubTab: 'admin.integrations.siem.manage',
         intIgpSubTab: 'admin.integrations.igp.manage'
     };
@@ -4634,6 +4650,11 @@ function showPage(pageId) {
         alert('This feature is currently disabled by administrator.');
         pageId = firstAccessiblePage();
     }
+    if (isBusinessProfileGateActive() && pageId !== 'home') {
+        pageId = 'home';
+        showModal('profileModal');
+        setInlineStatus('profileStatus', 'Confirm your manager, enter your team name, and save your profile before using NPAMX.', 'warning');
+    }
 
     document.body.setAttribute('data-page', pageId || '');
     // Hide all pages
@@ -4824,18 +4845,36 @@ function mountAdminTrendsIntoTab() {
     }
 }
 
+function mountDbGovernanceIntoSecurity() {
+    var mount = document.getElementById('dbGovernanceSecurityMount');
+    var sourceTab = document.getElementById('adminDbGovernanceTab');
+    if (!mount || !sourceTab || mount.dataset.mounted === '1') return;
+    var inner = sourceTab.querySelector('.admin-tab-pam-inner');
+    if (!inner) return;
+    while (inner.firstChild) {
+        mount.appendChild(inner.firstChild);
+    }
+    sourceTab.style.display = 'none';
+    mount.dataset.mounted = '1';
+}
+
 function showManagementSubTab(tab) {
     window.__npamAdminState = window.__npamAdminState || {};
     if (!hasPamCapability(adminSubTabCapability('management', tab))) {
         tab = hasPamCapability(adminSubTabCapability('management', 'policies'))
             ? 'policies'
-            : (hasPamCapability(adminSubTabCapability('management', 'approvalWorkflow')) ? 'approvalWorkflow' : (hasPamCapability(adminSubTabCapability('management', 'pendingApprovals')) ? 'pendingApprovals' : 'features'));
+            : (hasPamCapability(adminSubTabCapability('management', 'approvalWorkflow'))
+                ? 'approvalWorkflow'
+                : (hasPamCapability(adminSubTabCapability('management', 'pendingApprovals'))
+                    ? 'pendingApprovals'
+                    : (hasPamCapability(adminSubTabCapability('management', 'ticketsManagement')) ? 'ticketsManagement' : 'features')));
     }
     window.__npamAdminState.managementSubTab = tab;
     var policiesSection = document.getElementById('policiesSection');
     var featuresSection = document.getElementById('featuresSection');
     var approvalWorkflowSection = document.getElementById('approvalWorkflowSection');
     var pendingApprovalsSection = document.getElementById('pendingApprovalsSection');
+    var ticketsManagementSection = document.getElementById('ticketsManagementSection');
     if (policiesSection) {
         policiesSection.style.setProperty('display', tab === 'policies' ? 'block' : 'none', 'important');
         policiesSection.style.setProperty('visibility', tab === 'policies' ? 'visible' : 'hidden', 'important');
@@ -4852,12 +4891,17 @@ function showManagementSubTab(tab) {
         pendingApprovalsSection.style.setProperty('display', tab === 'pendingApprovals' ? 'block' : 'none', 'important');
         pendingApprovalsSection.style.setProperty('visibility', tab === 'pendingApprovals' ? 'visible' : 'hidden', 'important');
     }
+    if (ticketsManagementSection) {
+        ticketsManagementSection.style.setProperty('display', tab === 'ticketsManagement' ? 'block' : 'none', 'important');
+        ticketsManagementSection.style.setProperty('visibility', tab === 'ticketsManagement' ? 'visible' : 'hidden', 'important');
+    }
 
     var policiesBtn = document.getElementById('policiesSubTab');
     var featuresBtn = document.getElementById('featuresSubTab');
     var approvalWorkflowBtn = document.getElementById('approvalWorkflowSubTab');
     var pendingApprovalsBtn = document.getElementById('pendingApprovalsSubTab');
-    [policiesBtn, approvalWorkflowBtn, pendingApprovalsBtn, featuresBtn].forEach(function(btn) {
+    var ticketsManagementBtn = document.getElementById('ticketsManagementSubTab');
+    [policiesBtn, approvalWorkflowBtn, pendingApprovalsBtn, ticketsManagementBtn, featuresBtn].forEach(function(btn) {
         if (!btn) return;
         btn.classList.remove('active');
         btn.style.background = 'var(--bg-secondary)';
@@ -4869,7 +4913,7 @@ function showManagementSubTab(tab) {
         ? featuresBtn
         : (tab === 'approvalWorkflow'
             ? approvalWorkflowBtn
-            : (tab === 'pendingApprovals' ? pendingApprovalsBtn : policiesBtn));
+            : (tab === 'pendingApprovals' ? pendingApprovalsBtn : (tab === 'ticketsManagement' ? ticketsManagementBtn : policiesBtn)));
     if (activeBtn) {
         activeBtn.classList.add('active');
         activeBtn.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
@@ -4889,6 +4933,8 @@ function showManagementSubTab(tab) {
         }, 60);
     } else if (tab === 'pendingApprovals' && typeof loadAdminPendingDatabaseApprovals === 'function') {
         loadAdminPendingDatabaseApprovals();
+    } else if (tab === 'ticketsManagement' && typeof loadAdminTicketsManagement === 'function') {
+        loadAdminTicketsManagement();
     }
 }
 
@@ -5168,6 +5214,10 @@ function showSecuritySubTab(tab) {
         }, 60);
     } else if (tab === 'dbUsers' && typeof window.loadDbUserInventorySection === 'function') {
         setTimeout(function() {
+            mountDbGovernanceIntoSecurity();
+            if (typeof loadDbGovernanceAdmin === 'function') {
+                loadDbGovernanceAdmin(false);
+            }
             window.loadDbUserInventorySection();
         }, 60);
     } else if (tab === 'iam' && typeof window.loadIamRoleTemplates === 'function') {
@@ -5252,7 +5302,7 @@ function showAdminTab(tabId, event) {
         return;
     }
     if (!hasPamCapability(adminTabCapability(tabId))) {
-        const ordered = ['users', 'identityCenter', 'policies', 'security', 'integrations', 'dbGovernance', 'trends', 'databaseSessions', 'feedback'];
+        const ordered = ['users', 'identityCenter', 'policies', 'security', 'integrations', 'trends', 'databaseSessions', 'feedback'];
         const fallback = ordered.find(function(item) { return hasPamCapability(adminTabCapability(item)); }) || '';
         if (!fallback) {
             alert('You do not have access to the admin console.');
@@ -5273,7 +5323,6 @@ function showAdminTab(tabId, event) {
         'policies': 'adminPoliciesTab',
         'security': 'adminSecurityTab',
         'integrations': 'adminIntegrationsTab',
-        'dbGovernance': 'adminDbGovernanceTab',
         'trends': 'adminTrendsTab',
         'databaseSessions': 'adminDatabaseSessionsTab',
         'feedback': 'adminFeedbackTab',
@@ -5346,15 +5395,13 @@ function showAdminTab(tabId, event) {
             }, 10);
         }
         loadAdminSettings().catch(function() {});
-    } else if (tabId === 'dbGovernance') {
-        if (typeof loadDbGovernanceAdmin === 'function') loadDbGovernanceAdmin(false);
     }
 }
 
 function bindAdminNavigationHandlers() {
     if (document.documentElement.dataset.boundAdminNavCapture === '1') return;
     document.addEventListener('click', function(evt) {
-        const target = evt.target && evt.target.closest ? evt.target.closest('#usersSubTab, #groupsSubTab, #rolesSubTab, #individualUsersSubTab, #policiesSubTab, #approvalWorkflowSubTab, #pendingApprovalsSubTab, #featuresSubTab, #securitySubTab, #iamSubTab, #guardrailsSubTab, #dbUsersSubTab, #auditSubTab, #intCloudSubTab, #intVaultDbSubTab, #intTicketingSubTab, #intSiemSubTab, #intIgpSubTab') : null;
+        const target = evt.target && evt.target.closest ? evt.target.closest('#usersSubTab, #groupsSubTab, #rolesSubTab, #individualUsersSubTab, #policiesSubTab, #approvalWorkflowSubTab, #pendingApprovalsSubTab, #ticketsManagementSubTab, #featuresSubTab, #securitySubTab, #iamSubTab, #guardrailsSubTab, #dbUsersSubTab, #auditSubTab, #intCloudSubTab, #intVaultDbSubTab, #intTicketingSubTab, #intDocumentationSubTab, #intSiemSubTab, #intIgpSubTab') : null;
         if (!target) return;
         evt.preventDefault();
         evt.stopPropagation();
@@ -5366,6 +5413,7 @@ function bindAdminNavigationHandlers() {
         else if (id === 'policiesSubTab' && typeof window.showManagementSubTab === 'function') window.showManagementSubTab('policies');
         else if (id === 'approvalWorkflowSubTab' && typeof window.showManagementSubTab === 'function') window.showManagementSubTab('approvalWorkflow');
         else if (id === 'pendingApprovalsSubTab' && typeof window.showManagementSubTab === 'function') window.showManagementSubTab('pendingApprovals');
+        else if (id === 'ticketsManagementSubTab' && typeof window.showManagementSubTab === 'function') window.showManagementSubTab('ticketsManagement');
         else if (id === 'featuresSubTab' && typeof window.showManagementSubTab === 'function') window.showManagementSubTab('features');
         else if (id === 'securitySubTab' && typeof window.showSecuritySubTab === 'function') window.showSecuritySubTab('security');
         else if (id === 'iamSubTab' && typeof window.showSecuritySubTab === 'function') window.showSecuritySubTab('iam');
@@ -5375,6 +5423,7 @@ function bindAdminNavigationHandlers() {
         else if (id === 'intCloudSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('cloud');
         else if (id === 'intVaultDbSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('vaultdb');
         else if (id === 'intTicketingSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('ticketing');
+        else if (id === 'intDocumentationSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('documentation');
         else if (id === 'intSiemSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('siem');
         else if (id === 'intIgpSubTab' && typeof window.showIntegrationsSubTab === 'function') window.showIntegrationsSubTab('igp');
     }, true);
@@ -5513,14 +5562,21 @@ document.addEventListener('npam-features-updated', function (evt) {
 
 window.toggleActiveSessionsCategory = toggleActiveSessionsCategory;
 
-function loadAdminDatabaseSessions() {
+function loadAdminDatabaseSessions(options) {
+    options = options && typeof options === 'object' ? options : {};
+    var loadSeq = ++adminDbSessionsLoadSeq;
     var tbody = document.getElementById('adminDbSessionsTableBody');
     var emptyEl = document.getElementById('adminDbSessionsEmpty');
     var revokeBtn = document.getElementById('adminRevokeDbSessionsBtn');
     var selectAll = document.getElementById('adminDbSessionsSelectAll');
     if (!tbody) return;
-    tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Loading…</td></tr>';
+    var preserveExisting = options.preserveExisting === true;
+    var loadingMessage = String(options.loadingMessage || 'Loading database sessions…').trim();
+    if (!preserveExisting) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-muted">Loading…</td></tr>';
+    }
     if (emptyEl) emptyEl.style.display = 'none';
+    setInlineStatus('adminDbSessionsStatus', loadingMessage, 'info');
     var apiBase = typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.origin + '/api'));
     fetch(apiBase + '/admin/database-sessions', {
         credentials: 'include',
@@ -5528,15 +5584,20 @@ function loadAdminDatabaseSessions() {
     })
         .then(function(r) { return r.json().then(function(data) { return { ok: r.ok, data: data }; }); })
         .then(function(data) {
+            if (loadSeq !== adminDbSessionsLoadSeq) return;
             if (!data.ok) {
                 throw new Error((data.data && data.data.error) ? data.data.error : 'Failed to load sessions');
             }
             var sessions = (data.data && data.data.sessions) ? data.data.sessions : [];
+            sessions = sessions.filter(function(s) {
+                return !adminDbSessionsLocallyRevoked.has(String((s || {}).request_id || '').trim());
+            });
             if (sessions.length === 0) {
                 tbody.innerHTML = '';
                 if (emptyEl) { emptyEl.style.display = 'block'; emptyEl.textContent = 'No active database sessions.'; }
                 if (revokeBtn) revokeBtn.style.display = 'none';
                 if (selectAll) selectAll.checked = false;
+                setInlineStatus('adminDbSessionsStatus', 'All database sessions are now cleared.', 'success');
                 return;
             }
             if (emptyEl) emptyEl.style.display = 'none';
@@ -5546,16 +5607,20 @@ function loadAdminDatabaseSessions() {
                 return '<tr><td><input type="checkbox" class="admin-db-session-cb" value="' + (s.request_id || '') + '"></td><td>' + (s.user_email || '—') + '</td><td><code>' + (s.request_id || '—') + '</code></td><td>' + (s.engine || 'mysql') + '</td><td>' + exp + '</td></tr>';
             }).join('');
             if (selectAll) selectAll.checked = false;
+            setInlineStatus('adminDbSessionsStatus', 'Loaded ' + sessions.length + ' active database session(s).', 'success');
         })
         .catch(function(err) {
+            if (loadSeq !== adminDbSessionsLoadSeq) return;
             tbody.innerHTML = '<tr><td colspan="5" class="text-danger">' + escapeHtml((err && err.message) ? err.message : 'Failed to load sessions.') + '</td></tr>';
             if (revokeBtn) revokeBtn.style.display = 'none';
+            setInlineStatus('adminDbSessionsStatus', (err && err.message) ? err.message : 'Failed to load database sessions.', 'error');
         });
 }
 function toggleAdminDbSessionsSelectAll(checkbox) {
     document.querySelectorAll('.admin-db-session-cb').forEach(function(cb) { cb.checked = !!checkbox.checked; });
 }
 async function revokeSelectedDatabaseSessions() {
+    if (adminDbSessionsRevoking) return;
     console.log('Revoke clicked (Admin DB sessions)');
     var checked = document.querySelectorAll('.admin-db-session-cb:checked');
     var ids = [];
@@ -5581,10 +5646,29 @@ async function revokeSelectedDatabaseSessions() {
     var apiBase = typeof API_BASE !== 'undefined' ? API_BASE : (window.API_BASE || (window.location.origin + '/api'));
     var url = apiBase + '/admin/revoke-database-sessions';
     var headers = { 'Content-Type': 'application/json' };
+    var revokeBtn = document.getElementById('adminRevokeDbSessionsBtn');
+    var selectedRows = [];
+    checked.forEach(function(cb) {
+        var row = cb.closest('tr');
+        if (row) selectedRows.push(row);
+    });
     if (typeof getCsrfToken === 'function') {
         var csrfToken = getCsrfToken();
         if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
     }
+    adminDbSessionsRevoking = true;
+    if (revokeBtn) revokeBtn.disabled = true;
+    selectedRows.forEach(function(row) {
+        row.style.opacity = '0.55';
+        row.style.pointerEvents = 'none';
+        var cells = row.querySelectorAll('td');
+        var lastCell = cells && cells.length ? cells[cells.length - 1] : null;
+        if (lastCell) {
+            lastCell.setAttribute('data-original-html', lastCell.innerHTML);
+            lastCell.innerHTML = '<span class="text-muted">Revoking…</span>';
+        }
+    });
+    setInlineStatus('adminDbSessionsStatus', 'Revoking ' + ids.length + ' database session(s). Please wait while Vault and cleanup finish…', 'warning');
     console.log('Revoke API request:', url, 'request_ids:', ids);
     fetch(url, {
         method: 'POST',
@@ -5602,14 +5686,50 @@ async function revokeSelectedDatabaseSessions() {
             }
             var revoked = (data && data.revoked) ? data.revoked.length : 0;
             var failed = (data && data.failed) ? data.failed.length : 0;
-            if (data && data.error) alert('Error: ' + data.error);
-            else if (revoked) alert('Revoked ' + revoked + ' session(s).' + (failed ? ' Failed: ' + failed : ''));
-            else if (failed) alert('Could not revoke ' + failed + ' session(s). ' + (data.failed && data.failed.length ? data.failed.map(function(f) { return (f.request_id || '').slice(0, 8) + ': ' + (f.error || ''); }).join('; ') : ''));
-            if (typeof loadAdminDatabaseSessions === 'function') loadAdminDatabaseSessions();
+            (data && data.revoked ? data.revoked : []).forEach(function(id) {
+                adminDbSessionsLocallyRevoked.add(String(id || '').trim());
+            });
+            document.querySelectorAll('.admin-db-session-cb').forEach(function(cb) {
+                var rid = String(cb.value || '').trim();
+                if (adminDbSessionsLocallyRevoked.has(rid)) {
+                    var row = cb.closest('tr');
+                    if (row && row.parentNode) row.parentNode.removeChild(row);
+                }
+            });
+            if (data && data.error) {
+                setInlineStatus('adminDbSessionsStatus', 'Revoke failed: ' + data.error, 'error');
+                alert('Error: ' + data.error);
+            } else if (revoked) {
+                setInlineStatus('adminDbSessionsStatus', 'Revoked ' + revoked + ' session(s). Refreshing the latest state…' + (failed ? ' Some rows had warnings.' : ''), failed ? 'warning' : 'success');
+            } else if (failed) {
+                setInlineStatus('adminDbSessionsStatus', 'Could not revoke ' + failed + ' session(s).', 'error');
+                alert('Could not revoke ' + failed + ' session(s). ' + (data.failed && data.failed.length ? data.failed.map(function(f) { return (f.request_id || '').slice(0, 8) + ': ' + (f.error || ''); }).join('; ') : ''));
+            }
+            if (typeof loadAdminDatabaseSessions === 'function') {
+                loadAdminDatabaseSessions({
+                    preserveExisting: true,
+                    loadingMessage: revoked ? 'Reconcile in progress. Fetching final revoke status…' : 'Refreshing database session state…'
+                });
+            }
         })
         .catch(function(err) {
             console.error('Revoke sessions error', err);
+            selectedRows.forEach(function(row) {
+                row.style.opacity = '';
+                row.style.pointerEvents = '';
+                var cells = row.querySelectorAll('td');
+                var lastCell = cells && cells.length ? cells[cells.length - 1] : null;
+                if (lastCell && lastCell.hasAttribute('data-original-html')) {
+                    lastCell.innerHTML = lastCell.getAttribute('data-original-html') || '';
+                    lastCell.removeAttribute('data-original-html');
+                }
+            });
+            setInlineStatus('adminDbSessionsStatus', 'Revoke request failed. ' + ((err && err.message) ? err.message : 'Please retry.'), 'error');
             alert('Revoke request failed. ' + (err && err.message ? err.message : 'Check console.'));
+        })
+        .finally(function() {
+            adminDbSessionsRevoking = false;
+            if (revokeBtn) revokeBtn.disabled = false;
         });
 }
 
@@ -5641,6 +5761,11 @@ function closeModal() {
     }
     if (window.__WORKFLOW_EDITOR_MODAL_STATE && window.__WORKFLOW_EDITOR_MODAL_STATE.active && typeof window.closeApprovalWorkflowEditorModal === 'function') {
         window.closeApprovalWorkflowEditorModal();
+        return;
+    }
+    var profileModal = document.getElementById('profileModal');
+    if (isBusinessProfileGateActive() && profileModal && profileModal.classList.contains('show')) {
+        setInlineStatus('profileStatus', 'Check your manager, enter your team name, and save your profile before using NPAMX.', 'warning');
         return;
     }
     document.getElementById('modalOverlay').classList.remove('show');
@@ -6822,6 +6947,8 @@ function renderProfileBusinessProfile(profile) {
     const data = profile || {};
     const business = data.business_profile || {};
     window.NPAM_USER_PROFILE = business;
+    window.__npamBusinessProfileGateActive = profileNeedsBusinessProfile(data);
+    syncBusinessProfileGateUi();
     const banner = document.getElementById('profileBusinessProfileBanner');
     const rmHint = document.getElementById('profileRmChangeHint');
     const rmInput = document.getElementById('profileManagerEmail');
@@ -6840,22 +6967,22 @@ function renderProfileBusinessProfile(profile) {
     if (banner) {
         banner.hidden = false;
         if (missing.length) {
-            banner.textContent = 'Complete your workforce profile before placing database access requests. Missing: ' + missing.join(', ') + '.';
+            banner.textContent = 'Check whether your reporting manager is correct. If it is wrong, contact IT. If everything is correct, enter your team name and save your profile before using NPAMX. Missing: ' + missing.join(', ') + '.';
             banner.setAttribute('data-variant', 'warning');
         } else if (jumpcloudManaged) {
-            banner.textContent = 'Workforce profile is synced from JumpCloud for manager, manager\'s manager, department, and company role. Location and frequent environments stay editable here.';
+            banner.textContent = 'Manager details are synced from JumpCloud. Confirm the reporting manager is correct, then enter or update your team name here before continuing.';
             banner.setAttribute('data-variant', 'success');
         } else {
-            banner.textContent = 'Workforce profile is complete. RM email can be changed ' + remaining + ' more time' + (remaining === 1 ? '' : 's') + '.';
+            banner.textContent = 'Profile is complete. Confirm manager details and keep team name updated for approvals, reporting, and access tracking.';
             banner.setAttribute('data-variant', 'success');
         }
     }
     if (rmHint) {
         rmHint.textContent = jumpcloudManaged
-            ? 'Reporting lines are synced from JumpCloud and used for future approval routing.'
+            ? 'Reporting lines are synced from JumpCloud. If the manager is wrong, contact IT before continuing.'
             : (rmLocked
             ? 'You have used both self-service RM changes. Please contact the NPAMx admin for further RM updates.'
-            : 'RM email can be changed ' + remaining + ' more time' + (remaining === 1 ? '' : 's') + '.');
+            : 'Confirm the reporting manager is correct. RM email can be changed ' + remaining + ' more time' + (remaining === 1 ? '' : 's') + '.');
         rmHint.style.color = (!jumpcloudManaged && rmLocked) ? 'var(--warning-700, #b45309)' : '';
     }
 
@@ -6876,9 +7003,9 @@ function renderProfileBusinessProfile(profile) {
     if (mmInput) mmInput.readOnly = jumpcloudManaged;
     if (mmSearchInput) mmSearchInput.disabled = jumpcloudManaged;
     if (mmSearchBtn) mmSearchBtn.disabled = jumpcloudManaged;
-    if (teamInput) teamInput.readOnly = jumpcloudManaged;
+    if (teamInput) teamInput.readOnly = false;
     if (jobTitleInput) jobTitleInput.readOnly = true;
-    if (saveBtn) saveBtn.textContent = jumpcloudManaged ? 'Save Profile Preferences' : 'Save Workforce Profile';
+    if (saveBtn) saveBtn.textContent = 'Save Profile';
     ['profileManagerSearchResults', 'profileManagerManagerSearchResults'].forEach(function(id) {
         const el = document.getElementById(id);
         if (el) el.innerHTML = '';
@@ -6964,9 +7091,11 @@ async function saveProfileBusinessProfile(e) {
         const nextProfile = Object.assign({}, currentProfileData || {}, data || {});
         currentProfileData = nextProfile;
         renderProfileBusinessProfile(nextProfile);
-        setInlineStatus('profileStatus', 'Workforce profile saved successfully.', 'success');
+        window.__npamBusinessProfileGateActive = profileNeedsBusinessProfile(nextProfile);
+        syncBusinessProfileGateUi();
+        setInlineStatus('profileStatus', 'Profile saved successfully.', 'success');
         if (typeof showAppNotification === 'function') {
-            showAppNotification('Workforce profile saved successfully.', 'success');
+            showAppNotification('Profile saved successfully.', 'success');
         }
     } catch (err) {
         setInlineStatus('profileStatus', err.message || 'Failed to save workforce profile.', 'error');
@@ -6975,13 +7104,15 @@ async function saveProfileBusinessProfile(e) {
 
 function maybePromptForBusinessProfile(profile) {
     const data = profile || currentProfileData || {};
-    if (!profileNeedsBusinessProfile(data)) return;
+    window.__npamBusinessProfileGateActive = profileNeedsBusinessProfile(data);
+    syncBusinessProfileGateUi();
+    if (!window.__npamBusinessProfileGateActive) return;
     const email = String(data.email || localStorage.getItem('userEmail') || '').trim().toLowerCase();
     const promptKey = email || 'current';
     if (window.__npamBusinessProfilePromptedFor === promptKey) return;
     window.__npamBusinessProfilePromptedFor = promptKey;
     showModal('profileModal');
-    setInlineStatus('profileStatus', 'Please complete your workforce profile before using database access requests.', 'warning');
+    setInlineStatus('profileStatus', 'Check your manager, enter your team name, and save your profile before using NPAMX.', 'warning');
 }
 
 function renderProfileData(profile) {
@@ -7047,6 +7178,8 @@ async function loadProfileData() {
             if (currentUser && typeof currentUser === 'object') currentUser.email = authoritativeEmail;
         }
         renderProfileData(data);
+        window.__npamBusinessProfileGateActive = profileNeedsBusinessProfile(data);
+        syncBusinessProfileGateUi();
         setInlineStatus('profileStatus', '', 'info');
         return data;
     } catch (e) {
@@ -7055,6 +7188,8 @@ async function loadProfileData() {
     }
 }
 window.loadProfileData = loadProfileData;
+window.loadAdminTicketsManagement = loadAdminTicketsManagement;
+window.debouncedLoadAdminTicketsManagement = debouncedLoadAdminTicketsManagement;
 
 async function handleProfilePasswordChange(e) {
     e.preventDefault();
@@ -9090,7 +9225,7 @@ function loadAdminPage() {
         adminPage.style.setProperty('display', 'block', 'important');
         adminPage.style.setProperty('visibility', 'visible', 'important');
     }
-    var preferredTab = ['users', 'identityCenter', 'policies', 'security', 'integrations', 'dbGovernance', 'databaseSessions', 'feedback']
+    var preferredTab = ['users', 'identityCenter', 'policies', 'security', 'integrations', 'databaseSessions', 'feedback']
         .find(function(tabId) { return hasPamCapability(adminTabCapability(tabId)); }) || 'users';
     showAdminTab(preferredTab);
     if (preferredTab === 'users' && typeof loadUsersManagement === 'function') loadUsersManagement();
@@ -9108,7 +9243,89 @@ function loadUsersManagement() {
 }
 
 function loadAuditLogs() {
+    const fromEl = document.getElementById('auditDateFrom');
+    const toEl = document.getElementById('auditDateTo');
+    const today = new Date();
+    const prior = new Date(today.getTime());
+    prior.setDate(prior.getDate() - 29);
+    const formatDateInput = function(value) {
+        const y = value.getFullYear();
+        const m = String(value.getMonth() + 1).padStart(2, '0');
+        const d = String(value.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + d;
+    };
+    if (fromEl && !String(fromEl.value || '').trim()) fromEl.value = formatDateInput(prior);
+    if (toEl && !String(toEl.value || '').trim()) toEl.value = formatDateInput(today);
     loadAuditLogsTable();
+}
+
+let __adminTicketsManagementTimer = null;
+
+function setAdminTicketsManagementStatus(message, type) {
+    setInlineStatus('ticketsManagementStatus', message, type || 'info');
+}
+
+function renderAdminTicketsManagementRows(rows) {
+    const tbody = document.getElementById('ticketsManagementTableBody');
+    if (!tbody) return;
+    const items = Array.isArray(rows) ? rows : [];
+    if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="8" class="text-muted">No tickets matched the current filter.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = items.map(function(ticket) {
+        const requestedAt = ticket.requested_at ? formatDate(ticket.requested_at) : '—';
+        const requester = String(ticket.raised_by_email || '').trim() || '—';
+        const beneficiary = String(ticket.beneficiary_email || '').trim() || requester;
+        const status = String(ticket.status || 'unknown').trim();
+        const target = [ticket.account_id, ticket.resource_target].filter(Boolean).join(' / ') || '—';
+        const approver = String(ticket.approved_by || ticket.declined_by || ticket.approver_emails || '—').trim() || '—';
+        const decisionMeta = [];
+        if (ticket.decline_reason) decisionMeta.push('Reason: ' + String(ticket.decline_reason || '').trim());
+        if (ticket.deleted_at) decisionMeta.push('Deleted: ' + String(ticket.deleted_at || '').trim());
+        return ''
+            + '<tr>'
+            + '<td>' + escapeHtml(requestedAt) + '</td>'
+            + '<td>' + escapeHtml(String(ticket.category || '').toUpperCase() || '—') + '</td>'
+            + '<td>' + escapeHtml(requester) + '</td>'
+            + '<td>' + escapeHtml(beneficiary) + '</td>'
+            + '<td title="' + escapeHtml(String(ticket.request_reason || '').trim()) + '"><strong>' + escapeHtml(target) + '</strong><div class="db-user-identity-note">' + escapeHtml(String(ticket.request_id || '').trim()) + '</div></td>'
+            + '<td>' + escapeHtml(String(ticket.requested_actions || '—').trim() || '—') + '</td>'
+            + '<td><span class="status-badge ' + (/denied|rejected/.test(status.toLowerCase()) ? 'status-denied' : 'status-approved') + '">' + escapeHtml(status) + '</span></td>'
+            + '<td title="' + escapeHtml(decisionMeta.join(' | ')) + '">' + escapeHtml(approver) + '</td>'
+            + '</tr>';
+    }).join('');
+}
+
+function debouncedLoadAdminTicketsManagement() {
+    window.clearTimeout(__adminTicketsManagementTimer);
+    __adminTicketsManagementTimer = window.setTimeout(function() {
+        loadAdminTicketsManagement();
+    }, 250);
+}
+
+async function loadAdminTicketsManagement() {
+    const tbody = document.getElementById('ticketsManagementTableBody');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="8" class="text-muted">Loading tickets...</td></tr>';
+    const params = new URLSearchParams();
+    const q = String((document.getElementById('ticketsManagementSearchInput') || {}).value || '').trim();
+    const status = String((document.getElementById('ticketsManagementStatusFilter') || {}).value || '').trim();
+    if (q) params.set('q', q);
+    if (status) params.set('status', status);
+    params.set('limit', '50');
+    try {
+        const data = await apiJson('/admin/tickets?' + params.toString());
+        const rows = Array.isArray(data.tickets) ? data.tickets : [];
+        renderAdminTicketsManagementRows(rows);
+        setAdminTicketsManagementStatus(
+            rows.length ? ('Loaded ' + rows.length + ' ticket(s).') : 'No tickets matched the current filter.',
+            'info'
+        );
+    } catch (err) {
+        renderAdminTicketsManagementRows([]);
+        setAdminTicketsManagementStatus(err.message || 'Failed to load tickets management view.', 'error');
+    }
 }
 
 function updateAdminDashboard() {
@@ -9549,7 +9766,7 @@ function loadTicketsPage() {
     if (!tbody) return;
     tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; padding:32px; color: var(--text-secondary, #666);">Loading tickets...</td></tr>';
     const params = ticketsFilterParams();
-    apiJson('/admin/tickets?' + params.toString()).then(function(data) {
+    apiJson('/tickets?' + params.toString()).then(function(data) {
         const tickets = Array.isArray(data.tickets) ? data.tickets : [];
         const allowedIds = new Set(tickets.map(function(ticket) { return String(ticket.request_id || '').trim(); }).filter(Boolean));
         ticketsSelection = new Set(Array.from(ticketsSelection).filter(function(id) { return allowedIds.has(id); }));
@@ -9598,7 +9815,7 @@ function exportTicketsCsv(selectedOnly) {
         }
         params.set('request_ids', ids.join(','));
     }
-    fetch(apiUrl('/admin/tickets/export?' + params.toString()), { credentials: 'include' })
+    fetch(apiUrl('/tickets/export?' + params.toString()), { credentials: 'include' })
         .then(function(res) {
             if (!res.ok) {
                 return res.json().catch(function() { return {}; }).then(function(data) {

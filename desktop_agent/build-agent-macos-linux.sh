@@ -43,24 +43,114 @@ import os
 from pathlib import Path
 
 size = 1024
-bg = (17, 43, 92)
+scale = 4
+work = size * scale
+bg = (236, 72, 153)
+bg_hi = (249, 96, 170)
 fg = (255, 255, 255)
-pad = 80
-pixels = bytearray()
+shadow = (194, 24, 111)
+tile_margin = int(112 * scale)
+tile_radius = int(228 * scale)
+tile_left = tile_margin
+tile_top = tile_margin
+tile_right = work - tile_margin
+tile_bottom = work - tile_margin
+stroke = int(92 * scale)
+left_x = int(284 * scale)
+right_x = int(748 * scale)
+top_y = int(258 * scale)
+bottom_y = int(766 * scale)
+shadow_dx = int(18 * scale)
+shadow_dy = int(18 * scale)
 
+
+def inside_round_rect(x, y, left, top, right, bottom, radius):
+    if left + radius <= x <= right - radius or top + radius <= y <= bottom - radius:
+        return True
+    cx = left + radius if x < left + radius else right - radius
+    cy = top + radius if y < top + radius else bottom - radius
+    dx = x - cx
+    dy = y - cy
+    return dx * dx + dy * dy <= radius * radius
+
+
+def dist_to_segment(px, py, ax, ay, bx, by):
+    abx = bx - ax
+    aby = by - ay
+    apx = px - ax
+    apy = py - ay
+    denom = abx * abx + aby * aby
+    if denom <= 0:
+        dx = px - ax
+        dy = py - ay
+        return (dx * dx + dy * dy) ** 0.5
+    t = (apx * abx + apy * aby) / denom
+    if t < 0:
+        t = 0
+    elif t > 1:
+        t = 1
+    cx = ax + t * abx
+    cy = ay + t * aby
+    dx = px - cx
+    dy = py - cy
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def inside_stroke(px, py, ax, ay, bx, by, width):
+    return dist_to_segment(px, py, ax, ay, bx, by) <= width / 2.0
+
+
+def blend(base, top, alpha):
+    inv = 1.0 - alpha
+    return (
+        int(base[0] * inv + top[0] * alpha),
+        int(base[1] * inv + top[1] * alpha),
+        int(base[2] * inv + top[2] * alpha),
+    )
+
+
+work_pixels = []
+for y in range(work):
+    row = []
+    for x in range(work):
+        color = (255, 255, 255)
+        if inside_round_rect(x, y, tile_left, tile_top, tile_right, tile_bottom, tile_radius):
+            color = bg_hi if y < (tile_top + tile_bottom) / 2 else bg
+            if inside_round_rect(
+                x - shadow_dx,
+                y - shadow_dy,
+                tile_left,
+                tile_top,
+                tile_right,
+                tile_bottom,
+                tile_radius,
+            ):
+                color = blend(color, shadow, 0.12)
+        if (
+            inside_stroke(x, y, left_x, top_y, left_x, bottom_y, stroke)
+            or inside_stroke(x, y, right_x, top_y, right_x, bottom_y, stroke)
+            or inside_stroke(x, y, left_x, top_y, right_x, bottom_y, stroke)
+        ):
+            color = fg
+        row.append(color)
+    work_pixels.append(row)
+
+pixels = bytearray()
 for y in range(size):
     for x in range(size):
-        color = bg
-        if pad <= x < pad + 110 and 180 <= y < 844:
-            color = fg
-        elif 834 <= x < 944 and 180 <= y < 844:
-            color = fg
-        elif 0 <= (x - (pad + 110)) <= 600:
-            diag = x - (pad + 110)
-            y_top = 180 + diag
-            if y_top - 55 <= y <= y_top + 55 and x < 834:
-                color = fg
-        pixels.extend(color)
+        total_r = total_g = total_b = 0
+        for sy in range(scale):
+            for sx in range(scale):
+                r, g, b = work_pixels[y * scale + sy][x * scale + sx]
+                total_r += r
+                total_g += g
+                total_b += b
+        count = scale * scale
+        pixels.extend((
+            total_r // count,
+            total_g // count,
+            total_b // count,
+        ))
 
 root_dir = Path(os.environ["ROOT_DIR"])
 out = root_dir / "build" / "npamx-agent-icon.ppm"

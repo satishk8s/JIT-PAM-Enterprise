@@ -3823,6 +3823,23 @@ def _announcement_is_unread(item, email):
     return str(announcement.get('updated_at') or '') > seen_at
 
 
+def _announcement_is_recent_for_notifications(item, max_age_days=30):
+    announcement = _normalize_announcement_entry(item)
+    stamp = (
+        str(announcement.get('updated_at') or '').strip()
+        or str(announcement.get('created_at') or '').strip()
+    )
+    if not stamp:
+        return False
+    try:
+        parsed = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+    except Exception:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed) <= timedelta(days=max(1, int(max_age_days or 30)))
+
+
 def _normalize_iam_role_definition(role):
     src = role if isinstance(role, dict) else {}
     rid = str(src.get('id') or '').strip() or _group_id_from_name(src.get('name') or 'iam_role')
@@ -9287,27 +9304,48 @@ def _database_request_actor_permissions(access_request, actor_email='', is_admin
     is_current_approver = bool(actor) and current_stage_open and (
         actor in pending_approvers or (is_self_approval_stage and is_requester)
     )
-    can_view = bool(is_admin or is_requester or is_current_approver)
+    all_stage_approvers = []
+    for stage in (runtime_state.get('stages') or []):
+        if not isinstance(stage, dict):
+            continue
+        stage_approver_type = str(stage.get('approver_type') or '').strip().lower()
+        for item in (stage.get('approvers') or []):
+            email = str(item.get('email') or '').strip().lower()
+            if not email:
+                continue
+            all_stage_approvers.append(email)
+        if stage_approver_type in ('self', 'self_approval', 'requester', 'requestor') and requester:
+            all_stage_approvers.append(requester)
+    all_stage_approvers = _normalize_email_list(all_stage_approvers)
     approval_history = []
+    is_history_actor = False
     for item in (runtime_state.get('approval_history') or []):
         if not isinstance(item, dict):
             continue
+        history_actor = str(item.get('actor_email') or '').strip().lower()
+        if actor and history_actor == actor:
+            is_history_actor = True
         approval_history.append({
             'stage_name': str(item.get('stage_name') or '').strip(),
             'decision': str(item.get('decision') or '').strip(),
-            'actor_email': str(item.get('actor_email') or '').strip().lower(),
+            'actor_email': history_actor,
             'reason': str(item.get('reason') or '').strip(),
             'acted_at': str(item.get('acted_at') or '').strip(),
         })
+    is_any_approver = bool(actor) and actor in all_stage_approvers
+    can_view = bool(is_admin or is_requester or is_current_approver or is_any_approver or is_history_actor)
     return {
         'is_requester': is_requester,
         'is_admin': bool(is_admin),
         'is_current_approver': is_current_approver,
+        'is_any_approver': is_any_approver,
+        'is_history_actor': is_history_actor,
         'can_view': can_view,
         'can_approve': is_current_approver,
         'can_deny': is_current_approver,
         'current_stage_name': str(current_stage.get('name') or '').strip() if current_stage_open else '',
         'current_stage_approvers': pending_approvers if current_stage_open else [],
+        'all_stage_approvers': all_stage_approvers,
         'approval_history': approval_history,
     }
 
@@ -9534,7 +9572,15 @@ def _pending_database_request_recipients(request_obj):
             for item in (stage.get('approvers') or [])
             if _normalize_email_address(item.get('email'))
         ]
-    recipients = stage_emails or [
+    all_stage_emails = []
+    for workflow_stage in (runtime_state.get('stages') or []):
+        if not isinstance(workflow_stage, dict):
+            continue
+        for approver in (workflow_stage.get('approvers') or []):
+            normalized = _normalize_email_address((approver or {}).get('email'))
+            if normalized:
+                all_stage_emails.append(normalized)
+    recipients = stage_emails + all_stage_emails + [
         _normalize_email_address(req.get('request_approver_email')),
         _normalize_email_address(req.get('workflow_primary_approver_email')),
         _normalize_email_address(req.get('db_owner_email')),
@@ -10974,7 +11020,12 @@ def get_database_requests():
             continue
         if flow_mode == 'mine' and not bool(flags.get('is_requester')):
             continue
-        if flow_mode == 'approvals' and not bool(flags.get('can_approve') or flags.get('can_deny')):
+        if flow_mode == 'approvals' and not bool(
+            is_admin
+            or flags.get('is_current_approver')
+            or flags.get('is_any_approver')
+            or flags.get('is_history_actor')
+        ):
             continue
         if requested_user_email and str(req.get('user_email') or '').strip().lower() != requested_user_email:
             continue
@@ -12849,6 +12900,55 @@ def get_request_tickets():
         return _safe_error_response(e)
 
 
+def _filter_tickets_for_user(rows, actor_email):
+    email = str(actor_email or '').strip().lower()
+    if not email:
+        return []
+    filtered = []
+    for row in (rows or []):
+        if not isinstance(row, dict):
+            continue
+        raised_by = str(row.get('raised_by_email') or '').strip().lower()
+        beneficiary = str(row.get('beneficiary_email') or '').strip().lower()
+        if email in (raised_by, beneficiary):
+            filtered.append(row)
+    return filtered
+
+
+@app.route('/api/tickets', methods=['GET'])
+def get_my_request_tickets():
+    try:
+        ident = _current_request_identity()
+        actor_email = str(ident.get('email') or _email_from_saml_session() or '').strip().lower()
+        if not actor_email:
+            return jsonify({'error': 'Authentication required'}), 401
+        filters = _ticket_filters_from_request_args()
+        rows, _total = STORE.list_request_tickets(
+            category=filters['category'],
+            status=filters['status'],
+            q=filters['q'],
+            date_from=filters['date_from'],
+            date_to=filters['date_to'],
+            limit=5000,
+            offset=0,
+        )
+        rows = _filter_tickets_for_user(rows, actor_email)
+        page = max(1, int(filters['page'] or 1))
+        page_size = max(1, min(int(filters['page_size'] or 250), 500))
+        offset = (page - 1) * page_size
+        paged_rows = rows[offset:offset + page_size]
+        return jsonify({
+            'tickets': paged_rows,
+            'page': page,
+            'page_size': page_size,
+            'total': len(rows),
+            'can_delete': False,
+            'actor_email': actor_email,
+        })
+    except Exception as e:
+        return _safe_error_response(e)
+
+
 @app.route('/api/admin/tickets/export', methods=['GET'])
 def export_request_tickets():
     try:
@@ -12895,6 +12995,53 @@ def export_request_tickets():
         except Exception:
             pass
         filename = f"npamx_tickets_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+        return Response(
+            output.getvalue(),
+            mimetype='text/csv',
+            headers={'Content-Disposition': f'attachment; filename=\"{filename}\"'},
+        )
+    except Exception as e:
+        return _safe_error_response(e)
+
+
+@app.route('/api/tickets/export', methods=['GET'])
+def export_my_request_tickets():
+    try:
+        ident = _current_request_identity()
+        actor_email = str(ident.get('email') or _email_from_saml_session() or '').strip().lower()
+        if not actor_email:
+            return jsonify({'error': 'Authentication required'}), 401
+        filters = _ticket_filters_from_request_args()
+        selected_ids = [
+            str(item or '').strip()
+            for item in str(request.args.get('request_ids') or '').split(',')
+            if str(item or '').strip()
+        ]
+        rows, _total = STORE.list_request_tickets(
+            category=filters['category'],
+            status=filters['status'],
+            q=filters['q'],
+            date_from=filters['date_from'],
+            date_to=filters['date_to'],
+            limit=5000,
+            offset=0,
+        )
+        rows = _filter_tickets_for_user(rows, actor_email)
+        if selected_ids:
+            selected = set(selected_ids)
+            rows = [row for row in rows if str(row.get('request_id') or '') in selected]
+        output = io.StringIO()
+        fieldnames = [
+            'request_id', 'category', 'request_type', 'raised_by_email', 'beneficiary_email',
+            'account_id', 'resource_target', 'requested_actions', 'request_reason', 'status',
+            'approval_workflow_name', 'approver_emails', 'approved_by', 'declined_by',
+            'decline_reason', 'requested_at', 'decision_at', 'expires_at', 'deleted_at', 'deleted_by',
+        ]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, '') for key in fieldnames})
+        filename = f"npamx_my_tickets_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
         return Response(
             output.getvalue(),
             mimetype='text/csv',
@@ -14139,7 +14286,20 @@ def list_identity_center_users():
             users = [u for u in users if q in (u.get('email') or '').lower() or q in (u.get('display_name') or '').lower()
                      or q in (u.get('first_name') or '').lower() or q in (u.get('last_name') or '').lower()
                      or q in (u.get('username') or '').lower()]
-        return jsonify({'users': users})
+        profile_by_email = {
+            _normalize_email_address(item.get('email')): item
+            for item in (_load_user_business_profiles().get('profiles') or [])
+            if _normalize_email_address(item.get('email'))
+        }
+        merged = []
+        for user in users:
+            row = dict(user or {})
+            profile = profile_by_email.get(_normalize_email_address(row.get('email')), {}) if isinstance(row, dict) else {}
+            row['team'] = str(profile.get('team') or '').strip()
+            row['location'] = str(profile.get('location') or '').strip()
+            row['manager_email'] = str(profile.get('manager_email') or '').strip()
+            merged.append(row)
+        return jsonify({'users': merged})
     except ValueError as e:
         cached_users = _cached_identity_center_users()
         if cached_users:
@@ -14154,7 +14314,20 @@ def list_identity_center_users():
                     or search in str(u.get('last_name') or '').lower()
                     or search in str(u.get('username') or '').lower()
                 ]
-            return jsonify({'users': users, 'warning': 'Showing cached Identity Center users.'})
+            profile_by_email = {
+                _normalize_email_address(item.get('email')): item
+                for item in (_load_user_business_profiles().get('profiles') or [])
+                if _normalize_email_address(item.get('email'))
+            }
+            merged = []
+            for user in users:
+                row = dict(user or {})
+                profile = profile_by_email.get(_normalize_email_address(row.get('email')), {}) if isinstance(row, dict) else {}
+                row['team'] = str(profile.get('team') or '').strip()
+                row['location'] = str(profile.get('location') or '').strip()
+                row['manager_email'] = str(profile.get('manager_email') or '').strip()
+                merged.append(row)
+            return jsonify({'users': merged, 'warning': 'Showing cached Identity Center users.'})
         return jsonify({'error': 'Identity Center user listing is not configured correctly.', 'users': []}), 400
     except Exception as e:
         try:
@@ -14174,7 +14347,20 @@ def list_identity_center_users():
                     or search in str(u.get('last_name') or '').lower()
                     or search in str(u.get('username') or '').lower()
                 ]
-            return jsonify({'users': users, 'warning': 'Showing cached Identity Center users.'})
+            profile_by_email = {
+                _normalize_email_address(item.get('email')): item
+                for item in (_load_user_business_profiles().get('profiles') or [])
+                if _normalize_email_address(item.get('email'))
+            }
+            merged = []
+            for user in users:
+                row = dict(user or {})
+                profile = profile_by_email.get(_normalize_email_address(row.get('email')), {}) if isinstance(row, dict) else {}
+                row['team'] = str(profile.get('team') or '').strip()
+                row['location'] = str(profile.get('location') or '').strip()
+                row['manager_email'] = str(profile.get('manager_email') or '').strip()
+                merged.append(row)
+            return jsonify({'users': merged, 'warning': 'Showing cached Identity Center users.'})
         return jsonify({'error': 'Failed to load Identity Center users.', 'users': []}), 500
 
 
@@ -18470,13 +18656,14 @@ def manage_user_notifications():
         admin_role = _normalize_pam_role((admin_record or {}).get('role') or '')
         user_group_ids = _user_group_ids_for_email(email)
         is_admin_viewer = _can_access_admin_console_role(admin_role)
-        active_announcements = [
+        notification_announcements = [
             item for item in announcements
             if item.get('active')
             and not item.get('closed')
             and _announcement_targets_user(item, email, role=admin_role, group_ids=user_group_ids)
+            and _announcement_is_recent_for_notifications(item)
         ]
-        active_announcements.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
+        notification_announcements.sort(key=lambda item: str(item.get('updated_at') or ''), reverse=True)
         user_feedback = [item for item in feedback_items if item.get('email') == email and (item.get('admin_reply') or item.get('status') != 'new')]
         user_feedback.sort(key=lambda item: max(str(item.get('admin_reply_at') or ''), str(item.get('status_updated_at') or ''), str(item.get('updated_at') or '')), reverse=True)
         admin_feedback_queue = []
@@ -18485,11 +18672,11 @@ def manage_user_notifications():
             admin_feedback_queue = [item for item in feedback_items if item.get('status') == 'new']
             admin_feedback_queue.sort(key=lambda item: str(item.get('submitted_at') or ''), reverse=True)
             unread_admin_feedback = [item for item in admin_feedback_queue if _feedback_is_unread_for_admin(item, email)]
-        unread_announcements = [item for item in active_announcements if _announcement_is_unread(item, email)]
+        unread_announcements = [item for item in notification_announcements if _announcement_is_unread(item, email)]
         unread_feedback = [item for item in user_feedback if _feedback_has_unread_update(item)]
-        ribbon = active_announcements[0] if active_announcements else None
+        ribbon = notification_announcements[0] if notification_announcements else None
         return jsonify({
-            'announcements': active_announcements,
+            'announcements': unread_announcements,
             'feedback_updates': user_feedback,
             'admin_feedback_queue': admin_feedback_queue,
             'unread_announcement_ids': [item.get('id') for item in unread_announcements],
@@ -21258,6 +21445,29 @@ def _apply_database_workflow_contact_overrides(workflow, *, request_approver_ema
         contacts['db_owner'] = owner_email
         item['db_owner_email'] = owner_email
     item['approver_contacts'] = contacts
+    if owner_email and str(item.get('service_type') or '').strip().lower() == 'database':
+        stages = [dict(stage) for stage in (item.get('stages') or []) if isinstance(stage, dict)]
+        has_owner_stage = any(str(stage.get('approver_type') or '').strip().lower() == 'db_owner' for stage in stages)
+        if not has_owner_stage:
+            owner_stage = {
+                'id': f"stage_db_owner_{uuid.uuid4().hex[:8]}",
+                'name': 'DB Owner Approval',
+                'approver_type': 'db_owner',
+                'primary_email': owner_email,
+                'fallback_email': '',
+                'fallback_reason': '',
+                'approval_mode': 'any_one',
+            }
+            insert_at = len(stages)
+            for idx, stage in enumerate(stages):
+                approver_type = str(stage.get('approver_type') or '').strip().lower()
+                if approver_type == 'primary':
+                    insert_at = idx + 1
+                elif approver_type in ('secondary', 'security_lead'):
+                    insert_at = idx
+                    break
+            stages.insert(insert_at, owner_stage)
+            item['stages'] = stages
     return item
 
 

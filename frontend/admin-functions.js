@@ -693,12 +693,12 @@ function _renderAwsIdcUsers(data) {
     if (!body) return;
     var canEditProfiles = (typeof hasFullAdminControls === 'function') ? hasFullAdminControls() : false;
     if (data && data.error) {
-        body.innerHTML = '<tr><td colspan="5" class="text-danger">' + _escHtml(data.error) + '</td></tr>';
+        body.innerHTML = '<tr><td colspan="6" class="text-danger">' + _escHtml(data.error) + '</td></tr>';
         return;
     }
     var list = Array.isArray(data) ? data : (data && data.users) ? data.users : [];
     if (!list.length) {
-        body.innerHTML = '<tr><td colspan="5" class="text-muted">No users returned.</td></tr>';
+        body.innerHTML = '<tr><td colspan="6" class="text-muted">No users returned.</td></tr>';
         return;
     }
     body.innerHTML = list.map(function(u) {
@@ -711,6 +711,7 @@ function _renderAwsIdcUsers(data) {
             + '<td>' + _escHtml(u.email || '-') + '</td>'
             + '<td>' + _escHtml(u.display_name || '-') + '</td>'
             + '<td>' + _escHtml(full || '-') + '</td>'
+            + '<td>' + _escHtml(u.team || '-') + '</td>'
             + '<td>' + actions + '</td>'
             + '</tr>';
     }).join('');

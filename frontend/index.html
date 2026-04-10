@@ -287,11 +287,11 @@
                         <i class="fas fa-list-alt"></i>
                         <span>My Requests</span>
                     </div>
-                    <div class="nav-item admin-only-nav" id="navItemTickets" onclick="showPage('tickets')">
+                    <div class="nav-item" id="navItemTickets" onclick="showPage('tickets')">
                         <i class="fas fa-ticket-alt"></i>
                         <span>Tickets</span>
                     </div>
-                    <div class="nav-item" id="navItemSessions" onclick="showPage('sessions')">
+                    <div class="nav-item admin-only-nav" id="navItemSessions" onclick="showPage('sessions')">
                         <i class="fas fa-history"></i>
                         <span>Active Sessions</span>
                     </div>
@@ -2065,9 +2065,6 @@
                         <button class="admin-tab-btn" onclick="showAdminTab('integrations', event)">
                             <i class="fas fa-plug"></i> Integrations
                         </button>
-                        <button class="admin-tab-btn" onclick="showAdminTab('dbGovernance', event)">
-                            <i class="fas fa-shield-alt"></i> DB Governance
-                        </button>
                         <button class="admin-tab-btn" onclick="showAdminTab('trends', event)">
                             <i class="fas fa-chart-line"></i> Trends
                         </button>
@@ -2283,9 +2280,9 @@
                         <div style="overflow:auto; max-height: 520px;">
                             <table class="users-table" style="width:100%;">
                                 <thead>
-                                    <tr><th>Username</th><th>Email</th><th>Display name</th><th>First / Last</th><th>Actions</th></tr>
+                                    <tr><th>Username</th><th>Email</th><th>Display name</th><th>First / Last</th><th>Team</th><th>Actions</th></tr>
                                 </thead>
-                                <tbody id="awsIdcUsersBody"><tr><td colspan="5" class="text-muted">No data yet. Click Refresh.</td></tr></tbody>
+                                <tbody id="awsIdcUsersBody"><tr><td colspan="6" class="text-muted">No data yet. Click Refresh.</td></tr></tbody>
                             </table>
                         </div>
                     </div>
@@ -2366,6 +2363,9 @@
                         </button>
                         <button type="button" class="btn-secondary btn-pam admin-subtab" id="pendingApprovalsSubTab" onclick="showManagementSubTab('pendingApprovals')">
                             <i class="fas fa-user-clock"></i> Pending Approvals
+                        </button>
+                        <button type="button" class="btn-secondary btn-pam admin-subtab" id="ticketsManagementSubTab" onclick="showManagementSubTab('ticketsManagement')">
+                            <i class="fas fa-ticket-alt"></i> Tickets Management
                         </button>
                         <button type="button" class="btn-secondary btn-pam admin-subtab" id="featuresSubTab" onclick="showManagementSubTab('features')">
                             <i class="fas fa-toggle-on"></i> Features
@@ -2962,6 +2962,50 @@
                             </div>
                         </div>
                     </div>
+
+                    <div id="ticketsManagementSection" class="admin-tab-pam-inner" style="display: none; font-family: 'Inter', sans-serif;">
+                        <div class="security-management" style="padding: 20px;">
+                            <div class="section-header">
+                                <div>
+                                    <h3><i class="fas fa-ticket-alt"></i> Tickets Management</h3>
+                                    <p class="admin-role-hint">Admin view for all user tickets and request records. The left-side Tickets page remains available, and this panel keeps the same data in the admin console.</p>
+                                </div>
+                                <div class="header-actions" style="display:flex; gap:10px; flex-wrap:wrap;">
+                                    <input type="search" id="ticketsManagementSearchInput" placeholder="Search requester, target, action" oninput="debouncedLoadAdminTicketsManagement()">
+                                    <select id="ticketsManagementStatusFilter" onchange="loadAdminTicketsManagement()">
+                                        <option value="">All status</option>
+                                        <option value="pending">Pending</option>
+                                        <option value="approved">Approved</option>
+                                        <option value="rejected">Rejected</option>
+                                        <option value="expired">Expired</option>
+                                        <option value="revoked">Revoked</option>
+                                    </select>
+                                    <button type="button" class="btn-secondary btn-pam" onclick="loadAdminTicketsManagement()"><i class="fas fa-sync-alt"></i> Refresh</button>
+                                    <button type="button" class="btn-secondary btn-pam" onclick="showPage('tickets')"><i class="fas fa-arrow-up-right-from-square"></i> Open Full Tickets Page</button>
+                                </div>
+                            </div>
+                            <div id="ticketsManagementStatus" class="profile-status" hidden></div>
+                            <div style="overflow-x:auto;">
+                                <table class="admin-table" style="width:100%; min-width: 1120px;">
+                                    <thead>
+                                        <tr>
+                                            <th>Requested</th>
+                                            <th>Category</th>
+                                            <th>Requester</th>
+                                            <th>Beneficiary</th>
+                                            <th>Target</th>
+                                            <th>Requested Actions</th>
+                                            <th>Status</th>
+                                            <th>Approver / Decision</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ticketsManagementTableBody">
+                                        <tr><td colspan="8" class="text-muted">Open this tab to load all tickets.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div id="adminDbGovernanceTab" class="admin-tab admin-tab-pam" style="display: none;">
@@ -3086,6 +3130,7 @@
                                 <button type="button" class="btn-danger btn-pam" id="adminRevokeDbSessionsBtn" onclick="revokeSelectedDatabaseSessions()" style="display: none;"><i class="fas fa-times-circle"></i> Revoke selected</button>
                             </div>
                         </div>
+                        <div id="adminDbSessionsStatus" class="profile-status" hidden></div>
                         <div class="db-sessions-table-wrap">
                             <table class="users-table" id="adminDbSessionsTable">
                                 <thead>
@@ -3119,7 +3164,7 @@
                             <i class="fas fa-shield-alt"></i> Guardrails
                         </button>
                         <button type="button" class="btn-secondary btn-pam admin-subtab" id="dbUsersSubTab" onclick="showSecuritySubTab('dbUsers')">
-                            <i class="fas fa-database"></i> DB Users
+                            <i class="fas fa-shield-alt"></i> DB Governance
                         </button>
                         <button type="button" class="btn-secondary btn-pam admin-subtab" id="auditSubTab" onclick="showSecuritySubTab('audit')">
                             <i class="fas fa-clipboard-list"></i> Audit Logs
@@ -3721,10 +3766,11 @@
 
                     <div id="dbUsersSection" style="display: none;">
                         <div class="security-management" style="padding: 20px;">
+                            <div id="dbGovernanceSecurityMount"></div>
                             <div class="section-header">
                                 <div>
                                     <h3><i class="fas fa-database"></i> Database User Inventory</h3>
-                                    <p class="admin-role-hint">Review users present inside Vault-managed databases without logging into the Vault EC2 host.</p>
+                                    <p class="admin-role-hint">Live inventory view kept under the same DB Governance tab so admins can review external governance findings and local Vault-managed database users from one place.</p>
                                 </div>
                                 <div class="header-actions" style="display:flex; gap:10px; flex-wrap:wrap;">
                                     <button type="button" class="btn-secondary btn-pam" onclick="selectAllDbUserInventoryConnections(true)">
@@ -3827,10 +3873,10 @@
 
                     <!-- Audit Section -->
                     <div id="auditSection" style="display: none;">
-                    <div class="audit-logs">
-                        <div class="audit-header">
-                            <h3>Audit Logs</h3>
-                            <div class="audit-filters">
+                        <div class="audit-logs">
+                            <div class="audit-header">
+                                <h3>Audit Logs</h3>
+                                <div class="audit-filters">
                                 <select id="auditFilter">
                                     <option value="all">All Events</option>
                                     <option value="login">Login Events</option>
@@ -3843,15 +3889,9 @@
                                 <button class="btn-secondary btn-pam" onclick="filterAuditLogs()">
                                     <i class="fas fa-filter"></i> Filter
                                 </button>
-                                <button class="btn-secondary btn-pam" id="auditExportIntegrationAction" onclick="configureIntegration('audit_export')">
-                                    <i class="fas fa-cog"></i> Logs Bucket
-                                </button>
-                                <button class="btn-primary btn-pam" onclick="exportAuditLogsToS3()">
-                                    <i class="fas fa-file-export"></i> Export to S3
-                                </button>
                             </div>
                         </div>
-                        <div class="integration-status disconnected" id="auditExportIntegrationStatus" style="margin-bottom: 12px;"><i class="fas fa-times-circle"></i> Not Configured</div>
+                        <div class="integration-status connected" id="auditExportIntegrationStatus" style="margin-bottom: 12px;"><i class="fas fa-clock"></i> Showing only the last 30 days here. Older audit data is archived through the S3 activity archive flow.</div>
                         
                         <div class="audit-table">
                             <table>
@@ -4389,7 +4429,7 @@
         <div id="profileModal" class="modal modal-pam modal-lg">
             <div class="modal-header">
                 <h3><i class="fas fa-user-shield"></i> My Profile</h3>
-                <button class="modal-close" onclick="closeModal()">&times;</button>
+                <button id="profileModalCloseBtn" class="modal-close" onclick="closeModal()">&times;</button>
             </div>
             <div class="modal-body">
                 <div id="profileStatus" class="profile-status" hidden></div>
@@ -4423,7 +4463,7 @@
                 <div class="profile-section" id="desktopAgentUserPanel" style="display:none;">
                     <div class="section-header">
                         <h4><i class="fas fa-laptop-code"></i> NPAMX Desktop Agent</h4>
-                        <p>Current version opens a small local status window. Download it once, download your profile once, then pair it with NPAMX.</p>
+                        <p>Use the agent for database logins and DBeaver handoff. Download the app once, download your profile once, then pair it.</p>
                     </div>
                     <ol style="margin: 0 0 12px 18px; color: var(--text-primary);">
                         <li>Download the agent for your OS.</li>
@@ -4432,9 +4472,7 @@
                         <li>Paste the code below and click Connect Agent.</li>
                         <li>Keep the local agent window running while using database tools.</li>
                     </ol>
-                    <div class="home-summary-empty" style="text-align:left; margin-bottom:8px;">
-                        Advanced users can still use commands such as `login`, `run`, `sessions`, and `session-credentials`, but the preferred path is the local agent window.
-                    </div>
+                    <div class="home-summary-empty" style="text-align:left; margin-bottom:8px;">The local agent window is the recommended path for day-to-day use.</div>
                     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
                         <button class="btn-secondary btn-pam" id="desktopAgentDownloadWindowsBtn" onclick="openDesktopAgentDownload('windows')" disabled><i class="fab fa-windows"></i> Download Agent for Windows</button>
                         <button class="btn-secondary btn-pam" id="desktopAgentDownloadMacBtn" onclick="openDesktopAgentDownload('macos')" disabled><i class="fab fa-apple"></i> Download Agent for macOS</button>
@@ -4449,15 +4487,13 @@
                     <div id="desktopAgentUserHint" class="home-summary-empty" style="text-align:left;">
                         Package links will appear after admin configures Desktop Agent integration.
                     </div>
-                    <p style="margin:10px 0 0 0; color:var(--text-secondary); font-size:12px;">
-                        This is the desktop-window MVP. Full tray integration and deeper DBeaver automation will be added in the next phase.
-                    </p>
+                    <p style="margin:10px 0 0 0; color:var(--text-secondary); font-size:12px;">Keep the agent running while you use database tools.</p>
                 </div>
 
                 <div class="profile-section">
                     <div class="section-header">
                         <h4><i class="fas fa-address-card"></i> Workforce Profile</h4>
-                        <p>We use this information for approvals, routing, and future user-specific policy decisions. It is required for database access requests.</p>
+                        <p>Confirm your manager, enter your team name, and save. NPAMX uses this for approvals, routing, and user tracking.</p>
                     </div>
                     <div id="profileBusinessProfileBanner" class="profile-status" hidden></div>
                     <form id="profileBusinessProfileForm" class="profile-form-grid">
@@ -4472,7 +4508,7 @@
                             <div id="profileRmChangeHint" class="profile-hint" style="margin-top:8px;"></div>
                         </div>
                         <div class="form-group">
-                            <label>Department <span class="required">*</span></label>
+                            <label>Team Name <span class="required">*</span></label>
                             <input type="text" id="profileTeam" placeholder="e.g. SecOps" required>
                         </div>
                         <div class="form-group">
